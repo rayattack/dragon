@@ -1,0 +1,618 @@
+from unittest import TestCase, main
+from json import encode, decode
+
+
+class User {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+
+class DecodeBasicTests(TestCase) {
+    def test_scalars() {
+        const u: User = decode[User]('{"id": 7, "tag": "ok", "active": true}'.encode("utf-8"))
+        self.assertEqual(u.id, 7)
+        self.assertEqual(u.tag, "ok")
+        self.assertTrue(u.active)
+    }
+
+    def test_out_of_order() {
+        const u: User = decode[User]('{"tag": "x", "active": false, "id": 3}'.encode("utf-8"))
+        self.assertEqual(u.id, 3)
+        self.assertEqual(u.tag, "x")
+        self.assertFalse(u.active)
+    }
+
+    def test_skips_unrequested_keys() {
+        const body: bytes = '{"id": 1, "extra": {"a": [1,2,3], "b": "zzz"}, "tag": "t", "junk": 999, "active": true}'.encode("utf-8")
+        const u: User = decode[User](body)
+        self.assertEqual(u.id, 1)
+        self.assertEqual(u.tag, "t")
+        self.assertTrue(u.active)
+    }
+}
+
+
+class DecodeAdversarialTests(TestCase) {
+    def test_skip_key_no_leak() {
+        const body: bytes = '{"id": 42, "k0": "aaaaaaaa", "k1": [1,2,3,4,5], "k2": {"n": {"d": "deep"}}, "tag": "hot", "k3": 3.14159, "active": true, "k4": null}'.encode("utf-8")
+        i: int = 0
+        while i < 5000 {
+            const u: User = decode[User](body)
+            self.assertEqual(u.id, 42)
+            i = i + 1
+        }
+    }
+
+    def test_type_mismatch_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"id": "not-an-int", "tag": "t", "active": true}'.encode("utf-8"))
+        })
+    }
+
+    def test_missing_required_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"tag": "t", "active": true}'.encode("utf-8"))
+        })
+    }
+
+    def test_malformed_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"id": 1, "tag": "t", "active": tru'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeOwnershipTests(TestCase) {
+    # str fields arrive owned; decode/drop loop must not leak or double-free.
+    def test_str_field_ownership() {
+        i: int = 0
+        while i < 5000 {
+            const u: User = decode[User]('{"id": 0, "tag": "some-owned-string-value", "active": false}'.encode("utf-8"))
+            self.assertEqual(u.tag, "some-owned-string-value")
+            i = i + 1
+        }
+    }
+}
+
+
+class Team {
+    def(name: str, ids: list[int], flags: list[bool]) {
+        self.name = name
+        self.ids = ids
+        self.flags = flags
+    }
+}
+
+
+class DecodeListTests(TestCase) {
+    def test_scalar_lists() {
+        const t: Team = decode[Team]('{"name":"x","ids":[1,2,3],"flags":[true,false,true]}'.encode("utf-8"))
+        self.assertEqual(t.name, "x")
+        self.assertEqual(len(t.ids), 3)
+        self.assertEqual(t.ids[0], 1)
+        self.assertEqual(t.ids[2], 3)
+        self.assertFalse(t.flags[1])
+    }
+
+    def test_empty_list() {
+        const t: Team = decode[Team]('{"name":"y","ids":[],"flags":[]}'.encode("utf-8"))
+        self.assertEqual(len(t.ids), 0)
+    }
+
+    def test_list_no_leak() {
+        i: int = 0
+        while i < 3000 {
+            const t: Team = decode[Team]('{"name":"z","ids":[1,2,3,4,5],"flags":[true]}'.encode("utf-8"))
+            self.assertEqual(len(t.ids), 5)
+            i = i + 1
+        }
+    }
+}
+
+
+class Address {
+    def(city: str, zip: int) {
+        self.city = city
+        self.zip = zip
+    }
+}
+
+
+class Person {
+    def(name: str, home: Address) {
+        self.name = name
+        self.home = home
+    }
+}
+
+
+class DecodeNestedTests(TestCase) {
+    def test_nested_object() {
+        const p: Person = decode[Person]('{"name":"ada","home":{"city":"lon","zip":90}}'.encode("utf-8"))
+        self.assertEqual(p.name, "ada")
+        self.assertEqual(p.home.city, "lon")
+        self.assertEqual(p.home.zip, 90)
+    }
+
+    def test_nested_out_of_order() {
+        const p: Person = decode[Person]('{"home":{"zip":7,"city":"x"},"name":"bo"}'.encode("utf-8"))
+        self.assertEqual(p.home.zip, 7)
+        self.assertEqual(p.home.city, "x")
+    }
+
+    def test_nested_missing_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const p: Person = decode[Person]('{"name":"x"}'.encode("utf-8"))
+        })
+    }
+
+    def test_nested_no_leak() {
+        i: int = 0
+        while i < 3000 {
+            const p: Person = decode[Person]('{"name":"n","home":{"city":"cccc","zip":1}}'.encode("utf-8"))
+            self.assertEqual(p.home.zip, 1)
+            i = i + 1
+        }
+    }
+}
+
+
+class Config {
+    def(host: str, port: int = 8080, debug: bool = false, tags: list[str] = []) {
+        self.host = host
+        self.port = port
+        self.debug = debug
+        self.tags = tags
+    }
+}
+
+
+class DecodeOptionalTests(TestCase) {
+    def test_defaults_apply() {
+        const c: Config = decode[Config]('{"host":"h"}'.encode("utf-8"))
+        self.assertEqual(c.host, "h")
+        self.assertEqual(c.port, 8080)
+        self.assertFalse(c.debug)
+        self.assertEqual(len(c.tags), 0)
+    }
+
+    def test_overrides() {
+        const c: Config = decode[Config]('{"host":"h","port":9090,"debug":true,"tags":["a","b"]}'.encode("utf-8"))
+        self.assertEqual(c.port, 9090)
+        self.assertTrue(c.debug)
+        self.assertEqual(len(c.tags), 2)
+    }
+
+    def test_required_still_enforced() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const c: Config = decode[Config]('{"port":1}'.encode("utf-8"))
+        })
+    }
+}
+
+
+class Widget {
+    def(name: str, count: Optional[int], note: Optional[str]) {
+        self.name = name
+        self.count = count
+        self.note = note
+    }
+}
+
+
+class Node {
+    def(val: int, next: Optional[Node]) {
+        self.val = val
+        self.next = next
+    }
+}
+
+
+class DecodeOptionalTypeTests(TestCase) {
+    def test_optional_present() {
+        const w: Widget = decode[Widget]('{"name":"x","count":5,"note":"hi"}'.encode("utf-8"))
+        const c: Optional[int] = w.count
+        self.assertIsNotNone(c)
+        if c is not None {
+            const ci: int = c
+            self.assertEqual(ci, 5)
+        }
+    }
+
+    def test_optional_null() {
+        const w: Widget = decode[Widget]('{"name":"x","count":null,"note":null}'.encode("utf-8"))
+        self.assertIsNone(w.count)
+        self.assertIsNone(w.note)
+    }
+
+    def test_optional_absent() {
+        const w: Widget = decode[Widget]('{"name":"x"}'.encode("utf-8"))
+        self.assertIsNone(w.count)
+        self.assertIsNone(w.note)
+    }
+
+    def test_recursive_optional() {
+        const n: Node = decode[Node]('{"val":1,"next":{"val":2,"next":null}}'.encode("utf-8"))
+        self.assertEqual(n.val, 1)
+        const nx: Optional[Node] = n.next
+        self.assertIsNotNone(nx)
+        if nx is not None {
+            const inner: Node = nx
+            self.assertEqual(inner.val, 2)
+            self.assertIsNone(inner.next)
+        }
+    }
+
+    def test_optional_no_leak() {
+        i: int = 0
+        while i < 3000 {
+            const w: Widget = decode[Widget]('{"name":"n","count":7,"note":"q"}'.encode("utf-8"))
+            self.assertIsNotNone(w.count)
+            i = i + 1
+        }
+    }
+}
+
+
+class EncUser {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+
+class EncTeam {
+    def(name: str, scores: list[int]) {
+        self.name = name
+        self.scores = scores
+    }
+}
+
+
+class EncAddress {
+    def(street: str, zip: str) {
+        self.street = street
+        self.zip = zip
+    }
+}
+
+
+class EncPerson {
+    def(name: str, home: EncAddress) {
+        self.name = name
+        self.home = home
+    }
+}
+
+
+class EncWidget {
+    def(id: int, label: str | None) {
+        self.id = id
+        self.label = label
+    }
+}
+
+
+class EncodeBasicTests(TestCase) {
+    """json.encode[T] (D052) - box-free schema-directed encode, the mirror of
+    decode[T]. Also covers top-level list[T] in both directions"""
+
+    def test_flat_object_exact() {
+        const u: EncUser = EncUser(7, "hi", true)
+        self.assertEqual(encode[EncUser](u).decode("utf-8"),
+                         "{\"id\":7,\"tag\":\"hi\",\"active\":true}")
+    }
+
+    def test_escaping_roundtrip() {
+        const u: EncUser = EncUser(42, "wa\"ha\\x", false)
+        const back: EncUser = decode[EncUser](encode[EncUser](u))
+        self.assertEqual(back.id, 42)
+        self.assertEqual(back.tag, "wa\"ha\\x")
+        self.assertFalse(back.active)
+    }
+
+    def test_list_field() {
+        const t: EncTeam = EncTeam("reds", [3, 1, 4])
+        self.assertEqual(encode[EncTeam](t).decode("utf-8"),
+                         "{\"name\":\"reds\",\"scores\":[3,1,4]}")
+        const back: EncTeam = decode[EncTeam](encode[EncTeam](t))
+        self.assertEqual(back.scores[2], 4)
+    }
+}
+
+
+class EncodeNestedTests(TestCase) {
+    def test_nested_object_exact() {
+        const p: EncPerson = EncPerson("ada", EncAddress("mill lane", "0001"))
+        self.assertEqual(encode[EncPerson](p).decode("utf-8"),
+                         "{\"name\":\"ada\",\"home\":{\"street\":\"mill lane\",\"zip\":\"0001\"}}")
+    }
+
+    def test_nested_roundtrip() {
+        const p: EncPerson = EncPerson("ada", EncAddress("mill lane", "0001"))
+        const back: EncPerson = decode[EncPerson](encode[EncPerson](p))
+        self.assertEqual(back.home.zip, "0001")
+    }
+}
+
+
+class EncodeOptionalTests(TestCase) {
+    def test_optional_present() {
+        const wgt: EncWidget = EncWidget(1, "on")
+        self.assertEqual(encode[EncWidget](wgt).decode("utf-8"), "{\"id\":1,\"label\":\"on\"}")
+    }
+
+    def test_optional_null() {
+        const wgt: EncWidget = EncWidget(2, None)
+        self.assertEqual(encode[EncWidget](wgt).decode("utf-8"), "{\"id\":2,\"label\":null}")
+        const back: EncWidget = decode[EncWidget](encode[EncWidget](wgt))
+        self.assertEqual(back.id, 2)
+    }
+}
+
+
+class Ratings {
+    def(name: str, scores: dict[str, int], tail: int) {
+        self.name = name
+        self.scores = scores
+        self.tail = tail
+    }
+}
+
+
+class DictTests(TestCase) {
+    def test_dict_field_exact_and_roundtrip() {
+        const one: dict[str, int] = {"k": 7}
+        self.assertEqual(encode[Ratings](Ratings("n", one, 5)).decode("utf-8"),
+                         "{\"name\":\"n\",\"scores\":{\"k\":7},\"tail\":5}")
+        const back: Ratings = decode[Ratings](encode[Ratings](Ratings("n", one, 5)))
+        self.assertEqual(back.scores["k"], 7)
+        self.assertEqual(back.tail, 5)
+    }
+
+    def test_empty_dict_field_with_trailing_field() {
+        const nothing: dict[str, int] = {}
+        const back: Ratings = decode[Ratings](encode[Ratings](Ratings("e", nothing, 9)))
+        self.assertEqual(len(back.scores), 0)
+        self.assertEqual(back.tail, 9)
+    }
+
+    def test_top_level_dict() {
+        const d: dict[str, str] = {"x": "one", "y": "two"}
+        const back: dict[str, str] = decode[dict[str, str]](encode[dict[str, str]](d))
+        self.assertEqual(back["y"], "two")
+        self.assertEqual(len(back), 2)
+    }
+}
+
+
+class TopLevelListTests(TestCase) {
+    def test_encode_list_exact() {
+        const users: list[EncUser] = [EncUser(1, "a", true), EncUser(2, "b", false)]
+        self.assertEqual(encode[list[EncUser]](users).decode("utf-8"),
+                         "[{\"id\":1,\"tag\":\"a\",\"active\":true},{\"id\":2,\"tag\":\"b\",\"active\":false}]")
+    }
+
+    def test_list_roundtrip() {
+        const users: list[EncUser] = [EncUser(1, "a", true), EncUser(2, "b", false), EncUser(3, "c", true)]
+        const back: list[EncUser] = decode[list[EncUser]](encode[list[EncUser]](users))
+        self.assertEqual(len(back), 3)
+        self.assertEqual(back[0].id, 1)
+        self.assertEqual(back[1].tag, "b")
+        self.assertTrue(back[2].active)
+    }
+
+    def test_decode_empty_list() {
+        const empty: list[EncUser] = decode[list[EncUser]](b"[]")
+        self.assertEqual(len(empty), 0)
+    }
+
+    def test_decode_list_whitespace() {
+        const back: list[EncUser] = decode[list[EncUser]](b" [ {\"id\": 9, \"tag\": \"z\", \"active\": false} ] ")
+        self.assertEqual(len(back), 1)
+        self.assertEqual(back[0].id, 9)
+    }
+}
+
+
+class TopLevelScalarTests(TestCase) {
+    def test_scalar_roundtrip() {
+        self.assertEqual(encode[int](42).decode("utf-8"), "42")
+        self.assertEqual(decode[int](b"42"), 42)
+        self.assertEqual(encode[str]("hi\n").decode("utf-8"), "\"hi\\n\"")
+        self.assertEqual(decode[str](b"\"hi\\n\""), "hi\n")
+        self.assertEqual(encode[bool](true).decode("utf-8"), "true")
+        self.assertTrue(decode[bool](b"true"))
+    }
+
+    def test_scalar_list_roundtrip() {
+        self.assertEqual(encode[list[int]]([1, 2, 3]).decode("utf-8"), "[1,2,3]")
+        const xs: list[int] = decode[list[int]](b"[1, 2, 3]")
+        self.assertEqual(len(xs), 3)
+        self.assertEqual(xs[2], 3)
+        self.assertEqual(encode[list[str]](["a", "b"]).decode("utf-8"), "[\"a\",\"b\"]")
+    }
+}
+
+
+class EncodeOwnershipTests(TestCase) {
+    def test_roundtrip_no_leak() {
+        i: int = 0
+        while i < 2000 {
+            const u: EncUser = EncUser(i, "owned-tag-" + str(i), true)
+            const back: EncUser = decode[EncUser](encode[EncUser](u))
+            self.assertEqual(back.id, i)
+            i = i + 1
+        }
+    }
+}
+
+
+def route[T](body: bytes) -> T {
+    return decode[T](body)
+}
+
+
+class DecodeAnyTests(TestCase) {
+    def test_scalar_document() {
+        const v: Any = decode[Any]("42".encode("utf-8"))
+        self.assertTrue(isinstance(v, int))
+        const n: int = v
+        self.assertEqual(n, 42)
+    }
+
+    def test_object_document() {
+        const v: Any = decode[Any]('{"k": "v"}'.encode("utf-8"))
+        self.assertTrue(isinstance(v, dict))
+        const d: dict[str, Any] = v
+        const s: str = d["k"]
+        self.assertEqual(s, "v")
+    }
+
+    def test_array_document() {
+        const v: Any = decode[Any]("[1, 2]".encode("utf-8"))
+        self.assertTrue(isinstance(v, list))
+    }
+
+    def test_trailing_garbage_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = decode[Any]("42 99".encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeListAnyTests(TestCase) {
+    def test_heterogeneous_array() {
+        const xs: list[Any] = decode[list[Any]]('[1, "two", true]'.encode("utf-8"))
+        self.assertEqual(len(xs), 3)
+        const s: str = xs[1]
+        self.assertEqual(s, "two")
+        const b: bool = xs[2]
+        self.assertTrue(b)
+    }
+
+    def test_empty_array() {
+        const xs: list[Any] = decode[list[Any]]("[]".encode("utf-8"))
+        self.assertEqual(len(xs), 0)
+    }
+
+    def test_nested_objects_in_array() {
+        const xs: list[Any] = decode[list[Any]]('[{"n": 1}, {"n": 2}]'.encode("utf-8"))
+        const second: dict[str, Any] = xs[1]
+        const n: int = second["n"]
+        self.assertEqual(n, 2)
+    }
+
+    def test_top_level_object_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const xs: list[Any] = decode[list[Any]]('{"a": 1}'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeDictAnyTests(TestCase) {
+    def test_mixed_scalars() {
+        const body: bytes = '{"name": "ada", "n": 3, "pi": 2.5, "ok": true}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        self.assertEqual(len(d), 4)
+        const name: str = d["name"]
+        self.assertEqual(name, "ada")
+        const n: int = d["n"]
+        self.assertEqual(n, 3)
+        const pi: float = d["pi"]
+        self.assertEqual(pi, 2.5)
+        const ok: bool = d["ok"]
+        self.assertTrue(ok)
+    }
+
+    def test_isinstance_narrowing() {
+        const body: bytes = '{"v": 7}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        const v: Any = d["v"]
+        self.assertTrue(isinstance(v, int))
+        self.assertFalse(isinstance(v, str))
+    }
+
+    def test_nested_list_value() {
+        const body: bytes = '{"xs": [10, 20, 30]}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        const v: Any = d["xs"]
+        self.assertTrue(isinstance(v, list))
+        const xs: list[Any] = v
+        self.assertEqual(len(xs), 3)
+        const second: int = xs[1]
+        self.assertEqual(second, 20)
+    }
+
+    def test_nested_object_value() {
+        const body: bytes = '{"inner": {"k": "deep"}}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        const v: Any = d["inner"]
+        self.assertTrue(isinstance(v, dict))
+        const inner: dict[str, Any] = v
+        const k: str = inner["k"]
+        self.assertEqual(k, "deep")
+    }
+
+    def test_empty_object() {
+        const d: dict[str, Any] = decode[dict[str, Any]]("{}".encode("utf-8"))
+        self.assertEqual(len(d), 0)
+    }
+
+    def test_top_level_array_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const d: dict[str, Any] = decode[dict[str, Any]]("[1, 2]".encode("utf-8"))
+        })
+    }
+
+    def test_trailing_garbage_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const d: dict[str, Any] = decode[dict[str, Any]]('{"a": 1} x'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeAnyGenericDoorTests(TestCase) {
+    def test_transitive_dict_composition() {
+        const d: dict[str, Any] = route[dict[str, Any]]('{"ok": true, "n": 5}'.encode("utf-8"))
+        self.assertEqual(len(d), 2)
+        const n: int = d["n"]
+        self.assertEqual(n, 5)
+    }
+
+    def test_transitive_any_composition() {
+        const v: Any = route[Any]('"plain"'.encode("utf-8"))
+        const s: str = v
+        self.assertEqual(s, "plain")
+    }
+
+    def test_box_free_stamps_coexist() {
+        const d: dict[str, int] = decode[dict[str, int]]('{"a": 1, "b": 2}'.encode("utf-8"))
+        self.assertEqual(d["a"], 1)
+        self.assertEqual(d["b"], 2)
+        const ns: list[int] = decode[list[int]]("[7, 8]".encode("utf-8"))
+        self.assertEqual(ns[1], 8)
+        const any_d: dict[str, Any] = decode[dict[str, Any]]('{"a": 1}'.encode("utf-8"))
+        const a: int = any_d["a"]
+        self.assertEqual(a, 1)
+    }
+}
+
+
+main([DecodeBasicTests(), DecodeAdversarialTests(), DecodeOwnershipTests(),
+      DecodeListTests(), DecodeNestedTests(), DecodeOptionalTests(),
+      DecodeOptionalTypeTests(),
+      EncodeBasicTests(), EncodeNestedTests(), EncodeOptionalTests(),
+      DictTests(), TopLevelListTests(), TopLevelScalarTests(), EncodeOwnershipTests(),
+      DecodeAnyTests(), DecodeListAnyTests(), DecodeDictAnyTests(),
+      DecodeAnyGenericDoorTests()])

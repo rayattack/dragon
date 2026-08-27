@@ -1,0 +1,90 @@
+from unittest import TestCase, main
+from collide_classes_one import one_point, one_greet_via_base
+from collide_classes_two import two_point, two_greet_via_base, probe_two
+from collide_generics_one import one_box_int, one_box_str
+from collide_generics_two import two_box_int
+from collide_generics_importer import importer_box_int
+from collide_generic_methods_one import one_wrap
+from collide_generic_methods_two import two_wrap
+from collide_generic_methods_importer import importer_wrap
+from collide_decode_one import one_roundtrip
+from collide_decode_two import two_roundtrip
+from collide_decode_importer import importer_decode
+
+
+class CollideClassesTests(TestCase) {
+    """Same-named classes in different modules must not share compiler metadata.
+    Pre-fix: bare-name layout/vtable/exception maps, last write wins."""
+
+    def test_field_layouts_stay_per_module() {
+        self.assertEqual(one_point(), 7)
+        self.assertEqual(two_point(), "axis:9")
+    }
+
+    def test_exception_identity_stays_per_module() {
+        self.assertEqual(probe_two(), "passed-through")
+    }
+
+    def test_virtual_dispatch_stays_per_module() {
+        self.assertEqual(one_greet_via_base(), "one-kid")
+        self.assertEqual(two_greet_via_base(), "two-kid")
+    }
+}
+
+
+class CollideGenericsTests(TestCase) {
+    """Same-named generic templates in different modules must stamp their own.
+    Pre-fix: the template registries folded across modules, first dep wins."""
+
+    def test_one_stamps_its_own_template() {
+        self.assertEqual(one_box_int(), 7)
+        self.assertEqual(one_box_str(), "alpha")
+    }
+
+    def test_two_stamps_its_own_template() {
+        self.assertEqual(two_box_int(), 104)
+    }
+
+    def test_import_pins_template_across_registration_order() {
+        self.assertEqual(importer_box_int(), 102)
+    }
+}
+
+
+class CollideGenericMethodsTests(TestCase) {
+    """Generic method stamps must land in their own class across modules.
+    Pre-fix: the stamp request carried only a bare owning-class name."""
+
+    def test_one_stamps_into_its_own_holder() {
+        self.assertEqual(one_wrap(), "one:5")
+    }
+
+    def test_two_stamps_into_its_own_holder() {
+        self.assertEqual(two_wrap(), "9#x")
+    }
+
+    def test_imported_holder_uses_its_own_template() {
+        self.assertEqual(importer_wrap(), "4#6")
+    }
+}
+
+
+class CollideDecodeTests(TestCase) {
+    """decode[T] must synthesize against T's own class, not a same-named one.
+    Pre-fix: the synthesizer read fields from a first-wins by-name registry."""
+
+    def test_one_decodes_its_own_shape() {
+        self.assertEqual(one_roundtrip(), "seven:7")
+    }
+
+    def test_two_decodes_its_own_shape() {
+        self.assertEqual(two_roundtrip(), "ex:9")
+    }
+
+    def test_imported_class_pins_decoder_across_fold_order() {
+        self.assertEqual(importer_decode(), "im:4")
+    }
+}
+
+
+main([CollideClassesTests(), CollideGenericsTests(), CollideGenericMethodsTests(), CollideDecodeTests()])

@@ -1,0 +1,175 @@
+from unittest import TestCase, main
+from html import HTML
+
+
+class Node {
+    def(label: str) {
+        self.label = label
+    }
+}
+
+
+def render(n: Node) -> HTML {
+    return template[HTML] { <span class="x">!{n.label}</span> }
+}
+
+
+def munge(s: str) -> str {
+    s = s.replace("&", "&amp;")
+    s = s.replace("<", "&lt;")
+    return s
+}
+
+
+class BorrowedFieldRCTests(TestCase) {
+    """Regression test for the borrowed-slot reassignment over-decref.
+
+    Reassigning a heap-refcounted PARAMETER (or any borrowed slot - loop variable,
+    capture, self) used to decref the slot's incoming value on the first write. The
+    incoming value is borrowed (the caller owns it), so the decref stole a refcount
+    from a caller-owned object. Benign when the argument was an owned temporary
+    (freed anyway), but it corrupted long-lived references - the classic break being
+    a class field interpolated into a `template[HTML]`:
+
+        template[HTML] { <span>!{chapter.title}</span> }
+
+    auto-escapes `chapter.title` via `HTML.escape(s)`, whose body is `s = s.replace(...)`.
+    `str.replace` always returns a fresh string, so the first `s = ...` dropped a
+    refcount on the *field* itself. Rendered repeatedly (e.g. a docs sidebar built
+    from a module-global `const list[Chapter]`), the field's string was freed and its
+    heap slot reused, surfacing as gibberish/garbage in later renders.
+
+    The fix: the first reassignment of a borrowed slot must not decref the borrowed
+    value (it is the caller's), and the slot becomes owned thereafter.
+    """
+
+    def test_template_html_escape_preserves_field() {
+        nodes: list[Node] = [Node(f"alpha{0}"), Node(f"beta{1}"),
+                             Node(f"gamma{2}"), Node(f"delta{3}")]
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const h: HTML = render(nd)
+            }
+            r = r + 1
+        }
+        self.assertEqual(nodes[0].label, "alpha0")
+        self.assertEqual(nodes[1].label, "beta1")
+        self.assertEqual(nodes[2].label, "gamma2")
+        self.assertEqual(nodes[3].label, "delta3")
+    }
+
+    def test_direct_escape_preserves_field() {
+        nodes: list[Node] = [Node(f"one{1}"), Node(f"two{2}"), Node(f"three{3}")]
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const e: str = HTML.escape(nd.label)
+                self.assertTrue(len(e) >= 0)
+            }
+            r = r + 1
+        }
+        self.assertEqual(nodes[0].label, "one1")
+        self.assertEqual(nodes[1].label, "two2")
+        self.assertEqual(nodes[2].label, "three3")
+    }
+
+    def test_reassigned_borrowed_param_preserves_arg() {
+        nodes: list[Node] = [Node(f"k{0}"), Node(f"k{1}")]
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const out: str = munge(nd.label)
+                self.assertTrue(len(out) >= 1)
+            }
+            r = r + 1
+        }
+        self.assertEqual(nodes[0].label, "k0")
+        self.assertEqual(nodes[1].label, "k1")
+    }
+
+    def test_escape_of_owned_temporary_still_works() {
+        # The owned-temporary path must remain correct (no leak, no double free):
+        # escaping a fresh concatenation and a string carrying escapable chars.
+        r: int = 0
+        while r < 300 {
+            const a: str = "a&b"
+            const b: str = "<c>"
+            const e: str = HTML.escape(a + b)
+            self.assertEqual(e, "a&amp;b&lt;c&gt;")
+            r = r + 1
+        }
+        const n: Node = Node("x&y<z>")
+        const h: HTML = render(n)
+        self.assertEqual(n.label, "x&y<z>")
+        self.assertEqual(h.to_str().strip(), "<span class=\"x\">x&amp;y&lt;z&gt;</span>")
+    }
+}
+
+
+def render_row(label: str, n: int) -> str {
+    h: HTML = template[HTML] { <li>!{label} #!{str(n)}</li> }
+    return h.to_str()
+}
+
+
+def render_list(items: list[str]) -> str {
+    h: HTML = template[HTML] {
+        <ul>!{ for it in items { :{ <li>!{it}</li> } } }</ul>
+    }
+    return h.to_str()
+}
+
+
+class TemplateRenderRcTests(TestCase) {
+    """template render temp leaks.
+
+    Three per-render leaks in the typed-template (`template[X] { ... }`) lowering,
+    all now closed (verified leak-free under LSan with high-iteration probes; this
+    test locks in that the fixes did not corrupt the rendered output):
+
+      1. An OWNED interpolation temp (`!{str(n)}`, `!{a + b}`) was misclassified as
+         borrowed, so the auto-escape filter never released it.
+      2. The final concat string was wrapped in the content-type instance
+         (`HTML_new(result)`) - which retains it - but the owned temp was never
+         dropped afterwards.
+      3. A block-interp `!{ for ... { :{ ... } } }` built a list[str] buffer, joined
+         it (a borrow), and never freed the buffer or its fragments.
+
+    Kept intentionally light (small loops) so it runs fast in normal AND ASan mode;
+    the leak magnitudes are proven by the scratch probes, not by iteration count.
+    """
+
+    def test_owned_interp_temp_render_correct() {
+        out: str = ""
+        i: int = 0
+        while i < 20 {
+            out = render_row("item", i)
+            i = i + 1
+        }
+        self.assertEqual(out.strip(), "<li>item #19</li>")
+    }
+
+    def test_typed_wrap_render_correct() {
+        out: str = render_row("x&y", 3)
+        self.assertEqual(out.strip(), "<li>x&amp;y #3</li>")
+    }
+
+    def test_block_interp_buffer_render_correct() {
+        items: list[str] = ["a", "b", "c"]
+        out: str = ""
+        i: int = 0
+        while i < 20 {
+            out = render_list(items)
+            i = i + 1
+        }
+        const trimmed: str = out.strip()
+        self.assertTrue(trimmed.startswith("<ul>"))
+        self.assertTrue(trimmed.endswith("</ul>"))
+        self.assertTrue("<li>a</li>" in out)
+        self.assertTrue("<li>c</li>" in out)
+    }
+}
+
+
+main([BorrowedFieldRCTests(), TemplateRenderRcTests()])

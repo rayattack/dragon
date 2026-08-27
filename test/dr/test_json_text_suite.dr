@@ -1,0 +1,631 @@
+from unittest import TestCase, main
+from json import loads, loadb, dumps, escape, unescape, decode, encode, JsonWriter, JSON
+import json
+
+
+class CustomerRec {
+    def(name: str, age: int) {
+        self.name = name
+        self.age = age
+    }
+}
+
+
+class Note {
+    def(body: str) {
+        self.body = body
+    }
+}
+
+
+class JsonScalarTests(TestCase) {
+    def test_int() {
+        const v: Any = loads("42")
+        self.assertTrue(isinstance(v, int))
+        const n: int = v
+        self.assertEqual(n, 42)
+    }
+
+    def test_negative_int() {
+        const v: Any = loads("-7")
+        const n: int = v
+        self.assertEqual(n, -7)
+    }
+
+    def test_float() {
+        const v: Any = loads("3.5")
+        self.assertTrue(isinstance(v, float))
+        const f: float = v
+        self.assertEqual(f, 3.5)
+    }
+
+    def test_float_exponent() {
+        const v: Any = loads("1.5e3")
+        const f: float = v
+        self.assertEqual(f, 1500.0)
+    }
+
+    def test_bool_true() {
+        const v: Any = loads("true")
+        self.assertTrue(isinstance(v, bool))
+    }
+
+    def test_string_with_escapes() {
+        const v: Any = loads("\"a\\tb\\nc\"")
+        const s: str = v
+        self.assertEqual(s, "a\tb\nc")
+    }
+
+    def test_string_unicode_escape() {
+        const v: Any = loads("\"caf\\u00e9\"")
+        const s: str = v
+        self.assertEqual(s, "café")
+    }
+
+    def test_string_surrogate_pair() {
+        const v: Any = loads("\"a\\ud83d\\ude00b\"")
+        const s: str = v
+        self.assertEqual(len(s), 3)
+    }
+
+    def test_whitespace_tolerated() {
+        const v: Any = loads("   \n 99 \t ")
+        const n: int = v
+        self.assertEqual(n, 99)
+    }
+}
+
+
+class JsonObjectTests(TestCase) {
+    def test_flat_object() {
+        const v: Any = loads("{\"name\": \"Ada\", \"age\": 36, \"active\": true}")
+        self.assertTrue(isinstance(v, dict))
+        const m: dict[str, Any] = v
+        const name: str = m["name"]
+        const age: int = m["age"]
+        self.assertEqual(name, "Ada")
+        self.assertEqual(age, 36)
+        self.assertTrue("active" in m)
+    }
+
+    def test_empty_object() {
+        const v: Any = loads("{}")
+        const m: dict[str, Any] = v
+        self.assertEqual(len(m), 0)
+    }
+
+    def test_nested_object() {
+        const v: Any = loads("{\"a\": {\"b\": {\"c\": 5}}}")
+        const m: dict[str, Any] = v
+        const a: dict[str, Any] = m["a"]
+        const b: dict[str, Any] = a["b"]
+        const c: int = b["c"]
+        self.assertEqual(c, 5)
+    }
+}
+
+
+class JsonArrayTests(TestCase) {
+    def test_int_array() {
+        const v: Any = loads("[1, 2, 3]")
+        self.assertTrue(isinstance(v, list))
+        const xs: list[Any] = v
+        self.assertEqual(len(xs), 3)
+        const first: int = xs[0]
+        self.assertEqual(first, 1)
+    }
+
+    def test_empty_array() {
+        const v: Any = loads("[]")
+        const xs: list[Any] = v
+        self.assertEqual(len(xs), 0)
+    }
+
+    def test_array_of_objects() {
+        const v: Any = loads("[{\"x\": 1}, {\"x\": 2}]")
+        const xs: list[Any] = v
+        const sum: int = _sum_x(xs)
+        self.assertEqual(sum, 3)
+    }
+}
+
+
+def _sum_x(xs: list[Any]) -> int {
+    total: int = 0
+    for item in xs {
+        if isinstance(item, dict) {
+            const m: dict[str, Any] = item
+            const x: int = m["x"]
+            total = total + x
+        }
+    }
+    return total
+}
+
+
+class JsonRoundTripTests(TestCase) {
+    def test_dumps_loads_object() {
+        const orig: dict[str, Any] = {}
+        orig["k"] = "v"
+        orig["n"] = 7
+        const back: Any = loads(dumps(orig))
+        const m: dict[str, Any] = back
+        const k: str = m["k"]
+        const n: int = m["n"]
+        self.assertEqual(k, "v")
+        self.assertEqual(n, 7)
+    }
+
+    def test_loadb() {
+        const v: Any = loadb(b"{\"ok\": true}")
+        const m: dict[str, Any] = v
+        self.assertTrue("ok" in m)
+    }
+}
+
+
+class JsonTypedConstructionTests(TestCase) {
+    def test_construct_from_decoded_obj() {
+        const row: dict[str, Any] = decode[dict[str, Any]]("{\"name\": \"Grace\", \"age\": 45}".encode("utf-8"))
+        const c: CustomerRec = CustomerRec(**row)
+        self.assertEqual(c.name, "Grace")
+        self.assertEqual(c.age, 45)
+    }
+
+    def test_decode_obj_rejects_non_object() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const r: dict[str, Any] = decode[dict[str, Any]]("[1, 2, 3]".encode("utf-8"))
+        })
+    }
+}
+
+
+def _bad_escape() {
+    const v: Any = loads("\"a\\xb\"")
+}
+
+def _raw_newline() {
+    const v: Any = loads("\"a\nb\"")
+}
+
+def _raw_tab() {
+    const v: Any = loads("[\"a\tb\"]")
+}
+
+def _bad_unicode() {
+    const v: Any = loads("\"\\uZZZZ\"")
+}
+
+def _truncated_unicode() {
+    const v: Any = loads("\"\\u12\"")
+}
+
+
+class JsonParseErrorTests(TestCase) {
+    def test_empty_input_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("")
+        })
+    }
+
+    def test_truncated_array_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("[1, 2")
+        })
+    }
+
+    def test_unterminated_string_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("\"abc")
+        })
+    }
+
+    def test_trailing_data_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("42 99")
+        })
+    }
+
+    def test_missing_value_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("{\"a\": }")
+        })
+    }
+
+    def test_unknown_escape_raises() {
+        self.assertRaises(ValueError, _bad_escape)
+    }
+
+    def test_raw_control_char_raises() {
+        self.assertRaises(ValueError, _raw_newline)
+        self.assertRaises(ValueError, _raw_tab)
+    }
+
+    def test_malformed_unicode_escape_raises() {
+        self.assertRaises(ValueError, _bad_unicode)
+        self.assertRaises(ValueError, _truncated_unicode)
+    }
+
+    def test_error_carries_byte_position() {
+        msg: str = ""
+        try {
+            const v: Any = loads("\"ok\\x\"")
+        } except ValueError as e {
+            msg = str(e)
+        }
+        self.assertIn("byte", msg)
+    }
+
+    def test_valid_escapes_still_parse() {
+        const v: Any = loads("\"a\\n\\t\\\"\\\\\\/x\\u0041\"")
+        const s: str = v
+        self.assertEqual(s, "a\n\t\"\\/xA")
+    }
+
+    def test_surrogate_pair_still_parses() {
+        const v: Any = loads("\"\\ud83d\\ude00\"")
+        const s: str = v
+        self.assertEqual(len(s), 1)
+    }
+
+    def test_escaped_control_still_parses() {
+        const v: Any = loads("{\"k\": \"line1\\nline2\"}")
+        const m: dict[str, Any] = v
+        const s: str = m["k"]
+        self.assertEqual(s, "line1\nline2")
+    }
+}
+
+
+class EscapeControlTests(TestCase) {
+    """json.escape control-character handling (RFC 8259 §7).
+
+    escape() used to emit control bytes raw: JsonWriter.write_str(chr(8)) produced
+    a literal 0x08 between the quotes, so encode[T] emitted JSON that strict
+    parsers reject while dumps() (the C runtime walker) escaped it correctly.
+    These tests pin the fixed behavior: every byte under 0x20 leaves escape() as
+    \b \f \n \r \t or \u00XX, both spellings of escape agree, and the encode/decode
+    round trip preserves control characters.
+    """
+
+    def test_named_short_forms() {
+        self.assertEqual(escape(chr(8)), "\\b")
+        self.assertEqual(escape(chr(12)), "\\f")
+        self.assertEqual(escape("\n"), "\\n")
+        self.assertEqual(escape("\r"), "\\r")
+        self.assertEqual(escape("\t"), "\\t")
+    }
+
+    def test_other_controls_become_u00xx() {
+        self.assertEqual(escape(chr(0)), "\\u0000")
+        self.assertEqual(escape(chr(1)), "\\u0001")
+        self.assertEqual(escape(chr(27)), "\\u001b")
+        self.assertEqual(escape(chr(31)), "\\u001f")
+    }
+
+    def test_quote_and_backslash() {
+        self.assertEqual(escape("a\"b"), "a\\\"b")
+        self.assertEqual(escape("a\\b"), "a\\\\b")
+    }
+
+    def test_clean_string_unchanged() {
+        self.assertEqual(escape("plain text, no escapes"), "plain text, no escapes")
+        self.assertEqual(escape(""), "")
+        self.assertEqual(escape("aλb → c"), "aλb → c")
+    }
+
+    def test_mixed_spans() {
+        self.assertEqual(escape("ab" + chr(8) + "cd\ne"), "ab\\bcd\\ne")
+    }
+
+    def test_template_static_escape_agrees() {
+        self.assertEqual(JSON.escape(chr(8) + "x\"y"), "\\bx\\\"y")
+        self.assertEqual(JSON.escape("clean"), "clean")
+    }
+
+    def test_unescape_inverts_escape() {
+        const gnarly: str = "a\"b\\c" + chr(8) + chr(12) + "\n\r\t" + chr(1) + chr(31) + "zλ"
+        self.assertEqual(unescape(escape(gnarly)), gnarly)
+    }
+}
+
+
+class WriterControlTests(TestCase) {
+    def test_writer_emits_valid_json() {
+        const w: JsonWriter = JsonWriter()
+        w.write_str(chr(8) + "x" + chr(31))
+        self.assertEqual(w.finish().decode("utf-8"), "\"\\bx\\u001f\"")
+    }
+
+    def test_writer_key_escaped() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("a\tb")
+        w.write_int(1)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"a\\tb\":1}")
+    }
+
+    def test_writer_output_parses_back() {
+        const w: JsonWriter = JsonWriter()
+        w.write_str("bell" + chr(7))
+        const v: Any = loads(w.finish().decode("utf-8"))
+        const s: str = v
+        self.assertEqual(s, "bell" + chr(7))
+    }
+}
+
+
+class EncodeControlTests(TestCase) {
+    def test_encode_decode_roundtrip_control_chars() {
+        const n: Note = Note("del" + chr(8) + "eted" + chr(1))
+        const back: Note = decode[Note](encode[Note](n))
+        self.assertEqual(back.body, "del" + chr(8) + "eted" + chr(1))
+    }
+
+    def test_encode_bytes_are_escaped() {
+        const n: Note = Note(chr(8))
+        self.assertEqual(encode[Note](n).decode("utf-8"), "{\"body\":\"\\b\"}")
+    }
+}
+
+
+class WriterShapeTests(TestCase) {
+    """json.JsonWriter - box-free streaming writer, the write-side mirror of Cursor"""
+
+    def test_flat_object() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("id"); w.write_int(7)
+        w.key("tag"); w.write_str("hi")
+        w.key("ok"); w.write_bool(true)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"id\":7,\"tag\":\"hi\",\"ok\":true}")
+    }
+
+    def test_empty_object_and_array() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{}")
+        const a: JsonWriter = JsonWriter()
+        a.begin_array()
+        a.end_array()
+        self.assertEqual(a.finish().decode("utf-8"), "[]")
+    }
+
+    def test_nested_object_in_object() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("outer"); w.write_int(1)
+        w.key("inner")
+        w.begin_object()
+        w.key("a"); w.write_int(2)
+        w.key("b"); w.write_int(3)
+        w.end_object()
+        w.key("after"); w.write_int(4)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"),
+                         "{\"outer\":1,\"inner\":{\"a\":2,\"b\":3},\"after\":4}")
+    }
+
+    def test_array_of_objects() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_array()
+        w.begin_object()
+        w.key("n"); w.write_int(1)
+        w.end_object()
+        w.begin_object()
+        w.key("n"); w.write_int(2)
+        w.end_object()
+        w.end_array()
+        self.assertEqual(w.finish().decode("utf-8"), "[{\"n\":1},{\"n\":2}]")
+    }
+
+    def test_scalar_array_commas() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_array()
+        w.write_int(1)
+        w.write_int(2)
+        w.write_int(3)
+        w.end_array()
+        self.assertEqual(w.finish().decode("utf-8"), "[1,2,3]")
+    }
+
+    def test_null_and_float_and_negative() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("f"); w.write_float(1.5)
+        w.key("none"); w.write_null()
+        w.key("neg"); w.write_int(-42)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"f\":1.5,\"none\":null,\"neg\":-42}")
+    }
+}
+
+
+class WriterEscapeTests(TestCase) {
+    def test_str_value_escaped() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("s"); w.write_str("a\"b\\c\nd")
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"s\":\"a\\\"b\\\\c\\nd\"}")
+    }
+
+    def test_key_escaped() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("we\"ird"); w.write_int(1)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"we\\\"ird\":1}")
+    }
+}
+
+
+class WriterListHelperTests(TestCase) {
+    def test_typed_list_helpers() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("ints"); w.write_int_list([1, 2])
+        w.key("strs"); w.write_str_list(["a", "b"])
+        w.key("bools"); w.write_bool_list([true, false])
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"),
+                         "{\"ints\":[1,2],\"strs\":[\"a\",\"b\"],\"bools\":[true,false]}")
+    }
+
+    def test_raw_fragment_splice() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("pre"); w.write_int(1)
+        w.key("obj"); w.write_raw("{\"x\":9}".encode("utf-8"))
+        w.key("post"); w.write_int(2)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"pre\":1,\"obj\":{\"x\":9},\"post\":2}")
+    }
+}
+
+
+class WriterOwnershipTests(TestCase) {
+    def test_no_leak() {
+        i: int = 0
+        while i < 2000 {
+            const w: JsonWriter = JsonWriter()
+            w.begin_object()
+            w.key("tag"); w.write_str("some-owned-string-" + "x")
+            w.key("n"); w.write_int(i)
+            w.end_object()
+            const out: bytes = w.finish()
+            self.assertTrue(len(out) > 0)
+            i = i + 1
+        }
+    }
+}
+
+
+class JsonAnyListTests(TestCase) {
+    """json.dumps of a list[Any] - the box-layout misread.
+
+    Given the code below:
+
+        xs: list[Any] = [1, 2, 3]
+        print(json.dumps(xs))
+
+    The result is that a `list[Any]` stores each element as a 16-byte {tag, payload} box,
+    a monomorphic `list[int]` stores bare 8-byte slots. Both are stamped TAG_LIST
+    in the tag space, and the JSON emitter cast every tag list payload to monomorphic
+    layout. Walking 16-byte boxes as 8-byte slots reads tag words as values:
+
+        json.dumps([1, 2, 3] as list[Any])   -> "[0, 1, 0]"        (tags + payload)
+        json.dumps(["a", "b"] as list[Any])  -> "[1, 107168755...]" (tag + raw ptr)
+
+    and runs one stride past the element region (ASan heap-buffer-overflow) ultimatey
+    serving garbage to whoever consumes the JSON, or crashing under a hardened allocator.
+
+    WHEN: any json.dumps whose value contains a list[Any] anywhere - a
+    heterogeneous array, a JSON Schema node, a dict[str, Any] holding an array.
+    Native (monomorphic) lists were always correct.
+
+    WHY: dispatch happened on the VALUE tag (TAG_LIST) alone, the header's type taag
+    (DRAGON_TAG_LIST vs DRAGON_TAG_LIST_BOX) is what distinguishes the
+    two layouts.
+
+    BEFORE: the values above. AFTER: the emitter dispatches on the header tag
+    and walks box elements as {tag, payload}, so the same code prints "[1, 2,3]" and '["a", "b"]'
+
+    One line: json.dumps now reads a list[Any] with the layout it was stored in.
+    """
+
+    def test_int_any_list() {
+        xs: list[Any] = [1, 2, 3]
+        self.assertEqual(json.dumps(xs), "[1, 2, 3]")
+    }
+
+    def test_str_any_list() {
+        xs: list[Any] = ["a", "b"]
+        self.assertEqual(json.dumps(xs), '["a", "b"]')
+    }
+
+    def test_mixed_any_list() {
+        xs: list[Any] = [1, "a", 2.5, True]
+        self.assertEqual(json.dumps(xs), '[1, "a", 2.5, true]')
+    }
+
+    def test_nested_any_list() {
+        xs: list[Any] = [[1, 2], ["a"]]
+        self.assertEqual(json.dumps(xs), '[[1, 2], ["a"]]')
+    }
+
+    def test_any_list_inside_dict() {
+        d: dict[str, Any] = {"xs": [1, 2, 3]}
+        self.assertEqual(json.dumps(d), '{"xs": [1, 2, 3]}')
+    }
+
+    def test_native_list_unchanged() {
+        ys: list[int] = [1, 2, 3]
+        self.assertEqual(json.dumps(ys), "[1, 2, 3]")
+        zs: list[str] = ["a", "b"]
+        self.assertEqual(json.dumps(zs), '["a", "b"]')
+    }
+}
+
+
+def _roundtrip(s: str) -> str {
+    const out: str = json.dumps({c: s})
+    const d: dict[str, Any] = decode[dict[str, Any]](out.encode("utf-8"))
+    const back: str = d["c"]
+    return back
+}
+
+
+class TestUcs4DumpsRepr(TestCase) {
+    def test_dumps_value_roundtrip() {
+        const s: str = "arrow → here, § then … and ô"
+        self.assertEqual(_roundtrip(s), s)
+    }
+
+    def test_dumps_leading_multibyte() {
+        self.assertEqual(_roundtrip("→lead"), "→lead")
+    }
+
+    def test_dumps_mixed_escapes_and_unicode() {
+        const s: str = "line1\n→ \"quoted\" \\ tail\t§"
+        self.assertEqual(_roundtrip(s), s)
+    }
+
+    def test_dumps_bare_string_and_list() {
+        self.assertEqual(json.dumps("a→b"), "\"a→b\"")
+        self.assertEqual(json.dumps(["x", "y → z"]), "[\"x\", \"y → z\"]")
+    }
+
+    def test_dumps_nonascii_key() {
+        const out: str = json.dumps({"k→ey": "v"})
+        const d: dict[str, Any] = decode[dict[str, Any]](out.encode("utf-8"))
+        const v: str = d["k→ey"]
+        self.assertEqual(v, "v")
+    }
+
+    def test_repr_list_str() {
+        xs: list[str] = ["a→b", "plain"]
+        self.assertEqual(str(xs), "['a→b', 'plain']")
+    }
+
+    def test_repr_dict_key_and_value() {
+        d: dict[str, str] = {"k→": "v→w"}
+        self.assertEqual(str(d), "{'k→': 'v→w'}")
+    }
+
+    def test_repr_ascii_unchanged() {
+        ys: list[str] = ["plain", "text"]
+        self.assertEqual(str(ys), "['plain', 'text']")
+        self.assertEqual(json.dumps({a: "b"}), "{\"a\": \"b\"}")
+    }
+}
+
+
+main([JsonScalarTests(), JsonObjectTests(), JsonArrayTests(),
+      JsonRoundTripTests(), JsonTypedConstructionTests(), JsonParseErrorTests(),
+      EscapeControlTests(), WriterControlTests(), EncodeControlTests(),
+      WriterShapeTests(), WriterEscapeTests(), WriterListHelperTests(), WriterOwnershipTests(),
+      JsonAnyListTests(), TestUcs4DumpsRepr()])

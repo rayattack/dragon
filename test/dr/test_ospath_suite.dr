@@ -1,0 +1,302 @@
+from unittest import TestCase, main
+from os.path import normpath, relpath, join, split, splitext, expandvars
+import os
+from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE, filemode, S_IFREG, S_IFDIR, S_IFLNK
+import errno
+import platform
+from getpass import getpass, getuser, GetPassWarning, isatty
+
+class NormpathTests(TestCase) {
+    def test_empty_is_dot() {
+        self.assertEqual(normpath(""), ".")
+    }
+
+    def test_dot_is_dot() {
+        self.assertEqual(normpath("."), ".")
+    }
+
+    def test_root() {
+        self.assertEqual(normpath("/"), "/")
+    }
+
+    def test_double_slash_collapses() {
+        self.assertEqual(normpath("//"), "/")
+    }
+
+    def test_collapse_repeated_sep() {
+        self.assertEqual(normpath("/foo//bar"), "/foo/bar")
+    }
+
+    def test_drop_current_dir() {
+        self.assertEqual(normpath("/foo/./bar"), "/foo/bar")
+        self.assertEqual(normpath("./a"), "a")
+        self.assertEqual(normpath("a/./b"), "a/b")
+    }
+
+    def test_resolve_parent_dir() {
+        self.assertEqual(normpath("/foo/../bar"), "/bar")
+        self.assertEqual(normpath("foo/../bar"), "bar")
+        self.assertEqual(normpath("a/b/c/../../d"), "a/d")
+    }
+
+    def test_relative_collapses_to_dot() {
+        self.assertEqual(normpath("foo/.."), ".")
+    }
+
+    def test_leading_parent_preserved_when_relative() {
+        self.assertEqual(normpath("../foo"), "../foo")
+    }
+
+    def test_parent_at_abs_root_discarded() {
+        self.assertEqual(normpath("/foo/../.."), "/")
+    }
+
+    def test_trailing_slash_stripped() {
+        self.assertEqual(normpath("/a/b/c/"), "/a/b/c")
+    }
+
+    def test_triple_dot_is_a_name() {
+        self.assertEqual(normpath("..."), "...")
+    }
+}
+
+class RelpathTests(TestCase) {
+    def test_child() {
+        self.assertEqual(relpath("/a/b/c", "/a/b"), "c")
+    }
+
+    def test_sibling() {
+        self.assertEqual(relpath("/a/b/c", "/a/b/d"), "../c")
+    }
+
+    def test_diverging_branch() {
+        self.assertEqual(relpath("/a/b/c", "/a/x/y"), "../../b/c")
+    }
+
+    def test_same_path_is_dot() {
+        self.assertEqual(relpath("/a/b", "/a/b"), ".")
+    }
+
+    def test_ancestor() {
+        self.assertEqual(relpath("/a", "/a/b/c"), "../..")
+    }
+
+    def test_deeper_child() {
+        self.assertEqual(relpath("/usr/local/bin", "/usr"), "local/bin")
+    }
+}
+
+class OsFlatVariantTests(TestCase) {
+    def test_path_normpath_delegates() {
+        self.assertEqual(os.path_normpath("/foo/../bar"), "/bar")
+        self.assertEqual(os.path_normpath("a/b/c/../../d"), "a/d")
+    }
+
+    def test_path_relpath_delegates() {
+        self.assertEqual(os.path_relpath("/a/b/c", "/a/x/y"), "../../b/c")
+        self.assertEqual(os.path_relpath("/usr/local/bin", "/usr"), "local/bin")
+    }
+}
+
+
+class JoinTests(TestCase) {
+    def test_absolute_second_discards_first() {
+        self.assertEqual(join("/usr", "/etc"), "/etc")
+        self.assertEqual(join("a/b", "/c"), "/c")
+        self.assertEqual(join("", "/x"), "/x")
+    }
+
+    def test_relative_join_unchanged() {
+        self.assertEqual(join("/usr", "lib"), "/usr/lib")
+        self.assertEqual(join("/usr/", "lib"), "/usr/lib")
+        self.assertEqual(join("", "b"), "b")
+        self.assertEqual(join("a", ""), "a/")
+    }
+}
+
+
+class SplitPairTests(TestCase) {
+    def test_split_pair() {
+        const parts: tuple[str, str] = split("/a/b/c.txt")
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0], "/a/b")
+        self.assertEqual(parts[1], "c.txt")
+    }
+
+    def test_splitext_pair() {
+        const parts: tuple[str, str] = splitext("/a/b.tar.gz")
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0], "/a/b.tar")
+        self.assertEqual(parts[1], ".gz")
+        const bare: tuple[str, str] = splitext("noext")
+        self.assertEqual(bare[0], "noext")
+        self.assertEqual(bare[1], "")
+    }
+}
+
+
+class ExpandvarsTests(TestCase) {
+    def test_literal_text_unchanged() {
+        self.assertEqual(expandvars("no dollars here"), "no dollars here")
+        self.assertEqual(expandvars("100$"), "100$")
+    }
+
+    def test_unknown_var_stays_literal() {
+        self.assertEqual(expandvars("$DRAGON_NO_SUCH_VAR_XYZ"), "$DRAGON_NO_SUCH_VAR_XYZ")
+        self.assertEqual(expandvars("${DRAGON_NO_SUCH_VAR_XYZ}"), "${DRAGON_NO_SUCH_VAR_XYZ}")
+    }
+
+    def test_known_var_expands() {
+        const v: str = expandvars("$HOME/x")
+        self.assertFalse(v.startswith("$"))
+        self.assertTrue(v.endswith("/x"))
+        const w: str = expandvars("a${HOME}b")
+        self.assertTrue(w.startswith("a"))
+        self.assertTrue(w.endswith("b"))
+        self.assertFalse("$" in w)
+    }
+
+    def test_long_input() {
+        parts: list[str] = []
+        i: int = 0
+        while i < 2000 {
+            parts.append("ab")
+            i = i + 1
+        }
+        const s: str = "".join(parts)
+        self.assertEqual(expandvars(s), s)
+    }
+}
+
+
+class ShellTests(TestCase) {
+    def test_shell_runs_through_a_shell() {
+        self.assertEqual(os.shell("true"), 0)
+        self.assertNotEqual(os.shell("false"), 0)
+        self.assertEqual(os.shell("echo pipe | grep -q pipe"), 0)
+    }
+}
+
+
+class StatTests(TestCase) {
+    """stat - st_mode bit predicates and filemode() against known values."""
+
+    def test_type_predicates() {
+        self.assertTrue(S_ISREG(S_IFREG | 0o755))
+        self.assertFalse(S_ISDIR(S_IFREG | 0o755))
+        self.assertTrue(S_ISDIR(S_IFDIR | 0o755))
+        self.assertFalse(S_ISREG(S_IFDIR | 0o755))
+        self.assertTrue(S_ISLNK(S_IFLNK | 0o777))
+    }
+
+    def test_imode() {
+        self.assertEqual(S_IMODE(S_IFREG | 0o755), 0o755)
+    }
+
+    def test_filemode() {
+        self.assertEqual(filemode(S_IFREG | 0o755), "-rwxr-xr-x")
+        self.assertEqual(filemode(S_IFDIR | 0o777), "drwxrwxrwx")
+        self.assertEqual(filemode(S_IFREG | 0o644), "-rw-r--r--")
+    }
+}
+
+
+class ErrnoTests(TestCase) {
+    def test_known_codes() {
+        self.assertEqual(errno.ENOENT, 2)
+        self.assertEqual(errno.errorcode(errno.ENOENT), "ENOENT")
+        self.assertEqual(errno.errorcode(1), "EPERM")
+    }
+
+    def test_unknown_code_returns_empty() {
+        self.assertEqual(errno.errorcode(99999), "")
+    }
+
+    def test_cache_is_built_once_and_reused() {
+        const first: int = len(errno.errorcode_dict())
+        self.assertTrue(first > 0)
+        self.assertEqual(len(errno.errorcode_dict()), first)
+        self.assertEqual(errno.errorcode(2), "ENOENT")
+    }
+
+    def test_dict_and_function_agree() {
+        const d: dict[int, str] = errno.errorcode_dict()
+        self.assertEqual(d[2], errno.errorcode(2))
+        self.assertEqual(d[1], errno.errorcode(1))
+    }
+}
+
+
+class PlatformTests(TestCase) {
+    """platform - structural checks (values are environment-dependent)."""
+
+    def test_nonempty() {
+        self.assertTrue(platform.system() != "")
+        self.assertTrue(platform.machine() != "")
+        self.assertTrue(platform.release() != "")
+    }
+
+    def test_platform_combines() {
+        p: str = platform.platform()
+        self.assertTrue(platform.system() in p)
+        self.assertTrue(platform.machine() in p)
+    }
+
+    def test_uname_tuple() {
+        s: str = ""
+        n: str = ""
+        r: str = ""
+        v: str = ""
+        m: str = ""
+        s, n, r, v, m = platform.uname()
+        self.assertEqual(s, platform.system())
+        self.assertEqual(m, platform.machine())
+    }
+}
+
+
+class GetPassTests(TestCase) {
+    """getpass - automated coverage for the non-interactive surface.
+
+    What is verified here (no terminal required, runs under ctest):
+      * getuser() returns a non-empty login name (env vars or getpwuid fallback).
+      * The GetPassWarning category constant matches the Python name.
+      * Under ctest, stdin is not a terminal, so isatty(0) == 0 - i.e. getpass()
+        would take the documented GetPassWarning echo-fallback branch. We assert
+        that branch *condition* rather than calling getpass(), because the
+        fallback reads a line via input() which would block on / consume the
+        harness stdin.
+
+    MANUAL TTY TEST (cannot be automated - needs a real terminal):
+        Build dragon, then in an interactive shell run a one-off file:
+
+            from getpass import getpass
+            pw: str = getpass("Secret: ")
+            print("len=" + str(len(pw)))
+
+        Type a password and press Enter. Expected:
+          - the characters you type are NOT echoed,
+          - a newline is printed after Enter,
+          - the printed length matches what you typed,
+          - the terminal echoes normally again afterward (state restored even if
+            you press Ctrl-D / Ctrl-C mid-entry).
+    """
+
+    def test_getuser_nonempty() {
+        const who: str = getuser()
+        self.assertTrue(len(who) > 0)
+    }
+
+    def test_getpasswarning_constant() {
+        self.assertEqual(GetPassWarning, "GetPassWarning")
+    }
+
+    def test_stdin_not_a_tty_under_ctest() {
+        self.assertEqual(isatty(0), 0)
+    }
+}
+
+
+main([NormpathTests(), RelpathTests(), OsFlatVariantTests(),
+      JoinTests(), SplitPairTests(), ExpandvarsTests(), ShellTests(),
+      StatTests(), ErrnoTests(), PlatformTests(), GetPassTests()])

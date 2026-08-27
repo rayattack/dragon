@@ -1,0 +1,459 @@
+# Pre-fix: os.getcwd() returned glibc's malloc'd buffer as a DragonString
+# (the A/B-proven realpath corruption shape); every call leaked under LSan.
+
+from unittest import TestCase, main
+from collections import deque
+from os import getcwd
+from os.path import relpath
+
+
+def two() -> tuple[int, int] {
+    return (11, 22)
+}
+
+
+class TupleUnpackRcTests(TestCase) {
+    """tuple-unpack source-temp release.
+
+    Before the fix, simple tuple unpacking (`a, b = <rhs>`) extracted each element
+    (borrowed from dragon_tuple_get / dragon_list_get, then increfed into its slot)
+    and returned WITHOUT freeing the owned RHS container temp. So `q, r =
+    divmod(...)` / `k, s, v = line.partition("=")` leaked the source tuple's struct
+    + buffer + its element refs, once per unpack.
+
+    The fix drops the RHS container when it is an OWNED temp (a call result or a
+    tuple/list literal). The cases below assert:
+      - the unpacked VALUES are correct (the drain is balanced, not over-eager),
+      - heap str elements SURVIVE the source-tuple free (no UAF - they are owned by
+        their slots afterward),
+      - a BORROWED source (a named var) is NOT freed by the unpack (no double-free),
+        and stays usable afterward.
+
+    Also pins tuple[Any, ...] literal construction (TupleAnyElemTests). An Any
+    element arrives as a {tag, payload} box, and codegen passed the whole box to
+    dragon_tuple_set, whose slot is an i64 - an LLVM verification failure on every
+    tuple literal with an Any element, e.g.:
+
+        a: Any = 1
+        t: tuple[Any, int] = (a, 5)   # DRAGON SCALE ERROR before the fix
+
+    The fix extracts the box's payload and runtime tag and routes them through
+    dragon_tuple_set_tagged (mirroring the dict-literal box branch). RC: a payload
+    boxed from a BORROWED source gets its own ref (union incref) so the source's
+    scope exit cannot free it out from under the tuple; an owned box temp already
+    carries the +1 the tuple adopts.
+    """
+
+    def test_divmod_unpack_values() {
+        q: int = 0
+        r: int = 0
+        i: int = 0
+        acc: int = 0
+        while i < 300 {
+            q, r = divmod(i, 7)
+            acc = acc + q + r
+            i = i + 1
+        }
+        self.assertEqual(q, 42)
+        self.assertEqual(r, 5)
+    }
+
+    def test_partition_heap_elements_survive() {
+        k: str = ""
+        sep: str = ""
+        v: str = ""
+        i: int = 0
+        while i < 200 {
+            line: str = "key" + str(i) + "=value"
+            k, sep, v = line.partition("=")
+            i = i + 1
+        }
+        self.assertEqual(k, "key199")
+        self.assertEqual(sep, "=")
+        self.assertEqual(v, "value")
+        self.assertEqual(len(sep), 1)
+    }
+
+    def test_owned_tuple_call_result_unpack() {
+        a: int = 0
+        b: int = 0
+        i: int = 0
+        while i < 100 {
+            a, b = two()
+            i = i + 1
+        }
+        self.assertEqual(a, 11)
+        self.assertEqual(b, 22)
+    }
+
+    def test_borrowed_source_not_double_freed() {
+        t: tuple[int, int] = (7, 9)
+        a: int = 0
+        b: int = 0
+        a, b = t
+        self.assertEqual(a, 7)
+        self.assertEqual(b, 9)
+        self.assertEqual(t[0], 7)
+        self.assertEqual(t[1], 9)
+        c: int = 0
+        d: int = 0
+        c, d = t
+        self.assertEqual(c, 7)
+        self.assertEqual(d, 9)
+    }
+}
+
+
+def mk_any_str_tuple(i: int) -> tuple[Any, int] {
+    # The heap str is boxed from a local that DIES at return - the tuple must
+    # own its own ref or t[0] is a use-after-free in the caller.
+    s: str = "hydra" + str(i)
+    a: Any = s
+    return (a, i)
+}
+
+
+class TupleAnyElemTests(TestCase) {
+    def test_boxed_scalar_element() {
+        a: Any = 1
+        t: tuple[Any, int] = (a, 5)
+        self.assertEqual(t[1], 5)
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, int) {
+            ei: int = e
+            self.assertEqual(ei, 1)
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+
+    def test_boxed_heap_str_survives_source_scope() {
+        got: str = ""
+        i: int = 0
+        while i < 200 {
+            t: tuple[Any, int] = mk_any_str_tuple(i)
+            e: Any = t[0]
+            if isinstance(e, str) {
+                got = e
+            }
+            i = i + 1
+        }
+        self.assertEqual(got, "hydra199")
+    }
+
+    def test_borrowed_any_source_stays_valid() {
+        # Both the tuple's element ref and the original slots decref at scope
+        # exit; without the borrowed-box incref that is a double-free.
+        s: str = "al" + "pha"
+        a: Any = s
+        t: tuple[Any, int] = (a, 1)
+        self.assertEqual(s, "alpha")
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, str) {
+            es: str = e
+            self.assertEqual(es, "alpha")
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+
+    def test_boxed_list_element() {
+        xs: list[Any] = [1, 2, 3]
+        a: Any = xs
+        t: tuple[Any, int] = (a, 4)
+        self.assertEqual(t[1], 4)
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, list) {
+            el: list[Any] = e
+            self.assertEqual(len(el), 3)
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+
+    def test_concrete_str_in_any_slot() {
+        s: str = "hy" + "dra"
+        t: tuple[Any, int] = (s, 5)
+        self.assertEqual(t[1], 5)
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, str) {
+            es: str = e
+            self.assertEqual(es, "hydra")
+            matched = True
+        }
+        self.assertTrue(matched)
+        self.assertEqual(s, "hydra")
+    }
+
+    def test_nested_list_literal_in_any_slot_born_boxed() {
+        u: tuple[Any, int] = ([1, 2], 6)
+        self.assertEqual(u[1], 6)
+        e: Any = u[0]
+        matched: bool = False
+        if isinstance(e, list) {
+            el: list[Any] = e
+            self.assertEqual(len(el), 2)
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+}
+
+
+class DequeRcTests(TestCase) {
+    """deque refcount / teardown.
+
+    Before the fix:
+      - dragon_dealloc had NO DRAGON_TAG_DEQUE case, so EVERY deque local (even a
+        plain deque[int]) leaked its struct + circular buffer when decref'd at scope
+        exit.
+      - dragon_deque_destroy's TAG_STR/BYTES/LIST/DICT whitelist excluded
+        TAG_CLOSURE, so a deque[Callable] leaked every closure + its captured env.
+      - the deque(iterable) ctor never drained an owned list-literal source temp,
+        so `deque([1,2,3])` leaked one list + buffer per call.
+
+    These are leak/teardown fixes (LSan/ASan), but the cases below also assert that
+    the values survive use and that `deque(borrowed_var)` does NOT double-free its
+    source (the source list stays usable afterwards).
+    """
+
+    def test_int_deque_local_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 200 {
+            d: deque[int] = deque([1, 2, 3])
+            d.append(i)
+            total = total + d.pop()
+            i = i + 1
+        }
+        self.assertEqual(total, 19900)
+    }
+
+    def test_str_deque_heap_elements() {
+        d: deque[str] = deque()
+        i: int = 0
+        while i < 50 {
+            d.append("item-" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(len(d), 50)
+        self.assertEqual(d.popleft(), "item-0")
+        self.assertEqual(d.pop(), "item-49")
+        self.assertEqual(len(d), 48)
+    }
+
+    def test_callable_deque_closures() {
+        d: deque[Callable[[int], int]] = deque()
+        base: int = 10
+        d.append(lambda (x: int) -> int { return x + base })
+        d.append(lambda (x: int) -> int { return x * base })
+        f: Callable[[int], int] = d.popleft()
+        self.assertEqual(f(5), 15)
+        g: Callable[[int], int] = d.pop()
+        self.assertEqual(g(5), 50)
+    }
+
+    def test_deque_from_borrowed_list_no_double_free() {
+        xs: list[int] = [7, 8, 9]
+        d: deque[int] = deque(xs)
+        self.assertEqual(len(d), 3)
+        self.assertEqual(xs[0], 7)
+        self.assertEqual(xs[2], 9)
+        self.assertEqual(len(xs), 3)
+        self.assertEqual(d.popleft(), 7)
+        self.assertEqual(xs[0], 7)
+    }
+
+    def test_bounded_deque_eviction_balanced() {
+        b: deque[str] = deque(maxlen=3)
+        i: int = 0
+        while i < 100 {
+            b.append("v" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(len(b), 3)
+        self.assertEqual(b.popleft(), "v97")
+        self.assertEqual(b.pop(), "v99")
+    }
+}
+
+
+def make_pair() -> list[int] {
+    return [1, 2]
+}
+
+def shout(words: list[str]) -> list[str] {
+    return [w + "!" for w in words]
+}
+
+class ComprehensionOwnership(TestCase) {
+    def test_genexpr_over_heap_strings() {
+        names: list[str] = []
+        i: int = 0
+        while i < 200 {
+            names.append("name" + str(i))
+            i = i + 1
+        }
+        g: list[str] = (s for s in names)
+        total: int = 0
+        for s in g {
+            total = total + len(s)
+        }
+        self.assertEqual(len(g), 200)
+        self.assertEqual(names[0], "name0")
+        self.assertTrue(total > 0)
+    }
+
+    def test_genexpr_filter_skips_heap_strings() {
+        words: list[str] = ["aa" + "x", "b" + "y", "ccc" + "z"]
+        g: list[str] = (w for w in words if len(w) > 2)
+        self.assertEqual(len(g), 2)
+        self.assertEqual(words[1], "by")
+    }
+
+    def test_setcomp_owned_temp_elements() {
+        words: list[str] = ["alpha", "beta", "gamma"]
+        i: int = 0
+        while i < 500 {
+            s: set[str] = {w + str(i) for w in words}
+            self.assertEqual(len(s), 3)
+            i = i + 1
+        }
+    }
+
+    def test_setcomp_filter_owned_temps() {
+        words: list[str] = ["a", "bb", "ccc"]
+        s: set[str] = {w + w for w in words if len(w) > 1}
+        self.assertEqual(len(s), 2)
+        self.assertTrue("bbbb" in s)
+    }
+
+    def test_setcomp_multi_clause() {
+        words: list[str] = ["a", "b"]
+        s: set[str] = {w + str(n) for w in words for n in make_pair()}
+        self.assertEqual(len(s), 4)
+    }
+
+    def test_inner_clause_call_iterable() {
+        xs: list[int] = [10, 20]
+        i: int = 0
+        while i < 500 {
+            ys: list[int] = [a + b for a in xs for b in make_pair()]
+            self.assertEqual(len(ys), 4)
+            self.assertEqual(ys[0], 11)
+            self.assertEqual(ys[3], 22)
+            i = i + 1
+        }
+    }
+
+    def test_inner_clause_call_iterable_strs() {
+        prefixes: list[str] = ["x", "y"]
+        rows: list[str] = [p + w for p in prefixes for w in shout(["a", "b"])]
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[0], "xa!")
+        self.assertEqual(rows[3], "yb!")
+    }
+}
+
+
+class Dog {
+    name: str = ""
+    def(n: str) { self.name = n }
+}
+
+
+class Shelter[T] {
+    occupant: T
+    def(o: T) { self.occupant = o }
+}
+
+
+def mklist() -> list[int] {
+    return [1, 2]
+}
+
+
+class OwnedTempConsumersProbe(TestCase) {
+    def test_chained_list_concat() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(a + b + [5], [1, 2, 3, 4, 5])
+            i = i + 1
+        }
+    }
+
+    def test_list_temp_to_generic_method() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(mklist(), [1, 2])
+            i = i + 1
+        }
+    }
+
+    def test_builtin_arg_temps() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(type(Dog("rex")), "Dog")
+            self.assertFalse(bool([]))
+            t: tuple = tuple([1, 2, 3])
+            self.assertEqual(len(t), 3)
+            i = i + 1
+        }
+    }
+
+    def test_generic_ctor_arg_temp() {
+        i: int = 0
+        while i < 3000 {
+            s: Shelter[Dog] = Shelter[Dog](Dog("Bingo"))
+            self.assertEqual(s.occupant.name, "Bingo")
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_guards() {
+        # Slot args to generic methods and borrowed getters must stay
+        # undrained (the prior A/B-proven UAF family).
+        xs: list[int] = [1, 2]
+        d: dict[int, str] = {1: "one-wwwwwwwwwwwwww"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(xs, [1, 2])
+            self.assertEqual(d[1], "one-wwwwwwwwwwwwww")
+            i = i + 1
+        }
+        self.assertEqual(xs[0], 1)
+        self.assertEqual(d[1], "one-wwwwwwwwwwwwww")
+    }
+}
+
+
+class GetcwdTests(TestCase) {
+    def test_shape() {
+        const cwd: str = getcwd()
+        self.assertTrue(len(cwd) > 0)
+        self.assertTrue(cwd.startswith("/"))
+        self.assertEqual(getcwd(), cwd)
+    }
+
+    def test_repeated_calls_stable() {
+        const first: str = getcwd()
+        i: int = 0
+        while i < 2000 {
+            self.assertEqual(getcwd(), first)
+            i = i + 1
+        }
+    }
+
+    def test_relpath_uses_cwd() {
+        self.assertEqual(relpath(getcwd() + "/x", "."), "x")
+    }
+}
+
+
+main([TupleUnpackRcTests(), TupleAnyElemTests(), DequeRcTests(), ComprehensionOwnership(), OwnedTempConsumersProbe(), GetcwdTests()])

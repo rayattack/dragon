@@ -1,0 +1,496 @@
+# Callable locals/params/fields/elements must be RC'd via the tag-gated dragon_{in,de}cref_callable:
+# these cases leaked (closure + env) or crashed on generic dragon_decref of a headerless fn ptr.
+
+from unittest import TestCase, main
+from collections import deque
+
+extern "C" def dragon_gc_collect() -> int
+extern "C" def dragon_gc_set_threshold(n: int) -> None
+
+
+def mk(n: int) -> Callable[[int], int] {
+    def adder(x: int) -> int { return x + n }
+    return adder
+}
+
+def inc(x: int) -> int { return x + 1 }
+def dec(x: int) -> int { return x - 1 }
+def apply(f: Callable[[int], int], v: int) -> int { return f(v) }
+def identity(f: Callable[[int], int]) -> Callable[[int], int] { return f }
+
+
+class Box {
+    fn: Callable[[int], int]
+    def(f: Callable[[int], int]) { self.fn = f }
+    def get() -> Callable[[int], int] { return self.fn }
+    def call(x: int) -> int { return self.fn(x) }
+    def set(f: Callable[[int], int]) { self.fn = f }
+}
+
+class Picker {
+    f: Callable[[int], int]
+    def(flag: bool) {
+        if flag { self.f = mk(10) } else { self.f = mk(20) }
+    }
+    def call(x: int) -> int { return self.f(x) }
+}
+
+
+class ClosureRcTests(TestCase) {
+    def test_reassign_local() {
+        g: Callable[[int], int] = mk(1)
+        g = mk(2)
+        self.assertEqual(g(10), 12)
+    }
+
+    def test_pop_into_local() {
+        fs: list[Callable[[int], int]] = [mk(1), mk(2), mk(3)]
+        p: Callable[[int], int] = fs.pop()
+        self.assertEqual(p(10), 13)
+    }
+
+    def test_field_init_from_param() {
+        b: Box = Box(mk(7))
+        self.assertEqual(b.call(3), 10)
+    }
+
+    def test_field_get_returns_owning_ref() {
+        b: Box = Box(mk(5))
+        h: Callable[[int], int] = b.get()
+        self.assertEqual(h(10), 15)
+    }
+
+    def test_field_setter_overwrite() {
+        b: Box = Box(inc)
+        b.set(mk(100))
+        self.assertEqual(b.call(1), 101)
+    }
+
+    def test_conditional_ctor_field_init() {
+        p: Picker = Picker(True)
+        q: Picker = Picker(False)
+        self.assertEqual(p.call(1), 11)
+        self.assertEqual(q.call(1), 21)
+    }
+
+    def test_param_borrow_then_call_original() {
+        g: Callable[[int], int] = mk(5)
+        self.assertEqual(apply(g, 10), 15)
+        self.assertEqual(g(1), 6)
+    }
+
+    def test_return_borrowed_param() {
+        g: Callable[[int], int] = mk(7)
+        h: Callable[[int], int] = identity(g)
+        self.assertEqual(h(3), 10)
+        self.assertEqual(g(3), 10)
+    }
+
+    def test_iterate_list_of_closures() {
+        fs: list[Callable[[int], int]] = [mk(1), mk(2), mk(3)]
+        total: int = 0
+        for f in fs { total = total + f(10) }
+        self.assertEqual(total, 36)
+    }
+
+    def test_bare_fns_in_list() {
+        fs: list[Callable[[int], int]] = [inc, mk(10), dec]
+        self.assertEqual(fs[0](5), 6)
+        self.assertEqual(fs[1](5), 15)
+        self.assertEqual(fs[2](5), 4)
+    }
+
+    def test_list_subscript_overwrite() {
+        fs: list[Callable[[int], int]] = [mk(1), mk(2)]
+        fs[1] = mk(100)
+        self.assertEqual(fs[0](0), 1)
+        self.assertEqual(fs[1](0), 100)
+    }
+
+    def test_dict_of_closures() {
+        d: dict[str, Callable[[int], int]] = {}
+        d["a"] = mk(1)
+        d["b"] = mk(2)
+        d["a"] = mk(9)
+        f: Callable[[int], int] = d["a"]
+        self.assertEqual(f(0), 9)
+    }
+
+    def test_dict_with_bare_fn() {
+        d: dict[str, Callable[[int], int]] = {}
+        d["op"] = inc
+        self.assertEqual(d["op"](10), 11)
+    }
+
+    def test_immediate_chained_call() {
+        self.assertEqual(mk(5)(10), 15)
+        self.assertEqual(identity(mk(20))(2), 22)
+    }
+}
+
+
+def make_int_closure() -> Callable[[], int] {
+    x: int = 42
+    def get() -> int { return x }
+    return get
+}
+
+def make_list_closure() -> Callable[[], int] {
+    acc: list[int] = [10, 20, 30]
+    def total() -> int {
+        s: int = 0
+        for v in acc { s = s + v }
+        return s
+    }
+    return total
+}
+
+def _bare_const() -> int { return 7 }
+def pick_bare() -> Callable[[], int] { return _bare_const }
+
+def call_it(f: Callable[[], int]) -> int { return f() + 1 }
+def make_adder(n: int) -> Callable[[int], int] {
+    def add(x: int) -> int { return x + n }
+    return add
+}
+def apply1(f: Callable[[int], int], v: int) -> int { return f(v) }
+
+class ClosureEscapeTests(TestCase) {
+    def test_escaping_int_capture() {
+        const g: Callable[[], int] = make_int_closure()
+        self.assertEqual(g(), 42)
+    }
+
+    def test_escaping_list_capture() {
+        const g: Callable[[], int] = make_list_closure()
+        self.assertEqual(g(), 60)
+        self.assertEqual(g(), 60)
+    }
+
+    def test_bare_fn_return_not_mismarked() {
+        const h: Callable[[], int] = pick_bare()
+        self.assertEqual(h(), 7)
+    }
+
+    def test_closure_passed_as_arg() {
+        self.assertEqual(call_it(make_int_closure()), 43)
+    }
+
+    def test_bare_fn_passed_as_arg() {
+        self.assertEqual(call_it(_bare_const), 8)
+    }
+
+    def test_closure_with_args_as_arg() {
+        self.assertEqual(apply1(make_adder(10), 5), 15)
+    }
+
+    def test_raising_capturing_lambda_in_assertRaises() {
+        msg: str = "notanint"
+        self.assertRaises(ValueError, lambda () -> None { n: int = int(msg) })
+    }
+}
+
+
+def make(n: int) -> Callable[[], int] {
+    return lambda () -> int { return n }
+}
+
+
+class SetCallableRcTests(TestCase) {
+    def test_add_remove_discard_clear_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            s: set[Callable[[], int]] = set()
+            f: Callable[[], int] = make(i)
+            g: Callable[[], int] = make(i + 1)
+            h: Callable[[], int] = make(i + 2)
+            k: Callable[[], int] = make(i + 3)
+            s.add(f)
+            s.add(g)
+            s.add(h)
+            s.add(k)
+            s.remove(g)
+            s.discard(h)
+            if i % 2 == 0 {
+                s.clear()
+            }
+            total = total + len(s)
+            i = i + 1
+        }
+        self.assertEqual(total, 500)
+    }
+
+    def test_copy_coowns_closures() {
+        # The copy must incref tag-10 elements: drop the original, collect nothing, and the
+        # copy's closures stay callable (a missing incref is a double-free / UAF under ASan).
+        s: set[Callable[[], int]] = set()
+        f: Callable[[], int] = make(41)
+        s.add(f)
+        c: set[Callable[[], int]] = s.copy()
+        s.clear()
+        self.assertEqual(len(c), 1)
+        self.assertEqual(f(), 41)
+    }
+}
+
+
+def tuple_literal_once(n: int) -> int {
+    # Borrowed Callable in a tuple literal: codegen increfs it into the tuple; tuple destroy
+    # gives that ref back and must NOT double-free f (scope cleanup releases it after the tuple).
+    f: Callable[[], int] = make(n)
+    t: tuple[Callable[[], int], int] = (f, n)
+    return f() + len(t)
+}
+
+
+class TupleCallableRcTests(TestCase) {
+    def test_dict_items_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            d: dict[str, Callable[[], int]] = {}
+            d["a"] = make(i)
+            d["b"] = make(i + 1)
+            total = total + len(d.items())
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_tuple_from_list_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            fns: list[Callable[[], int]] = []
+            fns.append(make(i))
+            fns.append(make(i + 1))
+            t: tuple[Callable[[], int], Callable[[], int]] = tuple(fns)
+            total = total + len(t)
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_tuple_literal_borrowed_closure() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            total = total + tuple_literal_once(i)
+            i = i + 1
+        }
+        self.assertEqual(total, 125750)
+    }
+}
+
+
+# The cycle collector sees through closures + captured envs (was an unbounded RSS-proven leak,
+# invisible to LSan). Pins the dangerous direction: a LIVE cycle must survive a forced collection.
+
+class Node {
+    n: int
+    cb: Callable[[], int]
+    def(seed: int) {
+        self.n = seed
+        self.cb = lambda () -> int { self.n = self.n + 1; return self.n }
+    }
+}
+
+
+class Handler {
+    n: int
+    cb: Callable[[int], int]
+    def(seed: int) {
+        self.n = seed
+        self.cb = getattr(self, "act")
+    }
+    def act(x: int) -> int { return self.n + x }
+}
+
+
+class ClosureCycleTests(TestCase) {
+    def test_live_instance_cycles_survive_collection() {
+        live: list[Node] = []
+        i: int = 0
+        while i < 300 {
+            live.append(Node(i))
+            i = i + 1
+        }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        # Each cb() mutates+reads self.n -> seed+1. Wrong-collection => UAF/garbage.
+        total: int = 0
+        j: int = 0
+        while j < 300 {
+            nd: Node = live[j]
+            total = total + nd.cb()
+            j = j + 1
+        }
+        self.assertEqual(total, 45150)
+    }
+
+    def test_shared_closure_two_holders_survives() {
+        shared_cb: Callable[[], int] = lambda () -> int { return 99 }
+        a: Node = Node(1)
+        b: Node = Node(2)
+        a.cb = shared_cb
+        b.cb = shared_cb
+        dragon_gc_collect()
+        self.assertEqual(a.cb() + b.cb(), 198)
+    }
+
+    def test_live_list_capture_cycle_survives() {
+        keep: list[Callable[[], int]] = []
+        xs: list[Callable[[], int]] = []
+        c2: Callable[[], int] = lambda () -> int { return len(xs) + 5 }
+        xs.append(c2)
+        keep.append(c2)
+        dragon_gc_collect()
+        fn: Callable[[], int] = keep[0]
+        self.assertEqual(fn(), 6)
+    }
+
+    def test_bound_method_cycle_survives() {
+        live: list[Handler] = []
+        i: int = 0
+        while i < 150 {
+            live.append(Handler(i))
+            i = i + 1
+        }
+        dragon_gc_collect()
+        total: int = 0
+        j: int = 0
+        while j < 150 {
+            h: Handler = live[j]
+            total = total + h.cb(1)
+            j = j + 1
+        }
+        self.assertEqual(total, 11325)
+    }
+
+    def test_drop_half_keeps_live() {
+        kept: list[Node] = []
+        k: int = 0
+        while k < 400 {
+            nd: Node = Node(k)
+            if k % 2 == 0 { kept.append(nd) }
+            k = k + 1
+        }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        s: int = 0
+        m: int = 0
+        while m < 200 {
+            nd2: Node = kept[m]
+            s = s + nd2.cb()
+            m = m + 1
+        }
+        self.assertEqual(s, 40000)
+    }
+}
+
+
+class DequeGcTests(TestCase) {
+    def test_live_deque_of_lists_survives_collection() {
+        d: deque[list[int]] = deque()
+        i: int = 0
+        while i < 50 {
+            xs: list[int] = [i, i + 1, i + 2]
+            d.append(xs)
+            i = i + 1
+        }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        total: int = 0
+        while len(d) > 0 {
+            ys: list[int] = d.pop()
+            total = total + ys[0]
+        }
+        self.assertEqual(total, 1225)
+    }
+
+    def test_live_deque_of_closures_survives_collection() {
+        fns: deque[Callable[[], int]] = deque()
+        j: int = 0
+        while j < 20 {
+            k: int = j
+            fns.append(lambda () -> int { return k })
+            j = j + 1
+        }
+        dragon_gc_collect()
+        csum: int = 0
+        while len(fns) > 0 {
+            f: Callable[[], int] = fns.pop()
+            csum = csum + f()
+        }
+        self.assertEqual(csum, 190)
+    }
+
+    def test_bounded_deque_eviction_stays_balanced() {
+        d: deque[list[int]] = deque([], maxlen=4)
+        i: int = 0
+        while i < 200 {
+            d.append([i])
+            i = i + 1
+        }
+        dragon_gc_collect()
+        self.assertEqual(len(d), 4)
+        last: list[int] = d.pop()
+        self.assertEqual(last[0], 199)
+    }
+}
+
+
+def spin_dict_cycles(count: int) -> int {
+    i: int = 0
+    while i < count {
+        d: dict[str, Callable[[], int]] = {}
+        d["cb"] = lambda () -> int { return len(d) }
+        i = i + 1
+    }
+    return i
+}
+
+
+def spin_tuple_cycles(count: int) -> int {
+    i: int = 0
+    while i < count {
+        xs: list[tuple[Callable[[], int], int]] = []
+        c: Callable[[], int] = lambda () -> int { return len(xs) }
+        t: tuple[Callable[[], int], int] = (c, i)
+        xs.append(t)
+        i = i + 1
+    }
+    return i
+}
+
+
+class ContainerClosureCycleTests(TestCase) {
+    def test_dropped_dict_closure_cycles_are_collected() {
+        dragon_gc_set_threshold(1000000)
+        made: int = spin_dict_cycles(300)
+        collected: int = dragon_gc_collect()
+        self.assertEqual(made, 300)
+        self.assertTrue(collected >= 300)
+    }
+
+    def test_dropped_tuple_closure_cycles_are_collected() {
+        dragon_gc_set_threshold(1000000)
+        made: int = spin_tuple_cycles(300)
+        collected: int = dragon_gc_collect()
+        self.assertEqual(made, 300)
+        self.assertTrue(collected >= 300)
+    }
+
+    def test_live_dict_closure_cycle_survives() {
+        d: dict[str, Callable[[], int]] = {}
+        d["cb"] = lambda () -> int { return len(d) }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        cb: Callable[[], int] = d["cb"]
+        self.assertEqual(cb(), 1)
+    }
+}
+
+
+main([ClosureRcTests(), ClosureEscapeTests(), SetCallableRcTests(), TupleCallableRcTests(), ClosureCycleTests(), DequeGcTests(), ContainerClosureCycleTests()])

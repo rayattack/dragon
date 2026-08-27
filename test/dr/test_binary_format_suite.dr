@@ -1,0 +1,211 @@
+from unittest import TestCase, main
+import struct
+from struct import pack, unpack, calcsize, error
+from base64 import b64encode, b64decode, urlsafe_b64decode
+
+
+class StructTests(TestCase) {
+    """struct - pack/unpack/calcsize against known CPython byte patterns.
+
+    Covers the float-bits reinterpret primitive (the only part needing compiler
+    support), endianness, signed/unsigned integers, the string field, and the
+    round-trip identity. Byte patterns are the exact values CPython's struct
+    produces, so this doubles as a conformance check.
+    """
+
+    def test_float_patterns() {
+        self.assertEqual(pack(">d", 1.0).hex(), "3ff0000000000000")
+        self.assertEqual(pack("<d", 1.0).hex(), "000000000000f03f")
+        self.assertEqual(pack(">f", 3.5).hex(), "40600000")
+        self.assertEqual(pack("<f", 3.5).hex(), "00006040")
+    }
+
+    def test_int_patterns() {
+        self.assertEqual(pack(">hIb", 0x1234, 0xDEADBEEF, -1).hex(), "1234deadbeefff")
+        self.assertEqual(pack("<q", -1).hex(), "ffffffffffffffff")
+        self.assertEqual(pack(">q", 1).hex(), "0000000000000001")
+        self.assertEqual(pack("<i", -2).hex(), "feffffff")
+    }
+
+    def test_string_field() {
+        self.assertEqual(pack("5s", "hi").hex(), "6869000000")
+        self.assertEqual(pack("3s", "hello").hex(), "68656c")
+    }
+
+    def test_unpack_roundtrip() {
+        vals: list[Any] = unpack(">dhb", pack(">dhb", 2.5, -7, 100))
+        self.assertEqual(len(vals), 3)
+        gotd: float = vals[0]
+        self.assertAlmostEqual(gotd, 2.5)
+        self.assertEqual(vals[1], -7)
+        self.assertEqual(vals[2], 100)
+    }
+
+    def test_unpack_known_bytes() {
+        pi: list[Any] = unpack(">d", bytes([0x40, 0x09, 0x21, 0xfb, 0x54, 0x44, 0x2d, 0x18]))
+        got: float = pi[0]
+        self.assertAlmostEqual(got, 3.141592653589793)
+        self.assertEqual(unpack("<h", bytes([0xFF, 0xFF]))[0], -1)
+        self.assertEqual(unpack("<H", bytes([0xFF, 0xFF]))[0], 65535)
+    }
+
+    def test_calcsize() {
+        self.assertEqual(calcsize(">dhb"), 11)
+        self.assertEqual(calcsize("10s"), 10)
+        self.assertEqual(calcsize("<3i"), 12)
+        self.assertEqual(calcsize(">qQfd"), 28)
+    }
+
+    def test_stage1_helpers() {
+        self.assertEqual(struct.unpack_u16_le(bytes([0x34, 0x12]), 0), 0x1234)
+        self.assertEqual(struct.unpack_u32_be(bytes([0, 0, 0x12, 0x34]), 0), 0x1234)
+        f: float = struct.unpack_f64_le(struct.pack_f64_le(2.71828), 0)
+        self.assertAlmostEqual(f, 2.71828)
+    }
+}
+
+
+def _missing_arg() {
+    const b: bytes = pack(">ii", 1)
+}
+
+def _missing_str_arg() {
+    const b: bytes = pack("4s")
+}
+
+def _missing_repeat_arg() {
+    const b: bytes = pack("3h", 1, 2)
+}
+
+def _extra_arg() {
+    const b: bytes = pack(">i", 1, 2)
+}
+
+def _c_int_arg() {
+    const b: bytes = pack("c", 65)
+}
+
+def _c_long_bytes() {
+    const b: bytes = pack("c", b"AB")
+}
+
+def _c_missing_arg() {
+    const b: bytes = pack("c")
+}
+
+
+class PackArgCountTests(TestCase) {
+    def test_missing_arg_raises() {
+        self.assertRaises(error, _missing_arg)
+        self.assertRaises(error, _missing_str_arg)
+        self.assertRaises(error, _missing_repeat_arg)
+    }
+
+    def test_extra_arg_raises() {
+        self.assertRaises(error, _extra_arg)
+    }
+
+    def test_exact_count_ok() {
+        self.assertEqual(pack(">ii", 1, 2).hex(), "0000000100000002")
+        self.assertEqual(pack("x").hex(), "00")
+    }
+}
+
+
+class CharFormatTests(TestCase) {
+    def test_pack_c() {
+        self.assertEqual(pack("c", b"A").hex(), "41")
+        self.assertEqual(pack("2c", b"A", b"B").hex(), "4142")
+    }
+
+    def test_unpack_c() {
+        const vals: list[Any] = unpack("c", b"A")
+        self.assertEqual(len(vals), 1)
+        const got: Any = vals[0]
+        self.assertTrue(isinstance(got, bytes))
+        self.assertEqual(len(got), 1)
+        const b0: int = got[0]
+        self.assertEqual(b0, 65)
+    }
+
+    def test_calcsize_c() {
+        self.assertEqual(calcsize("c"), 1)
+        self.assertEqual(calcsize(">c h"), 3)
+    }
+
+    def test_c_rejects_bad_args() {
+        self.assertRaises(error, _c_int_arg)
+        self.assertRaises(error, _c_long_bytes)
+        self.assertRaises(error, _c_missing_arg)
+    }
+
+    def test_c_roundtrip_mixed() {
+        const b: bytes = pack(">ch", b"Z", -2)
+        self.assertEqual(b.hex(), "5afffe")
+        const vals: list[Any] = unpack(">ch", b)
+        const c0: Any = vals[0]
+        self.assertTrue(isinstance(c0, bytes))
+        const z0: int = c0[0]
+        self.assertEqual(z0, 90)
+        self.assertEqual(vals[1], -2)
+    }
+}
+
+
+def _two_char_pad() {
+    const v: bytes = b64decode(b"A=")
+}
+
+def _three_char_pad() {
+    const v: bytes = b64decode(b"QQ=")
+}
+
+def _double_pad_short() {
+    const v: bytes = b64decode(b"A==")
+}
+
+def _pad_only() {
+    const v: bytes = b64decode(b"====")
+}
+
+def _urlsafe_two_char_pad() {
+    const v: bytes = urlsafe_b64decode(b"A=")
+}
+
+
+class Base64PaddingTests(TestCase) {
+    def test_two_char_quantum_with_pad_raises() {
+        self.assertRaises(ValueError, _two_char_pad)
+        self.assertRaises(ValueError, _urlsafe_two_char_pad)
+    }
+
+    def test_truncated_padded_quantum_raises() {
+        self.assertRaises(ValueError, _three_char_pad)
+        self.assertRaises(ValueError, _double_pad_short)
+    }
+
+    def test_pad_only_raises() {
+        self.assertRaises(ValueError, _pad_only)
+    }
+
+    def test_standard_vectors() {
+        self.assertEqual(b64decode(b"QQ==").decode(), "A")
+        self.assertEqual(b64decode(b"QUI=").decode(), "AB")
+        self.assertEqual(b64decode(b"QUJD").decode(), "ABC")
+        self.assertEqual(b64encode(b"ABC").decode(), "QUJD")
+        self.assertEqual(len(b64decode(b"")), 0)
+    }
+
+    def test_unpadded_tail_still_accepted() {
+        self.assertEqual(b64decode(b"QQ").decode(), "A")
+        self.assertEqual(b64decode(b"QUI").decode(), "AB")
+    }
+
+    def test_roundtrip_binary() {
+        const data: bytes = bytes([0, 1, 2, 127, 128, 250, 255])
+        self.assertEqual(b64decode(b64encode(data)).hex(), data.hex())
+    }
+}
+
+
+main([StructTests(), PackArgCountTests(), CharFormatTests(), Base64PaddingTests()])

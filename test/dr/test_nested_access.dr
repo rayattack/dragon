@@ -1,0 +1,392 @@
+from unittest import TestCase, main
+from json import dumps
+
+
+class IterInner {
+    ds: dict[str, int]
+    di: dict[int, str]
+    title: str
+    xs: list[int]
+
+    def() {
+        self.ds = {}
+        self.ds["x"] = 1
+        self.ds["y"] = 2
+        self.di = {}
+        self.di[10] = "a"
+        self.di[20] = "b"
+        self.title = "abc"
+        self.xs = [7, 8, 9]
+    }
+}
+
+class IterOuter {
+    inner: IterInner
+
+    def(inner: IterInner) {
+        self.inner = inner
+    }
+
+    def str_keys() -> str {
+        parts: list[str] = []
+        for k in self.inner.ds {
+            parts.append(k)
+        }
+        return ",".join(parts)
+    }
+
+    def int_keys() -> int {
+        total: int = 0
+        for k in self.inner.di {
+            total = total + k
+        }
+        return total
+    }
+
+    def items_sum() -> int {
+        total: int = 0
+        for k, v in self.inner.ds.items() {
+            total = total + v
+        }
+        return total
+    }
+
+    def keys_join() -> str {
+        parts: list[str] = []
+        for k in self.inner.ds.keys() {
+            parts.append(k)
+        }
+        return ",".join(parts)
+    }
+
+    def chars() -> int {
+        n: int = 0
+        for c in self.inner.title {
+            n = n + 1
+        }
+        return n
+    }
+
+    def list_sum() -> int {
+        total: int = 0
+        for x in self.inner.xs {
+            total = total + x
+        }
+        return total
+    }
+}
+
+
+class StoreInner {
+    a: int
+    b: int
+    tags: dict[int, bytes]
+    names: list[str]
+
+    def() {
+        self.a = 1
+        self.b = 2
+        self.tags = {}
+        self.names = ["x"]
+    }
+}
+
+class StoreMiddle {
+    inner: StoreInner
+
+    def(x: StoreInner) {
+        self.inner = x
+    }
+}
+
+class StoreOuter {
+    mid: StoreMiddle
+
+    def(m: StoreMiddle) {
+        self.mid = m
+    }
+
+    def poke_two_level(v: int) -> None {
+        self.mid.inner.a = v
+    }
+}
+
+
+class Point {
+    x: int
+
+    def (x: int) {
+        self.x = x
+    }
+}
+
+
+def _dumps_cyclic_dict() {
+    d: dict[str, Any] = {}
+    d["self"] = d
+    dumps(d)
+}
+
+
+def _dumps_cyclic_list() {
+    l: list[Any] = []
+    l.append(l)
+    dumps(l)
+}
+
+
+def _getattr_missing() {
+    p: Point = Point(1)
+    getattr(p, "nope")
+}
+
+
+class NestedAttrIterationTests(TestCase) {
+    """Iterating a container reached through a NESTED attribute chain.
+
+    You did nothing wrong: ordinary code like
+
+        class Db { schemas: dict[str, int] }
+        class Shell {
+            db: Db
+            def names() -> None {
+                for k in self.db.schemas { ... }
+            }
+        }
+
+    crashed, while the same loop over a local copy (`d: dict[str, int] =
+    self.db.schemas` then `for k in d`) worked. The for-loop codegen resolved the
+    owning class only for single-level `self.field` / `obj.field` iterables; a
+    nested base (`self.db.schemas`) resolved to no class, fell through to the
+    LIST default, and the loop read the dict's heap pages as list slots: a
+    heap-buffer-overflow that ASan flags immediately and that segfaults in a
+    plain build the moment the fake slot is dereferenced. It bites whenever a
+    class holds another class that holds a dict - a wrapper over a database, a
+    config inside an app object - and the wrapper iterates it directly.
+
+    The fix resolves the owner class of a nested base with the same resolution
+    the dict key-kind lookup already used (resolveExprClassName), and when the
+    field kind still is not tracked, falls back to the iterable's stamped static
+    type instead of assuming list. Before: `for k in self.db.schemas` crashed.
+    After: the identical line iterates the dict's keys, str- and int-keyed alike
+    """
+
+    def test_str_keyed_dict_keys() {
+        o: IterOuter = IterOuter(IterInner())
+        self.assertEqual(o.str_keys(), "x,y")
+    }
+
+    def test_int_keyed_dict_keys() {
+        o: IterOuter = IterOuter(IterInner())
+        self.assertEqual(o.int_keys(), 30)
+    }
+
+    def test_items_unpack_on_nested_chain() {
+        o: IterOuter = IterOuter(IterInner())
+        self.assertEqual(o.items_sum(), 3)
+    }
+
+    def test_keys_call_on_nested_chain() {
+        o: IterOuter = IterOuter(IterInner())
+        self.assertEqual(o.keys_join(), "x,y")
+    }
+
+    def test_str_field_iterates_chars() {
+        o: IterOuter = IterOuter(IterInner())
+        self.assertEqual(o.chars(), 3)
+    }
+
+    def test_list_field_still_list() {
+        o: IterOuter = IterOuter(IterInner())
+        self.assertEqual(o.list_sum(), 24)
+    }
+}
+
+
+class NestedAttrStoreTest(TestCase) {
+    def test_two_level_store_outside() -> None {
+        x: StoreInner = StoreInner()
+        m: StoreMiddle = StoreMiddle(x)
+        m.inner.a = 123
+        self.assertEqual(m.inner.a, 123)
+        self.assertEqual(x.a, 123)
+    }
+
+    def test_two_level_store_in_method() -> None {
+        x: StoreInner = StoreInner()
+        m: StoreMiddle = StoreMiddle(x)
+        vals: list[int] = [99]
+        m.inner.b = vals[0]
+        self.assertEqual(x.b, 99)
+    }
+
+    def test_three_level_store() -> None {
+        x: StoreInner = StoreInner()
+        o: StoreOuter = StoreOuter(StoreMiddle(x))
+        o.poke_two_level(55)
+        self.assertEqual(x.a, 55)
+        o.mid.inner.b = 66
+        self.assertEqual(x.b, 66)
+    }
+
+    def test_compound_assign() -> None {
+        x: StoreInner = StoreInner()
+        m: StoreMiddle = StoreMiddle(x)
+        m.inner.a = m.inner.a + 10
+        self.assertEqual(x.a, 11)
+    }
+
+    def test_container_store_through_chain() -> None {
+        x: StoreInner = StoreInner()
+        m: StoreMiddle = StoreMiddle(x)
+        m.inner.tags[7] = bytes([1, 2, 3])
+        self.assertEqual(len(x.tags), 1)
+        got: bytes = x.tags[7]
+        self.assertEqual(got[2], 3)
+        m.inner.names[0] = "changed"
+        self.assertEqual(x.names[0], "changed")
+    }
+
+    def test_aug_assign() -> None {
+        x: StoreInner = StoreInner()
+        m: StoreMiddle = StoreMiddle(x)
+        m.inner.a += 5
+        self.assertEqual(x.a, 6)
+        m.inner.a -= 2
+        self.assertEqual(x.a, 4)
+        o: StoreOuter = StoreOuter(m)
+        o.mid.inner.b *= 10
+        self.assertEqual(x.b, 20)
+    }
+}
+
+
+class NestedSubscriptStore(TestCase) {
+    """Chained subscript stores must mutate the inner container (J7).
+
+    Regression for the silent-no-op family: `outer[0][1] = x`, `d["a"][0] = x`,
+    `m[0]["k"] = x` and their augmented twins compiled to nothing because the
+    assign path only recognized bare-name and field receivers, never a subscript
+    receiver typed by the checker. Aliasing through a local always worked, which
+    is exactly what made the bug invisible.
+    """
+
+    def test_list_in_list_store() {
+        outer: list[list[int]] = [[1, 2], [3, 4]]
+        outer[0][1] = 9
+        self.assertEqual(outer[0][1], 9)
+        outer[1][0] = -5
+        self.assertEqual(outer[1][0], -5)
+    }
+
+    def test_list_in_dict_store() {
+        d: dict[str, list[int]] = {"a": [1, 2]}
+        d["a"][0] = 7
+        self.assertEqual(d["a"][0], 7)
+    }
+
+    def test_dict_in_list_store() {
+        m: list[dict[str, int]] = [{"k": 1}]
+        m[0]["k"] = 5
+        self.assertEqual(m[0]["k"], 5)
+    }
+
+    def test_three_level_store() {
+        deep: list[list[list[int]]] = [[[1]]]
+        deep[0][0][0] = 42
+        self.assertEqual(deep[0][0][0], 42)
+    }
+
+    def test_heap_elem_store() {
+        names: list[list[str]] = [["a", "b"]]
+        names[0][1] = "z"
+        self.assertEqual(names[0][1], "z")
+    }
+
+    def test_aug_assign_list_in_list() {
+        outer: list[list[int]] = [[1, 2], [3, 4]]
+        outer[0][1] += 10
+        self.assertEqual(outer[0][1], 12)
+        outer[1][1] -= 4
+        self.assertEqual(outer[1][1], 0)
+    }
+
+    def test_aug_assign_list_in_dict() {
+        d: dict[str, list[int]] = {"a": [1, 2]}
+        d["a"][0] += 6
+        self.assertEqual(d["a"][0], 7)
+    }
+
+    def test_aug_assign_dict_in_list() {
+        m: list[dict[str, int]] = [{"k": 1}]
+        m[0]["k"] += 4
+        self.assertEqual(m[0]["k"], 5)
+    }
+}
+
+
+class CycleTests(TestCase) {
+    def test_str_cyclic_list() {
+        l: list[Any] = []
+        l.append(l)
+        self.assertEqual(str(l), "[[...]]")
+    }
+
+    def test_str_cyclic_dict() {
+        d: dict[str, Any] = {}
+        d["self"] = d
+        self.assertEqual(str(d), "{'self': {...}}")
+    }
+
+    def test_print_cyclic_no_crash() {
+        l: list[Any] = []
+        l.append(l)
+        print(l)
+        self.assertTrue(true)
+    }
+
+    def test_dumps_cyclic_raises() {
+        self.assertRaises(ValueError, _dumps_cyclic_dict)
+        self.assertRaises(ValueError, _dumps_cyclic_list)
+    }
+
+    def test_acyclic_shared_subtree_still_renders() {
+        inner: list[int] = [1, 2]
+        outer: list[Any] = []
+        outer.append(inner)
+        outer.append(inner)
+        self.assertEqual(str(outer), "[[1, 2], [1, 2]]")
+    }
+}
+
+
+class NonAsciiContainerTests(TestCase) {
+    def test_dict_str_nonascii() {
+        d: dict[str, str] = {"é": "ü€"}
+        self.assertEqual(str(d), "{'é': 'ü€'}")
+    }
+
+    def test_nested_list_nonascii() {
+        xs: list[str] = ["Āb", "€"]
+        self.assertEqual(str(xs), "['Āb', '€']")
+    }
+}
+
+
+class GetattrTests(TestCase) {
+    def test_missing_raises() {
+        self.assertRaises(AttributeError, _getattr_missing)
+    }
+
+    def test_default_still_works() {
+        p: Point = Point(7)
+        missing: int = getattr(p, "nope", 42)
+        present: int = getattr(p, "x", 0)
+        self.assertEqual(missing, 42)
+        self.assertEqual(present, 7)
+    }
+}
+
+
+main([NestedAttrIterationTests(), NestedAttrStoreTest(), NestedSubscriptStore(),
+      CycleTests(), NonAsciiContainerTests(), GetattrTests()])

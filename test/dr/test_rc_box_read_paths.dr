@@ -1,0 +1,568 @@
+from unittest import TestCase, main
+from json import decode
+
+const N: int = 3000
+
+def sink_any(x: Any) -> int {
+    return 1
+}
+
+def mk() -> bytes {
+    out: list[int] = []
+    out.append(122)
+    return bytes(out)
+}
+
+class Holder {
+    _h: dict[str, str] = {}
+    def(h: dict[str, str]) {
+        self._h = h
+    }
+    def info() -> dict[str, str] {
+        return self._h
+    }
+}
+
+def make() -> list[int] {
+    return [1, 2, 3]
+}
+
+def make_strs() -> list[str] {
+    return ["aa", "bb", "cc-wwwwwwwwwwwwwwww"]
+}
+
+BODY: str = "{\"action\":\"order.placed\",\"subject_type\":\"service\",\"subject_name\":\"ful\",\"read\":true}"
+
+
+def churn() -> int {
+    junk: list[str] = []
+    i: int = 0
+    while i < 300 {
+        junk.append("filler-" + str(i) + "-padding-padding")
+        i = i + 1
+    }
+    return len(junk)
+}
+
+
+def read_const(body: str) -> str {
+    const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+    const action: str = doc["action"] if "action" in doc else ""
+    churn()
+    return action
+}
+
+
+def read_return(body: str) -> str {
+    const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+    return doc["subject_name"] if "subject_name" in doc else "?"
+}
+
+
+def arg_len(s: str) -> int {
+    churn()
+    return len(s)
+}
+
+
+def any_action(body: str) -> Any {
+    const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+    return doc["action"]
+}
+
+
+class BoxLitArgTests(TestCase) {
+    def test_owned_box_first_arg_lit_second() {
+        """
+        # First arg: OWNED dragon_box_subscript result (drained by the call).
+        # Second arg: str literal boxed borrow-only (must not dup, must not leak
+        """
+        m: Any = {"k": "some-longish-value-xxxxxxxxxxxxxxxxxxxx"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(m["k"], "some-longish-value-xxxxxxxxxxxxxxxxxxxx")
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_box_first_arg_lit_second() {
+        """
+        dict[str, Any] element read is dragon_dict_get_box = BORROWED.
+        Draining it would be a use-after-free (amebo's payload[k] pattern)
+        """
+        d: dict[str, Any] = {"k": "borrowed-value-yyyyyyyyyyyyyyyyyy"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d["k"], "borrowed-value-yyyyyyyyyyyyyyyyyy")
+            i = i + 1
+        }
+        v: str = d["k"]
+        self.assertEqual(v, "borrowed-value-yyyyyyyyyyyyyyyyyy")
+    }
+
+    def test_borrowed_str_getter_guard() {
+        """
+        dict[int, str] getter returns a BORROWED str; isOwnedStrResult
+        false-positives on it (prior A/B-proven UAF). Must stay undrained.
+        """
+        d: dict[int, str] = {1: "one-zzzzzzzzzzzzzzzz"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[1], "one-zzzzzzzzzzzzzzzz")
+            i = i + 1
+        }
+        self.assertEqual(d[1], "one-zzzzzzzzzzzzzzzz")
+    }
+
+    def test_listany_remove_lit_search() {
+        """
+        list[Any].remove("lit") boxes the literal borrow-only for the
+        dragon_box_eq equality search (the other takesOwnership=false
+        caller). The search must still match heap-stored elements against a
+        literal payload, and must not leak a dup per call
+        """
+        i: int = 0
+        while i < 3000 {
+            xs: list[Any] = ["keep-me", "drop-me-wwwwwwwwwwwwwwww", 7]
+            xs.remove("drop-me-wwwwwwwwwwwwwwww")
+            self.assertEqual(len(xs), 2)
+            self.assertEqual(xs[0], "keep-me")
+            i = i + 1
+        }
+    }
+}
+
+
+class BoxSubscriptArgRc(TestCase) {
+    def test_any_subscript_as_arg_no_leak() {
+        i: int = 0
+        while i < N {
+            const m: Any = {"name": "Ada", "age": 42}
+            const r: int = sink_any(m["name"])
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+
+    # UAF guard: the container's own reference must survive the arg drain
+    def test_container_survives_arg_drain() {
+        const m: Any = {"name": "Ada"}
+        const r: int = sink_any(m["name"])
+        self.assertEqual(r, 1)
+        const again: str = m["name"]
+        self.assertEqual(again, "Ada")
+    }
+
+    # BORROWED (amebo's path): dict[str,Any] element via dragon_dict_get_box is
+    # a borrow - must NOT be drained (no double-free), and no leak (container owns)
+    def test_typed_dict_any_borrowed_as_arg() {
+        i: int = 0
+        while i < N {
+            const d: dict[str, Any] = {"action": "order.placed", "n": 7}
+            const r: int = sink_any(d["action"])
+            self.assertEqual(r, 1)
+            const a: str = d["action"]
+            self.assertEqual(a, "order.placed")
+            i = i + 1
+        }
+    }
+
+    def test_listany_borrowed_as_arg() {
+        i: int = 0
+        while i < N {
+            const xs: list[Any] = ["x", "y", "z"]
+            const r: int = sink_any(xs[1])
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+
+    def test_box_binop_as_arg() {
+        i: int = 0
+        while i < N {
+            const a: Any = "pre-"
+            const r: int = sink_any(a + "post")
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+}
+
+
+class BoxUnboxSlotRc(TestCase) {
+    def test_any_subscript_unbox_str() {
+        i: int = 0
+        while i < N {
+            const m: Any = {"k": "value"}
+            const nm: str = m["k"]
+            self.assertEqual(nm, "value")
+            i = i + 1
+        }
+    }
+
+    def test_any_subscript_unbox_int() {
+        i: int = 0
+        while i < N {
+            const m: Any = {"n": 42}
+            const x: int = m["n"]
+            self.assertEqual(x, 42)
+            i = i + 1
+        }
+    }
+
+    # BORROWED (amebo's exact pattern): dict[str,Any] element via dragon_dict_get_box
+    # unboxed to str - must stay leak-free AND not double-free (no UAF).
+    def test_typed_dict_any_unbox_str() {
+        i: int = 0
+        while i < N {
+            const d: dict[str, Any] = {"action": "order.placed"}
+            const a: str = d["action"]
+            self.assertEqual(a, "order.placed")
+            i = i + 1
+        }
+    }
+
+    def test_any_subscript_plain_reassign() {
+        nm: str = "init"
+        i: int = 0
+        while i < N {
+            const m: Any = {"k": "value"}
+            nm = m["k"]
+            self.assertEqual(nm, "value")
+            i = i + 1
+        }
+    }
+
+    def test_listany_unbox_str() {
+        i: int = 0
+        while i < N {
+            const xs: list[Any] = ["x", "yy", "zzz"]
+            const s: str = xs[1]
+            self.assertEqual(s, "yy")
+            i = i + 1
+        }
+    }
+}
+
+
+class BoxChainSubscriptTests(TestCase) {
+    def test_chained_any_subscript() {
+        obj: Any = {"b": [4, 5, 6]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(obj["b"][2], 6)
+            i = i + 1
+        }
+    }
+
+    def test_chained_any_subscript_str_elem() {
+        # Inner element is a heap str: the outer read takes its own reference
+        # BEFORE the intermediate box is released (use-after-free guard).
+        obj: Any = {"b": ["p", "q", "rrrrrrrrrrrrrrrrrr"]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(obj["b"][2], "rrrrrrrrrrrrrrrrrr")
+            i = i + 1
+        }
+    }
+
+    def test_chained_borrowed_receiver_guard() {
+        # dict[str, Any] read is dragon_dict_get_box = a BORROWED intermediate.
+        # Releasing it would be a use-after-free. Must stay untouched.
+        d: dict[str, Any] = {"b": [7, 8, 9]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d["b"][1], 8)
+            i = i + 1
+        }
+        self.assertEqual(d["b"][0], 7)
+    }
+
+    def test_chained_into_typed_slot() {
+        obj: Any = {"b": [4, 5, 6]}
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            x: int = obj["b"][2]
+            total = total + x
+            i = i + 1
+        }
+        self.assertEqual(total, 18000)
+    }
+
+    def test_triple_chain() {
+        obj: Any = {"a": [[1, 2], [3, 4]]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(obj["a"][0][1], 2)
+            i = i + 1
+        }
+    }
+
+
+    def test_owned_subscript_index() {
+        keys: Any = {"i": "key-wwwwwwwwwwwwwwwwww"}
+        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[keys["i"]], 42)
+            i = i + 1
+        }
+    }
+
+    def test_fresh_binop_index() {
+        k1: Any = "key-"
+        k2: Any = "wwwwwwwwwwwwwwwwww"
+        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[k1 + k2], 42)
+            i = i + 1
+        }
+    }
+
+    def test_owned_int_index() {
+        idxs: Any = [2, 0]
+        a: Any = [10, 20, 30]
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(a[idxs[0]], 30)
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_index_guard() {
+        # dict[str, Any] element read is dragon_dict_get_box = BORROWED.
+        # Releasing it would be a use-after-free. Must stay untouched.
+        bor: dict[str, Any] = {"i": "key-wwwwwwwwwwwwwwwwww"}
+        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[bor["i"]], 42)
+            i = i + 1
+        }
+        v: str = bor["i"]
+        self.assertEqual(v, "key-wwwwwwwwwwwwwwwwww")
+    }
+}
+
+
+class BoxOperandDrainRC(TestCase) {
+    def test_box_binop_owned_native_operands() {
+        a: Any = b"xy"
+        i: int = 0
+        while i < 2000 {
+            r: Any = a + mk()
+            s: Any = a + b"z"
+            self.assertEqual(r, b"xyz")
+            self.assertEqual(s, b"xyz")
+            i = i + 1
+        }
+    }
+
+    def test_box_binop_borrowed_operands_survive() {
+        a: Any = b"xy"
+        tail: bytes = b"z"
+        r: Any = a + tail
+        self.assertEqual(r, b"xyz")
+        self.assertEqual(len(tail), 1)
+    }
+}
+
+
+class OwnedRecvSubscriptRC(TestCase) {
+    def test_method_result_receiver() {
+        i: int = 0
+        while i < 2000 {
+            hdrs: dict[str, str] = {"Content-Type": "text/plain-" + str(i)}
+            r: Holder = Holder(hdrs)
+            v: str = r.info()["Content-Type"]
+            self.assertTrue(len(v) > 10)
+            i = i + 1
+        }
+    }
+
+    def test_get_chain_receiver() {
+        i: int = 0
+        while i < 2000 {
+            cfg: dict[str, dict[str, str]] = {"db": {"host": "local-" + str(i)}}
+            inner: dict[str, str] | None = cfg.get("db")
+            if inner is not none {
+                h: str = inner["host"]
+                self.assertTrue(len(h) > 6)
+            }
+            i = i + 1
+        }
+    }
+
+    def test_named_receiver_still_borrows() {
+        d: dict[str, str] = {"k": "v" + "0"}
+        i: int = 0
+        while i < 2000 {
+            v: str = d["k"]
+            self.assertEqual(v, "v0")
+            i = i + 1
+        }
+        self.assertEqual(d["k"], "v0")
+    }
+}
+
+
+class SubscriptOwnedTempProbe(TestCase) {
+    def test_owned_list_receiver_int_elem() {
+        i: int = 0
+        while i < 3000 {
+            x: int = make()[0]
+            self.assertEqual(x, 1)
+            i = i + 1
+        }
+    }
+
+    def test_owned_list_receiver_str_elem() {
+        # Element ref must be taken BEFORE the receiver temp is released
+        # (use-after-free guard)
+        i: int = 0
+        while i < 3000 {
+            s: str = make_strs()[2]
+            self.assertEqual(s, "cc-wwwwwwwwwwwwwwww")
+            i = i + 1
+        }
+    }
+
+    def test_owned_str_receiver_slice() {
+        p: str = "abcdef"
+        i: int = 0
+        while i < 3000 {
+            s: str = ("Z" + p)[1:3]
+            self.assertEqual(s, "ab")
+            i = i + 1
+        }
+    }
+
+    def test_owned_str_receiver_index() {
+        p: str = "abcdef"
+        i: int = 0
+        while i < 3000 {
+            c: str = ("Z" + p)[0]
+            self.assertEqual(c, "Z")
+            i = i + 1
+        }
+    }
+
+    def test_owned_str_key() {
+        d: dict[str, int] = {"kx": 7}
+        p: str = "k"
+        i: int = 0
+        while i < 3000 {
+            v: int = d[p + "x"]
+            self.assertEqual(v, 7)
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_guards() {
+        xs: list[int] = [9, 8, 7]
+        d: dict[str, int] = {"kx": 7}
+        k: str = "kx"
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(xs[0], 9)
+            self.assertEqual(d[k], 7)
+            i = i + 1
+        }
+        self.assertEqual(xs[2], 7)
+        self.assertEqual(d["kx"], 7)
+    }
+}
+
+
+class TestAnyTernaryStrUnbox(TestCase) {
+    """Reading a str out of a dict[str, Any] through a ternary must not double-free.
+
+    Ordinary code, no tricks - the amebo broker's /v1 authorize handler does exactly
+    this to pull request fields out of a parsed JSON body:
+
+        const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+        const action: str = doc["action"] if "action" in doc else ""
+        grant(action, ...)              # binds `action` into SQL later
+
+    You did nothing wrong. The ternary's `doc["action"]` arm is a BORROWED value -
+    the dict still owns it. But the compiler unboxed that borrowed box into the
+    `str` slot and treated the slot as OWNED, taking no reference of its own. So at
+    the function's scope exit `action` decref'd a string the dict still held, and a
+    moment later destroying `doc` re-read the freed string's header:
+
+        heap-use-after-free ... READ of size 1 in dragon_str_is_heap
+          freed by: dragon_decref_str  <- the `action` slot at scope exit
+          re-read by: dragon_dict_destroy <- doc's own value decref
+
+    WHEN it bit: only once the freed slab was reused (heavy heap churn, a
+    long-running server) did the stale read hit reused bytes and glibc abort at a
+    LATER, unrelated malloc (`malloc_consolidate(): unaligned fastbin chunk`). In
+    isolation the value looked correct, so the crash seemed to come from nowhere.
+
+    BEFORE the fix the identical lines below crashed under ASan / churn; AFTER, the
+    slot takes its own +1 (keyed off the box's real ownership, not the syntactic
+    shape of the ternary) and the value survives every read. The bool arm was never
+    affected - a bool is a scalar copied out of the box, with no refcount to drop.
+    """
+
+    def test_const_target() -> None {
+        i: int = 0
+        while i < 30 {
+            self.assertEqual(read_const(BODY), "order.placed")
+            i = i + 1
+        }
+    }
+
+    def test_reassign_target() -> None {
+        i: int = 0
+        while i < 30 {
+            const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
+            s: str = "init"
+            s = doc["subject_type"] if "subject_type" in doc else ""
+            churn()
+            self.assertEqual(s, "service")
+            i = i + 1
+        }
+    }
+
+    def test_return_target() -> None {
+        i: int = 0
+        while i < 30 {
+            const got: str = read_return(BODY)
+            churn()
+            self.assertEqual(got, "ful")
+            i = i + 1
+        }
+    }
+
+    def test_bool_arm_still_correct() -> None {
+        const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
+        if "read" in doc {
+            const rv: bool = doc["read"]
+            self.assertEqual(rv, True)
+        }
+    }
+
+    def test_argpass_borrowed_box() -> None {
+        i: int = 0
+        while i < 30 {
+            const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
+            self.assertEqual(arg_len(doc["action"] if "action" in doc else ""), 12)
+            self.assertEqual(arg_len(doc["subject_type"]), 7)
+            i = i + 1
+        }
+    }
+
+    def test_argpass_owned_box() -> None {
+        i: int = 0
+        while i < 30 {
+            self.assertEqual(arg_len(any_action(BODY)), 12)
+            i = i + 1
+        }
+    }
+}
+
+
+main([BoxLitArgTests(), BoxSubscriptArgRc(), BoxUnboxSlotRc(), BoxChainSubscriptTests(), BoxOperandDrainRC(), OwnedRecvSubscriptRC(), SubscriptOwnedTempProbe(), TestAnyTernaryStrUnbox()])

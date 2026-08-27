@@ -1,0 +1,464 @@
+from unittest import TestCase, main
+
+class Animal {
+    def(n: str) { self.nm = n }
+    def speak() -> str { return "..." }
+    def name() -> str { return self.nm }
+}
+class Dog(Animal) {
+    def(n: str) { self.nm = n }
+    def speak() -> str { return "woof" }
+}
+class Puppy(Dog) {
+    def(n: str) { self.nm = n }
+    def speak() -> str { return "yip" }
+}
+def make(k: str) -> Animal {
+    if k == "dog" { return Dog("rex") }
+    if k == "puppy" { return Puppy("bit") }
+    return Animal("a")
+}
+
+class SuperAnimal {
+    name: str
+    legs: int
+    def(n: str, l: int) {
+        self.name = n
+        self.legs = l
+    }
+    def describe() -> str {
+        return self.name + " has " + str(self.legs) + " legs"
+    }
+    def sound() -> str {
+        return "..."
+    }
+}
+
+class SuperDog(SuperAnimal) {
+    breed: str
+    def(n: str, b: str) {
+        super(n, 4)
+        self.breed = b
+    }
+    def sound() -> str {
+        return "woof"
+    }
+    def full() -> str {
+        return super.describe() + " (" + self.breed + ", " + self.sound() + ")"
+    }
+}
+
+class SuperCat(SuperAnimal) {
+    indoor: bool
+    def(i: bool) {
+        self.indoor = i
+    }
+}
+
+class Base {
+    name: str
+
+    def (name: str) {
+        self.name = name
+    }
+
+    def describe() -> str {
+        return "base:" + self.name
+    }
+}
+
+class NoCtorChild(Base) {
+    def tag() -> str {
+        return "child"
+    }
+}
+
+class DelegatingChild(Base) {
+    def (name: str) {
+        super(name)
+    }
+}
+
+class Account {
+    __balance: int
+    def(opening: int) {
+        self.__balance = opening
+    }
+    def deposit(amount: int) -> None {
+        self.__balance = self.__balance + amount
+    }
+    def withdraw(amount: int) -> bool {
+        if amount > self.__balance {
+            return false
+        }
+        self.__balance = self.__balance - amount
+        return true
+    }
+    def balance() -> int {
+        return self.__balance
+    }
+}
+
+class Logger {
+    _prefix: str
+    _count: int
+    def(prefix: str) {
+        self._prefix = prefix
+        self._count = 0
+    }
+    def line(msg: str) -> str {
+        self._count = self._count + 1
+        return self._prefix + ": " + msg
+    }
+}
+
+class AuditLogger(Logger) {
+    def(prefix: str) {
+        super(prefix)
+    }
+    def banner() -> str {
+        return "[" + self._prefix + "]#" + str(self._count)
+    }
+}
+
+def prefix_of(lg: Logger) -> str {
+    return lg._prefix
+}
+
+class Tag {
+    _name: str
+    def(name: str) {
+        self._name = name
+    }
+    def __str__() -> str {
+        return "Tag(" + self._name + ")"
+    }
+    def __len__() -> int {
+        return len(self._name)
+    }
+    def __eq__(other: Tag) -> bool {
+        return self._name == other._name
+    }
+}
+
+class Guard {
+    _open: bool
+    def() {
+        self._open = false
+    }
+    def __enter__() -> Guard {
+        self._open = true
+        return self
+    }
+    def __exit__() -> int {
+        self._open = false
+        return 0
+    }
+    def is_open() -> bool {
+        return self._open
+    }
+}
+
+class NegIndexLeak {
+    xs: list[str]
+
+    def(xs: list[str]) {
+        self.xs = xs
+    }
+
+    def tracks_i_as_nonneg() -> str {
+        i: int = 0
+        return self.xs[i]
+    }
+
+    def indexes_with_param(i: int) -> str {
+        return self.xs[i]
+    }
+}
+
+class DictKeyKindLeak {
+    def int_keyed_local() -> str {
+        cfg: dict[int, str] = {7: "seven"}
+        return cfg[7]
+    }
+
+    def str_keyed_local() -> str {
+        cfg: dict[str, str] = {"k": "vee"}
+        return cfg["k"]
+    }
+
+    def str_keyed_param(cfg: dict[str, str]) -> str {
+        return cfg["k"]
+    }
+}
+
+class ListElemKindLeak {
+    def str_elems() -> str {
+        vals: list[str] = ["a", "b"]
+        return vals[1]
+    }
+
+    def int_elems() -> int {
+        vals: list[int] = [10, 20]
+        return vals[1]
+    }
+
+    def float_elems() -> float {
+        vals: list[float] = [1.5, 2.5]
+        return vals[1]
+    }
+}
+
+class ParamClassLeak {
+    def takes_list(other: list[int]) -> int {
+        return other[0]
+    }
+
+    def takes_str(other: str) -> int {
+        return len(other)
+    }
+}
+
+class VirtualDispatchTests(TestCase) {
+    """D026 virtual method dispatch.
+
+    A base-typed variable / receiver holding a subclass instance must dispatch to
+    the subclass override (via vtable), while leaf / inherited / non-overridden
+    calls stay direct (devirtualized). Regression for the bug where dispatch
+    resolved on the declared (static) type and called the base method.
+    """
+
+    def test_base_typed_var_dispatches_to_subclass() {
+        a: Animal = make("dog")
+        self.assertEqual(a.speak(), "woof")
+    }
+
+    def test_inherited_non_overridden_method() {
+        a: Animal = make("dog")
+        self.assertEqual(a.name(), "rex")
+    }
+
+    def test_inline_receiver_two_level_override() {
+        self.assertEqual(make("puppy").speak(), "yip")
+    }
+
+    def test_leaf_exact_type_devirtualized() {
+        d: Dog = Dog("fido")
+        self.assertEqual(d.speak(), "woof")
+    }
+
+    def test_list_polymorphism() {
+        zoo: list[Animal] = [Dog("x"), Puppy("y"), Animal("z")]
+        out: list[str] = []
+        for an in zoo { out.append(an.speak()) }
+        self.assertEqual(out[0], "woof")
+        self.assertEqual(out[1], "yip")
+        self.assertEqual(out[2], "...")
+    }
+}
+
+class SuperTests(TestCase) {
+    """`.dr` keyword-form super: `super(args)` ctor delegation + `super.method()`.
+
+    Dragon's `.dr` surface drops Python's `super()` proxy call. The canonical forms
+    mirror the nameless `def()` constructor: `super(args)` invokes the parent ctor,
+    `super.method(args)` dispatches to a parent method. Parent-ctor delegation is
+    opt-in (Python parity) - a child ctor that never calls `super(...)` does NOT run
+    the parent ctor, so inherited fields hold their zero/None default. The Python
+    spellings (`super().__init__()`, `super().method()`) are a compile error in `.dr`
+    and are exercised separately in `.py`-mode GoogleTests.
+    """
+
+    def test_ctor_delegation_runs_parent_ctor() {
+        d: SuperDog = SuperDog("Rex", "Lab")
+        self.assertEqual(d.name, "Rex")
+        self.assertEqual(d.legs, 4)
+        self.assertEqual(d.breed, "Lab")
+    }
+
+    def test_super_method_dispatch() {
+        d: SuperDog = SuperDog("Rex", "Lab")
+        self.assertEqual(d.full(), "Rex has 4 legs (Lab, woof)")
+    }
+
+    def test_override_still_virtual() {
+        d: SuperDog = SuperDog("Rex", "Lab")
+        self.assertEqual(d.sound(), "woof")
+        self.assertEqual(d.describe(), "Rex has 4 legs")
+    }
+
+    def test_opt_in_skip_leaves_defaults() {
+        c: SuperCat = SuperCat(true)
+        self.assertTrue(c.indoor)
+        self.assertEqual(c.legs, 0)
+    }
+}
+
+class CtorSurface(TestCase) {
+    def test_no_ctor_subclass_zero_args() {
+        c: NoCtorChild = NoCtorChild()
+        self.assertEqual(c.tag(), "child")
+    }
+
+    def test_super_delegation() {
+        d: DelegatingChild = DelegatingChild("rex")
+        self.assertEqual(d.describe(), "base:rex")
+    }
+
+    def test_own_ctor_still_checked() {
+        b: Base = Base("ada")
+        self.assertEqual(b.describe(), "base:ada")
+    }
+}
+
+class PrivacyTests(TestCase) {
+    """D045 - enforced member privacy, behavioral (positive) end-to-end.
+
+    The REJECTION cases (cross-class `__private`, cross-package `_protected`,
+    unrecognized `__dunder__`) cannot live in a compile-and-run file - they are
+    compile errors - so they are covered in TypeCheckerTest/InteropTest. This file
+    proves the legitimate side compiles AND runs:
+      * a `__private` field is reached only through the class's own methods
+        (encapsulation that actually holds);
+      * a `_protected` member is reachable from a subclass and from a same-package
+        (same-file) free function;
+      * protocol dunders (`__str__`, `__len__`, `__eq__`, `__enter__`/`__exit__`)
+        still dispatch through `str()` / `len()` / `==` / `with` after the privacy
+        pass - the reserved-namespace carve-out works.
+    """
+
+    def test_private_encapsulated_via_methods() {
+        a: Account = Account(100)
+        a.deposit(50)
+        ok: bool = a.withdraw(30)
+        self.assertTrue(ok)
+        self.assertEqual(a.balance(), 120)
+        self.assertFalse(a.withdraw(9999))
+        self.assertEqual(a.balance(), 120)
+    }
+
+    def test_protected_reachable_from_subclass() {
+        al: AuditLogger = AuditLogger("audit")
+        al.line("first")
+        al.line("second")
+        self.assertEqual(al.banner(), "[audit]#2")
+    }
+
+    def test_protected_reachable_same_package_function() {
+        lg: Logger = Logger("svc")
+        self.assertEqual(prefix_of(lg), "svc")
+        self.assertEqual(lg.line("hi"), "svc: hi")
+    }
+
+    def test_str_dunder_still_dispatches() {
+        t: Tag = Tag("blue")
+        self.assertEqual(str(t), "Tag(blue)")
+    }
+
+    def test_len_dunder_still_dispatches() {
+        t: Tag = Tag("green")
+        self.assertEqual(len(t), 5)
+    }
+
+    def test_eq_dunder_still_dispatches() {
+        a: Tag = Tag("x")
+        b: Tag = Tag("x")
+        c: Tag = Tag("y")
+        self.assertTrue(a == b)
+        self.assertFalse(a == c)
+    }
+
+    def test_context_manager_dunders_drive_with() {
+        g: Guard = Guard()
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertFalse(g.is_open())
+    }
+}
+
+class MethodVarMetaIsolationTests(TestCase) {
+    def test_negative_index_after_nonneg_tracking_method() {
+        const o: NegIndexLeak = NegIndexLeak(["first", "second", "third"])
+        self.assertEqual(o.tracks_i_as_nonneg(), "first")
+        self.assertEqual(o.indexes_with_param(-1), "third")
+        self.assertEqual(o.indexes_with_param(-3), "first")
+        self.assertEqual(o.indexes_with_param(1), "second")
+    }
+
+    def test_dict_key_kind_does_not_leak_between_methods() {
+        const d: DictKeyKindLeak = DictKeyKindLeak()
+        self.assertEqual(d.int_keyed_local(), "seven")
+        self.assertEqual(d.str_keyed_local(), "vee")
+        const cfg: dict[str, str] = {"k": "param"}
+        self.assertEqual(d.str_keyed_param(cfg), "param")
+    }
+
+    def test_list_elem_kind_does_not_leak_between_methods() {
+        const l: ListElemKindLeak = ListElemKindLeak()
+        self.assertEqual(l.str_elems(), "b")
+        self.assertEqual(l.int_elems(), 20)
+        self.assertEqual(l.float_elems(), 2.5)
+    }
+
+    def test_param_shape_does_not_leak_between_methods() {
+        const p: ParamClassLeak = ParamClassLeak()
+        self.assertEqual(p.takes_list([42, 7]), 42)
+        self.assertEqual(p.takes_str("abcd"), 4)
+    }
+}
+
+class ForwardRefTests(TestCase) {
+    """Forward-referenced class field access inside another class's method.
+
+    Regression: when class A's method referenced class B (`b: B = B(); b.field` /
+    `b.method()`) and B was defined textually AFTER A, every B field access compiled
+    to offset 0 → silent 0/garbage (a wrong-answer bug). Cause: method bodies were
+    codegen'd in class-definition order, before a later class's field-layout metadata
+    was registered. Fixed by a class-layout pre-pass (register all layouts before any
+    body). NOTE: the helper classes (Buf, Counter) are defined BELOW the TestCase that
+    uses them - that ordering is the whole point; do not move them up.
+    """
+
+    def test_int_field_read() {
+        c: Counter = Counter()
+        self.assertEqual(c.n, 42)
+    }
+
+    def test_method_call_and_str_field() {
+        b: Buf = Buf()
+        b.add("ab")
+        b.add("cd")
+        self.assertEqual(b.s, "abcd")
+        self.assertEqual(len(b.s), 4)
+    }
+
+    def test_field_mutation_via_method() {
+        c: Counter = Counter()
+        c.bump()
+        c.bump()
+        c.bump()
+        self.assertEqual(c.n, 45)
+    }
+}
+
+class Counter {
+    def() {
+        self.n: int = 42
+    }
+    def bump() {
+        self.n += 1
+    }
+}
+
+class Buf {
+    def() {
+        self.s: str = ""
+    }
+    def add(x: str) {
+        self.s += x
+    }
+}
+
+main([VirtualDispatchTests(), SuperTests(), CtorSurface(), PrivacyTests(), MethodVarMetaIsolationTests(), ForwardRefTests()])

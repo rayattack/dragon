@@ -1,0 +1,350 @@
+from unittest import TestCase, main
+
+
+class Guard {
+    _open: bool
+    hits: int
+    def() {
+        self._open = false
+        self.hits = 0
+    }
+    def __enter__() -> Guard {
+        self._open = true
+        self.hits = self.hits + 1
+        return self
+    }
+    def __exit__() -> int {
+        self._open = false
+        return 0
+    }
+    def is_open() -> bool {
+        return self._open
+    }
+}
+
+
+class Holder {
+    g: Guard
+    def() {
+        self.g = Guard()
+    }
+}
+
+
+def enter_and_raise(g: Guard) -> int {
+    with g {
+        raise ValueError("boom")
+    }
+    return 0
+}
+
+
+def exit_early(g: Guard) -> int {
+    with g {
+        return 7
+    }
+}
+
+
+class WithSubjectTests(TestCase) {
+    def test_bound_local_subject_reused() {
+        g: Guard = Guard()
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertEqual(g.hits, 2)
+    }
+
+    def test_fresh_temp_subject() {
+        n: int = 0
+        with Guard() {
+            n = n + 1
+        }
+        self.assertEqual(n, 1)
+    }
+
+    def test_as_binding_subject() {
+        opened: bool = false
+        with Guard() as g {
+            opened = g.is_open()
+        }
+        self.assertTrue(opened)
+    }
+
+    def test_attribute_subject() {
+        h: Holder = Holder()
+        with h.g {
+            self.assertTrue(h.g.is_open())
+        }
+        self.assertFalse(h.g.is_open())
+        self.assertEqual(h.g.hits, 1)
+    }
+
+    def test_exception_path_bound_subject() {
+        g: Guard = Guard()
+        caught: int = 0
+        try {
+            n: int = enter_and_raise(g)
+        } except ValueError {
+            caught = 1
+        }
+        self.assertEqual(caught, 1)
+        self.assertFalse(g.is_open())
+        self.assertEqual(g.hits, 1)
+    }
+
+    def test_early_return_bound_subject() {
+        g: Guard = Guard()
+        self.assertEqual(exit_early(g), 7)
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertEqual(g.hits, 2)
+    }
+
+    def test_with_churn() {
+        i: int = 0
+        n: int = 0
+        while i < 500 {
+            g: Guard = Guard()
+            with g {
+                n = n + 1
+            }
+            with Guard() {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(n, 1000)
+    }
+}
+
+
+# `with CM()` leaked the manager: the with-owned ctor temp and __enter__'s returned second ref
+# were never decref'd. Both drop on every exit path; an over-decref shows as UAF under ASan.
+
+enters: list[int] = []
+exits: list[int] = []
+
+class CM {
+    def() {}
+    def __enter__() -> CM { enters.append(1); return self }
+    def __exit__() -> int { exits.append(1); return 0 }
+}
+
+def normal_use() -> None { with CM() as c { y: int = 1 } }
+def early_return() -> int { with CM() as c { return 1 } return 0 }
+def via_exception() -> int {
+    try { with CM() as c { raise ValueError("x") } } except ValueError { return 1 }
+    return 0
+}
+def nested() -> None { with CM() as a { with CM() as b { y: int = 1 } } }
+def anonymous() -> None { with CM() { y: int = 1 } }
+
+
+class WithObjectRcTests(TestCase) {
+    def test_enter_exit_balanced_over_many_uses() {
+        enters.clear()
+        exits.clear()
+        i: int = 0
+        while i < 500 { normal_use(); i = i + 1 }
+        self.assertEqual(len(enters), 500)
+        self.assertEqual(len(exits), 500)
+    }
+
+    def test_early_return_runs_exit() {
+        exits.clear()
+        const r: int = early_return()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exits), 1)
+    }
+
+    def test_exception_runs_exit() {
+        exits.clear()
+        const r: int = via_exception()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exits), 1)
+    }
+
+    def test_nested_both_exit() {
+        enters.clear()
+        exits.clear()
+        nested()
+        self.assertEqual(len(enters), 2)
+        self.assertEqual(len(exits), 2)
+    }
+
+    def test_anonymous_no_asvar() {
+        enters.clear()
+        exits.clear()
+        anonymous()
+        self.assertEqual(len(enters), 1)
+        self.assertEqual(len(exits), 1)
+    }
+}
+
+
+class Base {
+    items: list[int] = []
+    tag: str = "base " + str(0)
+}
+
+
+class Derived(Base) {
+    items: list[int] = [7]
+    tag: str = "derived " + str(1)
+}
+
+
+class CtorDefaultsTests(TestCase) {
+    def test_derived_default_wins() {
+        d: Derived = Derived()
+        self.assertEqual(len(d.items), 1)
+        self.assertEqual(d.items[0], 7)
+        self.assertEqual(d.tag, "derived 1")
+    }
+
+    def test_base_default_intact() {
+        b: Base = Base()
+        self.assertEqual(len(b.items), 0)
+        self.assertEqual(b.tag, "base 0")
+    }
+
+    def test_construction_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            d: Derived = Derived()
+            total = total + len(d.items)
+            i = i + 1
+        }
+        self.assertEqual(total, 2000)
+    }
+}
+
+
+def digest(s: str) -> int {
+    return len(s)
+}
+class DelRcTests(TestCase) {
+    def test_del_after_call() {
+        i: int = 0
+        while i < 3000 {
+            buf: str = "payload-" + str(i)
+            d: int = digest(buf)
+            del buf
+            self.assertTrue(d > 8)
+            i = i + 1
+        }
+    }
+    def test_del_scalar() {
+        n: int = 42
+        del n
+        m: int = 7
+        self.assertEqual(m, 7)
+    }
+    def test_rebind_after_del() {
+        x: str = "a" + "b"
+        del x
+        x = "c" + "d"
+        self.assertEqual(x, "cd")
+    }
+    def test_del_all_branches() {
+        c: bool = True
+        x: str = "a" + "b"
+        if c {
+            del x
+        } else {
+            del x
+        }
+        y: str = "ok"
+        self.assertEqual(y, "ok")
+    }
+    def test_del_container_elem_still_works() {
+        d: dict[str, int] = {"a": 1, "b": 2}
+        del d["a"]
+        self.assertEqual(len(d), 1)
+        xs: list[int] = [1, 2, 3]
+        del xs[0]
+        self.assertEqual(len(xs), 2)
+    }
+}
+
+
+def takes(s: str) -> int {
+    return len(s)
+}
+
+
+class WalrusOwnershipTests(TestCase) {
+    def test_walrus_arg_then_use() {
+        b: str = "bcd"
+        n: int = takes(x := "a" + b)
+        self.assertEqual[str](x, "abcd")
+        self.assertEqual(n, 4)
+    }
+
+    def test_walrus_bare_assign_both_alive() {
+        b: str = "q"
+        y: str = (x := "p" + b)
+        self.assertEqual[str](x, "pq")
+        self.assertEqual(y, "pq")
+    }
+
+    def test_walrus_borrowed_value() {
+        s: str = "held"
+        n: int = takes(x := s)
+        self.assertEqual[str](x, "held")
+        self.assertEqual(n, 4)
+        self.assertEqual(s, "held")
+    }
+
+    def test_walrus_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 500 {
+            total = total + takes(w := "n" + str(i))
+            total = total + len(w)
+            i = i + 1
+        }
+        self.assertEqual(total, 3780)
+    }
+}
+
+
+class FstringOwnedPartRC(TestCase) {
+    def test_single_part_owned_call() {
+        i: int = 0
+        while i < 2000 {
+            cfg: dict[str, str] = {"host": "localhost-" + str(i)}
+            s: str = f"{cfg.get('host', '?')}"
+            self.assertTrue(len(s) > 8)
+            i = i + 1
+        }
+    }
+
+    def test_single_part_borrowed_name() {
+        base: str = "kept" + "!"
+        i: int = 0
+        while i < 2000 {
+            s: str = f"{base}"
+            self.assertEqual(s, "kept!")
+            i = i + 1
+        }
+        self.assertEqual(base, "kept!")
+    }
+
+    def test_multi_part_owned_call() {
+        cfg: dict[str, str] = {"host": "h1"}
+        s: str = f"host={cfg.get('host', '?')}!"
+        self.assertEqual(s, "host=h1!")
+    }
+}
+
+main([WithSubjectTests(), WithObjectRcTests(), CtorDefaultsTests(), DelRcTests(), WalrusOwnershipTests(), FstringOwnedPartRC()])

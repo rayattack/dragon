@@ -1,0 +1,385 @@
+from unittest import TestCase, main
+from threading import Lock
+
+exit_order: list[str] = []
+
+class CM {
+    tag: str = ""
+    def(t: str) { self.tag = t }
+    def __enter__() -> CM { return self }
+    def __exit__() -> int { exit_order.append(self.tag); return 0 }
+}
+
+def ret_in_with() -> int {
+    with CM("ret") as c { return 1 }
+    return 0
+}
+
+def break_in_with() -> int {
+    n: int = 0
+    while n < 5 {
+        with CM("brk") as c { break }
+        n = n + 1
+    }
+    return n
+}
+
+def continue_in_with() -> int {
+    n: int = 0
+    hits: int = 0
+    while n < 3 {
+        with CM("cont") as c {
+            n = n + 1
+            continue
+        }
+        hits = hits + 1
+    }
+    return hits
+}
+
+def nested_with() -> int {
+    with CM("outer") as a {
+        with CM("inner") as b { return 7 }
+    }
+    return 0
+}
+
+def with_inside_finally() -> int {
+    try {
+        with CM("wif_exit") as c { return 1 }
+    } finally {
+        exit_order.append("wif_finally")
+    }
+    return 0
+}
+
+def finally_inside_with() -> int {
+    with CM("fiw_exit") as c {
+        try {
+            return 2
+        } finally {
+            exit_order.append("fiw_finally")
+        }
+    }
+    return 0
+}
+
+def lock_released_on_return(l: Lock) {
+    with l { return }
+}
+
+
+class AppError(Exception) {
+    code: int
+    def(code: int) {
+        self.code = code
+    }
+}
+
+
+class ListErr(Exception) {
+    items: list[str]
+    code: int
+    def(items: list[str], code: int) {
+        self.items = items
+        self.code = code
+    }
+}
+
+
+def _remove_missing() {
+    xs: list[int] = [1, 2]
+    xs.remove(9)
+}
+
+
+def _index_missing() {
+    xs: list[str] = ["a"]
+    xs.index("z")
+}
+
+
+def _tuple_oob() {
+    t: tuple[int, int] = (1, 2)
+    t[5]
+}
+
+
+def _set_remove_missing() {
+    s: set[int] = {1}
+    s.remove(9)
+}
+
+
+def _set_pop_empty() {
+    s: set[int] = set()
+    s.pop()
+}
+
+
+def _bytes_index_missing() {
+    hay: bytes = b"abc"
+    needle: bytes = b"zz"
+    hay.index(needle)
+}
+
+
+def _fromhex_junk() {
+    bytes.fromhex("zz")
+}
+
+
+def _fromhex_odd() {
+    bytes.fromhex("abc")
+}
+
+
+class WithEarlyExitTests(TestCase) {
+    def test_return_runs_exit() {
+        exit_order.clear()
+        const r: int = ret_in_with()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exit_order), 1)
+        self.assertEqual(exit_order[0], "ret")
+    }
+
+    def test_break_runs_exit() {
+        exit_order.clear()
+        const n: int = break_in_with()
+        self.assertEqual(n, 0)
+        self.assertEqual(len(exit_order), 1)
+        self.assertEqual(exit_order[0], "brk")
+    }
+
+    def test_continue_runs_exit_each_iteration() {
+        exit_order.clear()
+        const hits: int = continue_in_with()
+        self.assertEqual(hits, 0)
+        self.assertEqual(len(exit_order), 3)
+    }
+
+    def test_nested_with_exits_innermost_first() {
+        exit_order.clear()
+        const r: int = nested_with()
+        self.assertEqual(r, 7)
+        self.assertEqual(len(exit_order), 2)
+        self.assertEqual(exit_order[0], "inner")
+        self.assertEqual(exit_order[1], "outer")
+    }
+
+    def test_with_inside_finally_order() {
+        exit_order.clear()
+        const r: int = with_inside_finally()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exit_order), 2)
+        self.assertEqual(exit_order[0], "wif_exit")
+        self.assertEqual(exit_order[1], "wif_finally")
+    }
+
+    def test_finally_inside_with_order() {
+        exit_order.clear()
+        const r: int = finally_inside_with()
+        self.assertEqual(r, 2)
+        self.assertEqual(len(exit_order), 2)
+        self.assertEqual(exit_order[0], "fiw_finally")
+        self.assertEqual(exit_order[1], "fiw_exit")
+    }
+
+    def test_lock_released_on_early_return() {
+        g: Lock = Lock()
+        lock_released_on_return(g)
+        with g {
+            self.assertEqual(1, 1)
+        }
+        del g
+    }
+}
+
+
+class ExceptBindingTests(TestCase) {
+    """Unified `except X as e` binding semantics.
+
+    Previously `e` was a plain message STRING for a builtin exception but a typed
+    INSTANCE for a user exception - one syntax, two semantics. Pythonic code that
+    treated builtin `e` as an exception object was silently handed a str (and
+    str-only ops like `e.upper()` silently worked).
+
+    Now `e` has ONE meaning for both kinds: it IS the exception. `str(e)` /
+    `print(e)` / f"{e}" yield the message for builtin and user exceptions alike;
+    user exceptions additionally expose their declared fields. Using a builtin
+    `e` directly AS a str ('m: str = e', 'e.upper()') is a compile error - the
+    TypeChecker binds builtin handlers to an opaque exception instance type.
+    Codegen is unchanged (zero runtime cost; the binding still carries the
+    message under the hood).
+    """
+
+    def test_builtin_str_of_e_is_message() {
+        msg: str = ""
+        try {
+            x: int = 1 // 0
+        } except ZeroDivisionError as e {
+            msg = str(e)
+        }
+        self.assertTrue("division by zero" in msg)
+    }
+
+    def test_builtin_fstring_of_e_is_message() {
+        out: str = ""
+        try {
+            xs: list[int] = [1]
+            y: int = xs[5]
+        } except IndexError as e {
+            out = f"{e}"
+        }
+        self.assertTrue("IndexError" in out)
+    }
+
+    def test_user_exception_fields_and_message() {
+        code: int = 0
+        msg: str = ""
+        try {
+            raise AppError(42)
+        } except AppError as e {
+            code = e.code
+            msg = str(e)
+        }
+        self.assertEqual(code, 42)
+        self.assertNotEqual(msg, "")
+    }
+
+    def test_parent_catch_still_binds() {
+        got: str = ""
+        try {
+            x: int = 1 // 0
+        } except ArithmeticError as e {
+            got = str(e)
+        }
+        self.assertTrue("division" in got)
+    }
+}
+
+
+class RaiseNonStrTests(TestCase) {
+    """Only a str first ctor arg becomes the exception message (else str(e) is the class
+    name): a list/dict/bytes pointer read as a DragonString is a use-after-free."""
+
+    def test_list_first_arg_fields_intact() {
+        raised: bool = false
+        try {
+            raise ListErr(["a", "b", "c"], 7)
+        } except ListErr as e {
+            raised = true
+            self.assertEqual(len(e.items), 3)
+            self.assertEqual(e.items[0], "a")
+            self.assertEqual(e.code, 7)
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_repeated_raise_no_uaf() {
+        i: int = 0
+        while i < 2000 {
+            const junk: str = "prefix-" + str(i)
+            try {
+                raise ListErr([junk], i)
+            } except ListErr as e {
+                self.assertEqual(e.code, i)
+            }
+            i = i + 1
+        }
+    }
+}
+
+
+class CatchableContainerErrors(TestCase) {
+    def test_list_remove_raises() {
+        self.assertRaises(ValueError, _remove_missing)
+    }
+
+    def test_list_index_raises() {
+        self.assertRaises(ValueError, _index_missing)
+    }
+
+    def test_tuple_oob_raises() {
+        self.assertRaises(IndexError, _tuple_oob)
+    }
+
+    def test_set_remove_raises() {
+        self.assertRaises(KeyError, _set_remove_missing)
+    }
+
+    def test_set_pop_empty_raises() {
+        self.assertRaises(KeyError, _set_pop_empty)
+    }
+
+    def test_bytes_index_raises() {
+        self.assertRaises(ValueError, _bytes_index_missing)
+    }
+
+    def test_fromhex_raises() {
+        self.assertRaises(ValueError, _fromhex_junk)
+        self.assertRaises(ValueError, _fromhex_odd)
+    }
+
+    def test_survives_and_continues() {
+        hits: int = 0
+        i: int = 0
+        while i < 3 {
+            try {
+                xs: list[int] = []
+                xs.remove(1)
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3)
+    }
+
+    def test_happy_paths_unchanged() {
+        xs: list[int] = [5, 6, 7]
+        xs.remove(6)
+        self.assertEqual(len(xs), 2)
+        self.assertEqual(xs[0], 5)
+        self.assertEqual(xs[1], 7)
+        self.assertEqual(xs.index(7), 1)
+        s: set[int] = {1}
+        s.remove(1)
+        self.assertEqual(len(s), 0)
+        self.assertTrue(bytes.fromhex("ff00") == b"\xff\x00")
+        self.assertEqual(b"abc".index(b"bc"), 1)
+    }
+}
+
+
+class CatchableBuiltinErrors(TestCase) {
+    """builtin runtime errors are catchable (route through setjmp, not exit)."""
+    def test_zero_division() {
+        const ran: list[str] = []
+        try { const x: int = 10 // 0 } except ZeroDivisionError { ran.append("div") }
+        try { const y: int = 5 % 0 } except ZeroDivisionError { ran.append("mod") }
+        self.assertEqual(ran, ["div", "mod"])
+    }
+    def test_index_error() {
+        const xs: list[int] = [1, 2, 3]
+        const ran: list[str] = []
+        try { const x: int = xs[99] } except IndexError { ran.append("idx") }
+        self.assertEqual(ran, ["idx"])
+    }
+    def test_key_error() {
+        const d: dict[str, int] = {"a": 1}
+        const ran: list[str] = []
+        try { const x: int = d["missing"] } except KeyError { ran.append("key") }
+        self.assertEqual(ran, ["key"])
+    }
+    def test_base_class_catch() {
+        const d: dict[str, int] = {"a": 1}
+        const ran: list[str] = []
+        try { const x: int = d["nope"] } except Exception { ran.append("base") }
+        self.assertEqual(ran, ["base"])
+    }
+}
+
+
+main([WithEarlyExitTests(), ExceptBindingTests(), RaiseNonStrTests(),
+      CatchableContainerErrors(), CatchableBuiltinErrors()])

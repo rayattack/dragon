@@ -1,0 +1,170 @@
+from unittest import TestCase, main
+from urllib.error import URLError, HTTPError, ContentTooShortError
+from urllib.response import addinfourl
+from urllib.robotparser import RobotFileParser
+from urllib.parse import URL, quote, unquote
+
+
+class URLErrorTests(TestCase) {
+    """urllib.error - exception hierarchy with typed Python-parity fields."""
+
+    def test_url_error_fields() {
+        raised: bool = false
+        reason: str = ""
+        filename: str = ""
+        try {
+            raise URLError("connection refused", "/tmp/sock")
+        } except URLError as e {
+            raised = true
+            reason = e.reason
+            filename = e.filename
+        }
+        self.assertTrue(raised)
+        self.assertEqual(reason, "connection refused")
+        self.assertEqual(filename, "/tmp/sock")
+    }
+
+    def test_url_error_default_filename() {
+        try {
+            raise URLError("timeout")
+        } except URLError as e {
+            self.assertEqual(e.reason, "timeout")
+            self.assertEqual(e.filename, "")
+        }
+    }
+
+    def test_http_error_is_url_error_and_has_fields() {
+        caught: bool = false
+        code: int = 0
+        msg: str = ""
+        url: str = ""
+        try {
+            hdrs: dict[str, str] = {"Content-Type": "text/html"}
+            raise HTTPError("http://x/y", 404, "Not Found", hdrs)
+        } except URLError as e {
+            caught = true
+            self.assertEqual(e.reason, "Not Found")
+            self.assertEqual(e.filename, "http://x/y")
+        }
+        self.assertTrue(caught)
+    }
+
+    def test_http_error_typed_fields() {
+        hdrs: dict[str, str] = {"X": "y"}
+        h: HTTPError = HTTPError("http://x", 500, "Server Error", hdrs)
+        self.assertEqual(h.url, "http://x")
+        self.assertEqual(h.code, 500)
+        self.assertEqual(h.msg, "Server Error")
+        self.assertEqual(h.headers["X"], "y")
+    }
+
+    def test_content_too_short() {
+        c: ContentTooShortError = ContentTooShortError("got 100 of 200", "partial-data")
+        self.assertEqual(c.reason, "got 100 of 200")
+        self.assertEqual(c.content, "partial-data")
+    }
+
+    def test_content_too_short_is_url_error() {
+        caught: bool = false
+        try {
+            raise ContentTooShortError("short", "x")
+        } except URLError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+}
+
+
+class UrllibResponseTests(TestCase) {
+    """urllib.response - addinfourl metadata exposes headers / url / code."""
+
+    def test_addinfourl_basics() {
+        hdrs: dict[str, str] = {"Content-Type": "text/plain"}
+        r: addinfourl = addinfourl(hdrs, "http://example/test", 200)
+        self.assertEqual(r.geturl(), "http://example/test")
+        self.assertEqual(r.getcode(), 200)
+        self.assertEqual(r.info()["Content-Type"], "text/plain")
+    }
+
+    def test_addinfourl_default_code() {
+        empty: dict[str, str] = {}
+        r: addinfourl = addinfourl(empty, "http://x")
+        self.assertEqual(r.getcode(), 0)
+    }
+}
+
+
+class RobotParserTests(TestCase) {
+    """urllib.robotparser - parse robots.txt + can_fetch."""
+
+    def test_disallow_all() {
+        body: str = "User-agent: *\nDisallow: /\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("MyBot", "http://x/anything"))
+    }
+
+    def test_specific_disallow_path() {
+        body: str = "User-agent: *\nDisallow: /private/\nAllow: /\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("Crawler", "http://x/private/secret.html"))
+        self.assertTrue(rp.can_fetch("Crawler", "http://x/public/index.html"))
+    }
+
+    def test_useragent_specific_rules() {
+        body: str = "User-agent: BadBot\nDisallow: /\nUser-agent: *\nDisallow: /admin/\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("BadBot", "http://x/page"))
+        self.assertTrue(rp.can_fetch("GoodBot", "http://x/page"))
+        self.assertFalse(rp.can_fetch("GoodBot", "http://x/admin/users"))
+    }
+
+    def test_crawl_delay() {
+        body: str = "User-agent: *\nCrawl-delay: 5.0\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertEqual(rp.crawl_delay("AnyBot"), 5.0)
+    }
+
+    def test_comments_ignored() {
+        body: str = "# Site rules\nUser-agent: *  # all bots\nDisallow: /tmp/  # temporary\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("Bot", "http://x/tmp/scratch"))
+        self.assertTrue(rp.can_fetch("Bot", "http://x/index.html"))
+    }
+}
+
+
+class UrlTemplateEscapeTests(TestCase) {
+    def test_percent_is_escaped() {
+        self.assertEqual(URL.escape("50%"), "50%25")
+    }
+
+    def test_roundtrip_through_unquote() {
+        self.assertEqual(unquote(URL.escape("50% & more?")), "50% & more?")
+    }
+
+    def test_delegates_to_quote_empty_safe() {
+        self.assertEqual(URL.escape("a/b c"), quote("a/b c", ""))
+        self.assertEqual(URL.escape("a/b c"), "a%2Fb%20c")
+    }
+
+    def test_reserved_chars_escaped() {
+        self.assertEqual(URL.escape("a&b=c?d#e+f"), "a%26b%3Dc%3Fd%23e%2Bf")
+    }
+
+    def test_unreserved_untouched() {
+        self.assertEqual(URL.escape("AZaz09-._~"), "AZaz09-._~")
+    }
+
+    def test_non_ascii_utf8_encoded() {
+        self.assertEqual(URL.escape("é"), "%C3%A9")
+    }
+}
+
+
+main([URLErrorTests(), UrllibResponseTests(), RobotParserTests(), UrlTemplateEscapeTests()])

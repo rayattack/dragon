@@ -1,0 +1,516 @@
+from unittest import TestCase, main
+import os
+
+extern "C" def dragon_str_concat(a: str, b: str) -> str
+
+const HEX: str = "0123456789abcdef"
+
+
+def sum_ord(n: int) -> int {
+    acc: int = 0
+    i: int = 0
+    while i < n {
+        acc = acc + ord(HEX[i & 15])
+        i = i + 1
+    }
+    return acc
+}
+
+
+def last_char(s: str, reps: int) -> str {
+    c: str = ""
+    i: int = 0
+    while i < reps {
+        c = s[len(s) - 1]
+        i = i + 1
+    }
+    return c
+}
+
+
+class StrIndexArgRcTests(TestCase) {
+    """str element-read ownership - the str-index-arg leak.
+
+    `s[i]` calls dragon_str_index, which mallocs a FRESH owned 1-char string
+    (strings are immutable, so indexing must materialize a new one). Codegen
+    classified every non-slice subscript as a BORROW - correct for list[i] / d[k]
+    (they hand back the container's stored reference), wrong for str[i]. So an owned
+    1-char string leaked once per evaluation on:
+
+      - a builtin borrow-arg:  ord(s[i]), len(s[i])
+      - a plain store:         c = s[i]
+      - binascii.hexlify's `ord(_HEX[...])` hot loop -> every HMAC.hexdigest leaked
+        ~64 one-char strings (the amebo signature path bled ~4.4 MB/s at 1k ev/s).
+
+    Fixed by treating a STRING element-read as OWNED (like a slice) in
+    isBorrowedHeapExpr, plus routing ord's argument through trackBorrowTemp so the
+    owned temp is drained. This test locks in the rendered VALUES across
+    high-iteration loops; leak-freedom itself is proven under LSan by the scratch
+    probes (ord(s[i]) / c=s[i] / len(s[i]) all went from 500k-1M leaks to 0)
+    """
+
+    def test_ord_of_index_value() {
+        expect: int = 0
+        j: int = 0
+        while j < 16 {
+            expect = expect + ord(HEX[j])
+            j = j + 1
+        }
+        self.assertEqual(sum_ord(16), expect)
+        self.assertEqual(sum_ord(160), expect * 10)
+    }
+
+    def test_assign_index_value() {
+        self.assertEqual(last_char("dragon", 300), "n")
+        self.assertEqual(last_char("0123456789abcdef", 300), "f")
+    }
+
+    def test_len_of_index_is_one() {
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + len(HEX[i & 15])
+            i = i + 1
+        }
+        self.assertEqual(total, 300)
+    }
+
+    def test_index_char_roundtrip() {
+        i: int = 0
+        while i < 16 {
+            const code: int = ord(HEX[i])
+            self.assertEqual(chr(code), HEX[i])
+            i = i + 1
+        }
+    }
+}
+
+
+# Slice returns are FRESH +1 objects; the subscript-return incref made them +2 (one leak per
+# call, e.g. os.path.basename). Element-read returns still incref or the carve-out is a UAF.
+
+def tail(s: str) -> str { return s[1:] }
+def head3(s: str) -> str { return s[:3] }
+def mid(xs: list[int]) -> list[int] { return xs[1:3] }
+
+def dget(d: dict[str, str], k: str) -> str { return d[k] }
+def lget(xs: list[str], i: int) -> str { return xs[i] }
+
+
+class SliceReturnRcTests(TestCase) {
+    def test_str_slice_values() {
+        const s: str = "hello world"
+        const t: str = tail(s)
+        const h: str = head3(s)
+        self.assertEqual(t, "ello world")
+        self.assertEqual(h, "hel")
+    }
+
+    def test_str_slice_loop() {
+        const s: str = "abcdef"
+        i: int = 0
+        acc: int = 0
+        while i < 1000 {
+            const t: str = tail(s)
+            acc = acc + len(t)
+            i = i + 1
+        }
+        self.assertEqual(acc, 5000)
+        self.assertEqual(s, "abcdef")
+    }
+
+    def test_list_slice_return() {
+        const xs: list[int] = [10, 20, 30, 40]
+        const sub: list[int] = mid(xs)
+        self.assertEqual(len(sub), 2)
+        self.assertEqual(sub[0], 20)
+        self.assertEqual(sub[1], 30)
+        self.assertEqual(len(xs), 4)
+    }
+
+    def test_element_read_return_outlives_source() {
+        # Element-read returns must still incref: the value has to survive the source being
+        # dropped (a missing incref is an ASan-caught use-after-free).
+        const piece: str = "stored"
+        d: dict[str, str] = {}
+        d["k"] = piece + "-value"
+        const v: str = dget(d, "k")
+        d = {}
+        j: int = 0
+        while j < 200 { const junk: str = piece + "-churn"; j = j + 1 }
+        self.assertEqual(v, "stored-value")
+
+        xs: list[str] = [piece + "-elem", "y", "z"]
+        const e: str = lget(xs, 0)
+        xs = []
+        j = 0
+        while j < 200 { const junk2: str = piece + "-churn2"; j = j + 1 }
+        self.assertEqual(e, "stored-elem")
+    }
+}
+
+
+class Src {
+    s: str
+
+    def(s: str) {
+        self.s = s
+    }
+
+    def peek(i: int) -> str {
+        return self.s[i]
+    }
+}
+
+def head_of(s: str) -> str {
+    return s[0]
+}
+
+def pick(xs: list[str], i: int) -> str {
+    return xs[i]
+}
+
+
+class StrReturnOwnershipTest(TestCase) {
+    def test_function_return_element() -> None {
+        self.assertEqual(head_of("dragon"), "d")
+    }
+
+    def test_method_return_element_in_loop() -> None {
+        src: Src = Src("abcabc")
+        hits: int = 0
+        i: int = 0
+        while i < 600 {
+            if src.peek(i % 6) == "a" {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 200)
+    }
+
+    def test_bound_local_in_loop() -> None {
+        src: Src = Src("xyz")
+        out: list[str] = []
+        i: int = 0
+        while i < 9 {
+            c: str = src.peek(i % 3)
+            out.append(c)
+            i = i + 1
+        }
+        self.assertEqual("".join(out), "xyzxyzxyz")
+    }
+
+    # The borrowed cases keep working: list element returns stay usable after
+    # heavy churn (their incref is the documented UAF guard).
+    def test_list_element_return_still_borrows() -> None {
+        xs: list[str] = ["alpha", "beta", "gamma"]
+        got: str = pick(xs, 1)
+        self.assertEqual(got, "beta")
+        i: int = 0
+        while i < 50 {
+            self.assertEqual(len(pick(xs, i % 3)) > 0, True)
+            i = i + 1
+        }
+    }
+
+    def test_slice_return() -> None {
+        src: Src = Src("dragonfly")
+        self.assertEqual(src.s[0:6], "dragon")
+    }
+}
+
+
+def make_block(i: int) -> bytes {
+    out: list[int] = []
+    out.append(i % 256)
+    out.append((i + 1) % 256)
+    return bytes(out)
+}
+
+class BytesAugAssignRC(TestCase) {
+    def test_bytes_augassign_owned_rhs() {
+        i: int = 0
+        while i < 2000 {
+            acc: bytes = b""
+            acc += make_block(i)
+            acc += make_block(i + 7)
+            self.assertEqual(len(acc), 4)
+            i = i + 1
+        }
+    }
+
+    def test_bytes_augassign_literal_rhs() {
+        acc: bytes = b"ab"
+        acc += b"cd"
+        self.assertEqual(len(acc), 4)
+    }
+}
+
+
+def sysname() -> str {
+    p: str = "Lin"
+    return p + "ux-wwwwwwwwwwwwwwww"
+}
+
+
+class InOperatorProbe(TestCase) {
+    def test_neq_owned_lhs() {
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(sysname() != "")
+            i = i + 1
+        }
+    }
+
+    def test_eq_owned_lhs() {
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(sysname() == "Linux-wwwwwwwwwwwwwwww")
+            i = i + 1
+        }
+    }
+
+    def test_in_owned_lhs() {
+        hay: str = "xxLinux-wwwwwwwwwwwwwwwwyy"
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(sysname() in hay)
+            i = i + 1
+        }
+    }
+
+    def test_asserteq_owned_arg() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(sysname(), "Linux-wwwwwwwwwwwwwwww")
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_guards() {
+        s: str = "abc-wwwwwwwwwwwwwwww"
+        d: dict[int, str] = {1: "one-wwwwwwwwwwwwwwww"}
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(s != "")
+            self.assertTrue(d[1] != "")
+            self.assertTrue(s in "xxabc-wwwwwwwwwwwwwwwwyy")
+            i = i + 1
+        }
+        self.assertEqual(s, "abc-wwwwwwwwwwwwwwww")
+        self.assertEqual(d[1], "one-wwwwwwwwwwwwwwww")
+    }
+}
+
+
+def consume(s: str) -> bool {
+    return len(s) > 0
+}
+
+class TernaryMixedArmsRC(TestCase) {
+    def test_dict_read_vs_literal_arm() {
+        d: dict[str, str] = {}
+        d["content-type"] = "x" + "text/plain; charset=utf-8"
+        i: int = 0
+        while i < 2000 {
+            ok: bool = consume(d["content-type"] if "content-type" in d else "")
+            self.assertTrue(ok)
+            i = i + 1
+        }
+        self.assertEqual(d["content-type"], "xtext/plain; charset=utf-8")
+    }
+
+    def test_borrowed_name_arms() {
+        a: str = "left" + "L"
+        b: str = "right" + "R"
+        i: int = 0
+        while i < 2000 {
+            picked: str = a if i % 2 == 0 else b
+            self.assertTrue(len(picked) > 4)
+            i = i + 1
+        }
+        self.assertEqual(a, "leftL")
+        self.assertEqual(b, "rightR")
+    }
+
+    def test_owned_call_arms() {
+        i: int = 0
+        while i < 2000 {
+            v: str = ("a" + str(i)) if i % 2 == 0 else ("b" + str(i))
+            self.assertTrue(len(v) > 1)
+            i = i + 1
+        }
+    }
+}
+
+
+class FwdRefArgDrainRC(TestCase) {
+    def test_forward_ref_result_as_extern_arg() {
+        i: int = 0
+        while i < 2000 {
+            body: str = ""
+            body = dragon_str_concat(body, fwd_helper(i))
+            self.assertTrue(len(body) > 5)
+            i = i + 1
+        }
+    }
+
+    def test_forward_ref_result_type_is_concrete() {
+        s: str = fwd_helper(7).upper()
+        self.assertEqual(s, "CHUNK7")
+    }
+}
+
+def fwd_helper(n: int) -> str {
+    return "chunk" + str(n)
+}
+
+
+# Owned heap temps passed to BORROW callees must be released after the call; transfer callees
+# (list.append, dict set) adopt the +1 and are NOT drained (a wrong-kind decref was a proven UAF).
+
+def list_len_default(items: list[int] = [10, 20, 30]) -> int {
+    return len(items)
+}
+
+
+class BorrowArgRcTests(TestCase) {
+    def test_str_method_owned_temp_args() {
+        hits: int = 0
+        i: int = 0
+        while i < 500 {
+            s: str = "alpha beta alpha"
+            n: int = s.find("al" + str(i % 1))
+            r: str = s.replace("a" + str(i % 1), "A")
+            parts: list[str] = s.split(" " + str(i % 1))
+            if n < 0 {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 500)
+    }
+
+    def test_collection_borrow_method_owned_temp_args() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            xs: list[str] = ["x", "y", "z"]
+            c: int = xs.count("q" + str(i % 1))
+            d: dict[str, int] = {"k": 1}
+            v: int = d.get("z" + str(i % 1), 7)
+            st: set[str] = {"m", "n"}
+            u: set[str] = st.union({"p" + str(i % 1)})
+            total = total + c + v + len(u)
+            i = i + 1
+        }
+        self.assertEqual(total, 5000)
+    }
+
+    def test_builtin_borrow_owned_temp_args() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            n: int = len("ab" + str(i % 1))
+            v: int = int("4" + str(i % 1))
+            sm: int = sum([1, 2, i])
+            total = total + n + v + sm
+            i = i + 1
+        }
+        self.assertEqual(total, 147750)
+    }
+
+    def test_default_arg_owned_temp() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            total = total + list_len_default()
+            i = i + 1
+        }
+        self.assertEqual(total, 1500)
+    }
+}
+
+
+# Static-method dispatch built no argTemps drain: every owned-temp arg leaked once per call
+# (LSan A/B: clean with the drain, 2 str objects per iteration reverted). A double-free crashes here.
+
+class Mathy {
+    @staticmethod
+    def combine(a: str, b: str) -> int {
+        return len(a) + len(b)
+    }
+
+    @staticmethod
+    def first_char(s: str) -> str {
+        return s[0:1]
+    }
+}
+
+
+class StaticArgRcTests(TestCase) {
+    def test_owned_temp_str_args() {
+        total: int = 0
+        i: int = 0
+        while i < 1000 {
+            total = total + Mathy.combine(str(i), str(i * 7))
+            i = i + 1
+        }
+        self.assertEqual(total > 0, True)
+    }
+
+    def test_owned_temp_slice_arg() {
+        seen: int = 0
+        i: int = 0
+        while i < 1000 {
+            c: str = Mathy.first_char(str(i) + "z")
+            if c == "1" {
+                seen = seen + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(seen, 111)
+    }
+}
+
+
+# Cross-module `mod.fn(...)` built no argTemps, leaking each owned temp arg (callee borrows);
+# reverting the release leaks one concat per call, and draining a BORROWED Name double-frees.
+
+class CrossModuleArgRcTests(TestCase) {
+    def test_owned_temp_arg() {
+        const a: str = "/foo/.."
+        const r: str = os.path_normpath(a + "/bar")
+        self.assertEqual(r, "/bar")
+        self.assertEqual(a, "/foo/..")
+    }
+
+    def test_borrowed_name_arg_not_freed() {
+        p: str = "/x/y/../z"
+        i: int = 0
+        while i < 500 {
+            const r: str = os.path_normpath(p)
+            self.assertEqual(r, "/x/z")
+            i = i + 1
+        }
+        self.assertEqual(p, "/x/y/../z")
+    }
+
+    def test_owned_temp_arg_loop() {
+        # Stress the owned-temp release path; a double-free would crash/corrupt.
+        const base: str = "/a/b/.."
+        i: int = 0
+        acc: int = 0
+        while i < 500 {
+            const r: str = os.path_normpath(base + "/c")
+            acc = acc + len(r)
+            i = i + 1
+        }
+        self.assertEqual(acc, 2000)
+        self.assertEqual(base, "/a/b/..")
+    }
+}
+
+
+main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests()])

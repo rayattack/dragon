@@ -1,0 +1,427 @@
+from unittest import TestCase, main
+from binascii import unhexlify
+from crypto import aes_gcm_encrypt, aes_gcm_decrypt
+from crypto import chacha20poly1305_encrypt, chacha20poly1305_decrypt
+from crypto import sign, verify
+from crypto import ed25519_keypair, ed25519_public_key, ed25519_sign, ed25519_verify
+from totp import hotp, totp_at, verify as totp_verify
+from time import now as _now
+from secrets import token_bytes, token_hex, token_urlsafe, randbelow, randbits, compare_digest
+from merkle import root, inclusion_proof, verify_inclusion, consistency_proof, verify_consistency
+
+const RSA_PRIV: bytes = b"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCFI36XQ0wQnQNB\neh1tIb41z8NrH+huOkND+9+AFwc79eXEQBEtd88+cHOdJzGd8rCcgvfliYNbzA9I\ne6c4m1y0W6YJWKX3ejnQgWkKnOsKb6KxG9mqyFJWr4WikluQa+uUgpCfioHkJ4Z+\ngYj8vd9CXdg60rsB+LX8C/D+XifUDhbS82ttbi/VPwhGvCGANkmOs8YiHeB4lHoA\nEqn8Ldjjz0dR1ANLDZp/4X8Zpp8/J1R1+riy9VLDqyKy7JBiy8MsOnAFddDc5p63\nQo0yAwKwpQdfupx1PzRMp90ckl8AxTG1cYgAajS7IAp1jNlgAz8AaGpbl8dJe+wL\n/FAb0SpzAgMBAAECggEADqDmmmEoZ5TmPtis3gj8mMtcuesAw10Ud1D37t+Dic42\nsjhQityPVq7NYow5Z+o6sd+0CYeb+XHzkJpsNmHfrujOVq2OWCGZCPSxzBrkumSn\nYsAKy7iEpNtWmr/BCXPKJ9WsD/43JRCbYaVYSLOQvH6KMSBmsCHvK6P2P+9W1KDq\nbk6kE43kWNNO0hvcjP+pwyHO/Lg74CHUOZFLhq9FYMWMA0NDTQoxJeiSHHmg6CpK\nxkapel7ZE+0PfIKuLH2r/A/Gb/ySQfgHqy0yu1NZ4D8yNDD1m4J6zAogXhTMCykS\nUegVjZ/oacqhUTXT1gcORtgzYUf9aiNXrknvcjjk/QKBgQC8JPyPOQUW4IpGtw6G\nw5fqnTE3RngheuJVOGG3ijW7LrstwMnFPUgHQ6WEF2JW6MHcGc6KJufD4Mze+tUM\nwcapWnf08820RZ4DciByXMkdfJ5xnNygLuewdCh5Y/zm+l6o8ZwuHnIzlLDOBpfq\n26QLT7GYRfhJnG8sLcinGYcjvQKBgQC1J+1If9P/jXWNYvQxK/hRj0RZwsuIqs/w\n3GAhHnjVb4fc7zY/NFJXHsKjBfksKJBApgVnaROXhXnAenswHNDGo3NcbRnBSZlz\nl928mlyjwuqPdG9SKwwO22jddaWBCGq8ZfaWUxbC1U35TNoTre3voW8KTECe8Q/6\nsGhMLzhR7wKBgQCJ2E9yX8RqzniA9v2dnxBexGyaovbBENdiuLxfTNOxILvi+aza\n5dsv90/9R2S1aDMgn4fDkF2eFcYEWKJfhlmXGsFopne/7IGo5KUBJRn0kKlFdDfw\n5Gy7y18cETXpxOY1wU88OvJQ+E/RouMLH4FBCFKFzj3rMMIDDEhGpV1twQKBgGhV\ne4ri3EV1wntQv5VGXrkSi2orD7BBuItfURoiA7PhjV1IhHS4fKfidnUP7qdpIVOq\nirg5Q2hkHnAl2qcmIXQWFU3pJAk3i2KQ18tVF//VNeSzSZ4IXuR7p5TMuiprn5Ws\nH+4KIrTJxyPLCFqHNN9rmZlTu3APJIXcbeVa2NQPAoGAT2KTgdgoct4gXNIyz/q1\ngWo3ro/cSupmU1Ct4cxdqQH4eAqdP7Eu1qITu15f+yxUitriXfJUWvz8zsBFMVWm\nfSNTGev5l77Kb/gaVyu6sc5wUbU6Ch+4v9ZtazzafkUjrdEgsSKxnY9bKeXkjvPr\noVUFsga5I/tn86WzBnf5Vmg=\n-----END PRIVATE KEY-----\n"
+const RSA_PUB: bytes = b"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhSN+l0NMEJ0DQXodbSG+\nNc/Dax/objpDQ/vfgBcHO/XlxEARLXfPPnBznScxnfKwnIL35YmDW8wPSHunOJtc\ntFumCVil93o50IFpCpzrCm+isRvZqshSVq+FopJbkGvrlIKQn4qB5CeGfoGI/L3f\nQl3YOtK7Afi1/Avw/l4n1A4W0vNrbW4v1T8IRrwhgDZJjrPGIh3geJR6ABKp/C3Y\n489HUdQDSw2af+F/GaafPydUdfq4svVSw6sisuyQYsvDLDpwBXXQ3Oaet0KNMgMC\nsKUHX7qcdT80TKfdHJJfAMUxtXGIAGo0uyAKdYzZYAM/AGhqW5fHSXvsC/xQG9Eq\ncwIDAQAB\n-----END PUBLIC KEY-----\n"
+
+const EC_PRIV: bytes = b"-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgkW1nk2cEXa1IzJjo\nBm/7HribpNczjCjwbuQPlNC7BhGhRANCAAT6W/R6hC4oW2i+J04pjdGvi/6LXtwr\ny203IaNI60NAQnrCUp1EzgMM3KErQP4fhpd5VBL9nTI6YD0yqQ5wmnzL\n-----END PRIVATE KEY-----\n"
+const EC_PUB: bytes = b"-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE+lv0eoQuKFtovidOKY3Rr4v+i17c\nK8ttNyGjSOtDQEJ6wlKdRM4DDNyhK0D+H4aXeVQS/Z0yOmA9MqkOcJp8yw==\n-----END PUBLIC KEY-----\n"
+
+const MSG: bytes = b"The quick brown fox jumps over the lazy dog"
+const TAMPERED: bytes = b"The quick brown fox jumps over the lazy dGg"
+
+const SEED1: bytes = unhexlify("0000000000000000000000000000000000000000000000000000000000000000")
+const SEED2: bytes = unhexlify("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+const SEED3: bytes = unhexlify("c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7")
+
+const PK1: str = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+const PK2: str = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+const PK3: str = "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025"
+
+const MSG2: bytes = b"abc"
+const MSG3: bytes = b"The quick brown fox jumps over the lazy dog"
+
+const SIG1_EMPTY: str = "8f895b3cafe2c9506039d0e2a66382568004674fe8d237785092e40d6aaf483e4fc60168705f31f101596138ce21aa357c0d32a064f423dc3ee4aa3abf53f803"
+const SIG2_ABC: str = "a377ba06339de184aa1a88b883d8558b704b96f7e4b2ac3e7984fc297e9549bd4ee1bcbb72553fc768400ec2395a702311e7aed969a713387b3377855a537701"
+const SIG3_FOX: str = "5be4d500bb415c0095a7988d18f5a4dc84078ff64257a914255e153b63dd5cbbc13e2b6881bff075bddf5a88e4e8923281efd1e23f580faeba44265f194b490c"
+
+const SECRET: bytes = b"12345678901234567890"
+
+const TWO_POW_62: int = 4611686018427387904
+
+class AeadTests(TestCase) {
+    def test_aes_gcm_encrypt_kat() {
+        const key: bytes = unhexlify("feffe9928665731c6d6a8f9467308308")
+        const iv: bytes = unhexlify("cafebabefacedbaddecaf888")
+        const aad: bytes = unhexlify("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+        const pt: bytes = unhexlify("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+        const want: str = "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e0915bc94fbc3221a5db94fae95ae7121a47"
+        const out: bytes = aes_gcm_encrypt(key, iv, pt, aad)
+        self.assertEqual(out.hex(), want)
+    }
+
+    def test_aes_gcm_roundtrip() {
+        const key: bytes = unhexlify("feffe9928665731c6d6a8f9467308308")
+        const iv: bytes = unhexlify("cafebabefacedbaddecaf888")
+        const aad: bytes = unhexlify("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+        const pt: bytes = unhexlify("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+        const ct: bytes = aes_gcm_encrypt(key, iv, pt, aad)
+        const back: bytes = aes_gcm_decrypt(key, iv, ct, aad)
+        self.assertEqual(back.hex(), pt.hex())
+    }
+
+    def test_aes_gcm_wrong_aad_raises() {
+        const key: bytes = unhexlify("feffe9928665731c6d6a8f9467308308")
+        const iv: bytes = unhexlify("cafebabefacedbaddecaf888")
+        const aad: bytes = unhexlify("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+        const pt: bytes = unhexlify("00112233445566778899aabbccddeeff")
+        const ct: bytes = aes_gcm_encrypt(key, iv, pt, aad)
+        raised: bool = false
+        try {
+            const back: bytes = aes_gcm_decrypt(key, iv, ct, b"not the same aad")
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_chacha20poly1305_encrypt_kat() {
+        const key: bytes = unhexlify("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+        const nonce: bytes = unhexlify("070000004041424344454647")
+        const aad: bytes = unhexlify("50515253c0c1c2c3c4c5c6c7")
+        const pt: bytes = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+        const want: str = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116"
+        const tag: str = "1ae10b594f09e26a7e902ecbd0600691"
+        const out: bytes = chacha20poly1305_encrypt(key, nonce, pt, aad)
+        self.assertEqual(out.hex(), want + tag)
+    }
+
+    def test_chacha20poly1305_roundtrip() {
+        const key: bytes = unhexlify("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+        const nonce: bytes = unhexlify("070000004041424344454647")
+        const aad: bytes = unhexlify("50515253c0c1c2c3c4c5c6c7")
+        const pt: bytes = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+        const ct: bytes = chacha20poly1305_encrypt(key, nonce, pt, aad)
+        const back: bytes = chacha20poly1305_decrypt(key, nonce, ct, aad)
+        self.assertEqual(back.hex(), pt.hex())
+    }
+
+    def test_chacha20poly1305_tamper_raises() {
+        const key: bytes = unhexlify("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
+        const nonce: bytes = unhexlify("070000004041424344454647")
+        const pt: bytes = b"secret payload"
+        const ct: bytes = chacha20poly1305_encrypt(key, nonce, pt, b"")
+        raised: bool = false
+        try {
+            const wrong: bytes = unhexlify("00000000000000000000000000000000000000000000000000000000000000ff")
+            const back: bytes = chacha20poly1305_decrypt(wrong, nonce, ct, b"")
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+class AsymmetricTests(TestCase) {
+    def test_rsa_roundtrip() {
+        const sig: bytes = sign(RSA_PRIV, MSG)
+        self.assertTrue(verify(RSA_PUB, MSG, sig))
+    }
+
+    def test_ecdsa_roundtrip() {
+        const sig: bytes = sign(EC_PRIV, MSG)
+        self.assertTrue(verify(EC_PUB, MSG, sig))
+    }
+
+    def test_rsa_rejects_tampered_message() {
+        const sig: bytes = sign(RSA_PRIV, MSG)
+        self.assertFalse(verify(RSA_PUB, TAMPERED, sig))
+    }
+
+    def test_ecdsa_rejects_tampered_message() {
+        const sig: bytes = sign(EC_PRIV, MSG)
+        self.assertFalse(verify(EC_PUB, TAMPERED, sig))
+    }
+
+    def test_cross_key_rejected() {
+        const rsa_sig: bytes = sign(RSA_PRIV, MSG)
+        self.assertFalse(verify(EC_PUB, MSG, rsa_sig))
+        const ec_sig: bytes = sign(EC_PRIV, MSG)
+        self.assertFalse(verify(RSA_PUB, MSG, ec_sig))
+    }
+
+    def test_hash_choice_must_match() {
+        const sig: bytes = sign(RSA_PRIV, MSG, "sha512")
+        self.assertTrue(verify(RSA_PUB, MSG, sig, "sha512"))
+        self.assertFalse(verify(RSA_PUB, MSG, sig, "sha256"))
+    }
+}
+
+class Ed25519Tests(TestCase) {
+    def test_public_key_derivation() {
+        self.assertEqual(ed25519_public_key(SEED1).hex(), PK1)
+        self.assertEqual(ed25519_public_key(SEED2).hex(), PK2)
+        self.assertEqual(ed25519_public_key(SEED3).hex(), PK3)
+    }
+
+    def test_sign_kat_empty_message() {
+        self.assertEqual(ed25519_sign(SEED1, b"").hex(), SIG1_EMPTY)
+    }
+
+    def test_sign_kat_abc() {
+        self.assertEqual(ed25519_sign(SEED2, MSG2).hex(), SIG2_ABC)
+    }
+
+    def test_sign_kat_fox() {
+        self.assertEqual(ed25519_sign(SEED3, MSG3).hex(), SIG3_FOX)
+    }
+
+    def test_verify_accepts_valid() {
+        const pk: bytes = ed25519_public_key(SEED3)
+        const sig: bytes = ed25519_sign(SEED3, MSG3)
+        self.assertTrue(ed25519_verify(pk, MSG3, sig))
+    }
+
+    def test_verify_rejects_tampered_message() {
+        const pk: bytes = ed25519_public_key(SEED2)
+        const sig: bytes = ed25519_sign(SEED2, MSG2)
+        self.assertFalse(ed25519_verify(pk, b"abd", sig))
+    }
+
+    def test_verify_rejects_wrong_key() {
+        const sig: bytes = ed25519_sign(SEED2, MSG2)
+        const pk_other: bytes = ed25519_public_key(SEED3)
+        self.assertFalse(ed25519_verify(pk_other, MSG2, sig))
+    }
+
+    def test_keypair_roundtrip() {
+        const kp: tuple[bytes, bytes] = ed25519_keypair()
+        const priv: bytes = kp[0]
+        const pub: bytes = kp[1]
+        self.assertEqual(len(priv), 32)
+        self.assertEqual(len(pub), 32)
+        self.assertEqual(ed25519_public_key(priv).hex(), pub.hex())
+        const sig: bytes = ed25519_sign(priv, b"roundtrip message")
+        self.assertTrue(ed25519_verify(pub, b"roundtrip message", sig))
+    }
+}
+
+class HotpRfc4226Tests(TestCase) {
+    """Known-answer tests for HOTP/TOTP.
+
+    RFC 4226 §6.2 (Appendix D) HOTP test table: ASCII secret
+    b"12345678901234567890", counters 0..9 -> the canonical 6-digit codes.
+    RFC 6238 §4: with time_step=30 the unix instant t=59 maps to counter 1, so
+    its TOTP equals the HOTP at counter 1 (287082). verify() exercises the
+    +/-skew resync window and the constant-time comparison contract.
+
+    The secret is passed as raw ASCII bytes, so no base32 decoding is involved."""
+
+    def test_rfc4226_appendix_d_table() {
+        expected: list[str] = ["755224", "287082", "359152", "969429",
+            "338314", "254676", "287922", "162583", "399871", "520489"]
+        i: int = 0
+        while i < 10 {
+            self.assertEqual(hotp(SECRET, i), expected[i])
+            i = i + 1
+        }
+    }
+
+    def test_default_is_six_digits() {
+        self.assertEqual(len(hotp(SECRET, 0)), 6)
+    }
+
+    def test_zero_left_padding_preserved() {
+        code: str = hotp(SECRET, 4, 8)
+        self.assertEqual(len(code), 8)
+    }
+}
+
+class TotpRfc6238Tests(TestCase) {
+    def test_t59_maps_to_counter_one() {
+        self.assertEqual(totp_at(SECRET, 59, 30, 6), "287082")
+    }
+
+    def test_t0_maps_to_counter_zero() {
+        self.assertEqual(totp_at(SECRET, 0, 30, 6), "755224")
+    }
+
+    def test_t29_still_counter_zero() {
+        self.assertEqual(totp_at(SECRET, 29, 30, 6), "755224")
+    }
+}
+
+class VerifyTests(TestCase) {
+    def test_verify_accepts_current_window() {
+        code: str = totp_at(SECRET, _live_counter_time(), 30, 6)
+        self.assertTrue(totp_verify(code, SECRET))
+    }
+
+    def test_verify_rejects_wrong_code() {
+        self.assertFalse(totp_verify("000000", SECRET, 30, 6, 0))
+    }
+
+    def test_verify_rejects_distant_window() {
+        far: str = totp_at(SECRET, _live_counter_time() + 30000, 30, 6)
+        self.assertFalse(totp_verify(far, SECRET, 30, 6, 1))
+    }
+}
+
+def _live_counter_time() -> int {
+    return _now()
+}
+
+class CompareDigestTests(TestCase) {
+    def test_equal() {
+        self.assertTrue(compare_digest(b"abc", b"abc"))
+    }
+    def test_equal_empty() {
+        self.assertTrue(compare_digest(b"", b""))
+    }
+    def test_unequal_same_length() {
+        self.assertFalse(compare_digest(b"abc", b"abd"))
+    }
+    def test_unequal_different_length() {
+        self.assertFalse(compare_digest(b"abc", b"abcd"))
+    }
+}
+
+class TokenTests(TestCase) {
+    def test_token_bytes_length() {
+        self.assertEqual(len(token_bytes(16)), 16)
+        self.assertEqual(len(token_bytes(1)), 1)
+    }
+    def test_token_bytes_zero_empty() {
+        self.assertEqual(len(token_bytes(0)), 0)
+    }
+    def test_token_hex_length() {
+        self.assertEqual(len(token_hex(16)), 32)
+    }
+    def test_token_urlsafe_no_padding() {
+        s: str = token_urlsafe(16)
+        self.assertGreater(len(s), 0)
+        self.assertNotIn("=", s)
+    }
+    def test_urandom_varies() {
+        a: bytes = token_bytes(32)
+        b: bytes = token_bytes(32)
+        self.assertNotEqual(a, b)
+    }
+}
+
+class RandbelowTests(TestCase) {
+    def test_range_and_not_stuck() {
+        seen: set[int] = set()
+        i: int = 0
+        while i < 200 {
+            v: int = randbelow(100)
+            self.assertGreaterEqual(v, 0)
+            self.assertLess(v, 100)
+            seen.add(v)
+            i = i + 1
+        }
+        self.assertGreater(len(seen), 1)
+    }
+    def test_randbelow_one_is_zero() {
+        i: int = 0
+        while i < 20 {
+            self.assertEqual(randbelow(1), 0)
+            i = i + 1
+        }
+    }
+    def test_randbits_range() {
+        i: int = 0
+        while i < 100 {
+            v: int = randbits(8)
+            self.assertGreaterEqual(v, 0)
+            self.assertLess(v, 256)
+            i = i + 1
+        }
+    }
+    def test_randbits_zero() {
+        self.assertEqual(randbits(0), 0)
+    }
+    def test_randbits_is_never_negative_at_the_top_width() {
+        i: int = 0
+        while i < 200 {
+            self.assertGreaterEqual(randbits(63), 0)
+            self.assertGreaterEqual(randbits(62), 0)
+            self.assertGreaterEqual(randbits(32), 0)
+            i = i + 1
+        }
+    }
+    def test_randbits_62_stays_within_62_bits() {
+        i: int = 0
+        while i < 200 {
+            v: int = randbits(62)
+            self.assertGreaterEqual(v, 0)
+            self.assertLess(v, TWO_POW_62)
+            i = i + 1
+        }
+    }
+    def test_randbits_refuses_widths_int_cannot_hold() {
+        def w128() {
+            v: int = randbits(128)
+        }
+        def w64() {
+            v: int = randbits(64)
+        }
+        self.assertRaises(ValueError, w128)
+        self.assertRaises(ValueError, w64)
+    }
+}
+
+def _leaves(n: int) -> list[bytes] {
+    out: list[bytes] = []
+    i: int = 0
+    while i < n {
+        out.append(("leaf-" + str(i)).encode("utf-8"))
+        i = i + 1
+    }
+    return out
+}
+
+class MerkleTests(TestCase) {
+    def test_inclusion_round_trips_all_small_trees() {
+        const N: int = 12
+        size: int = 1
+        while size <= N {
+            const lvs: list[bytes] = _leaves(size)
+            const r: bytes = root(lvs)
+            idx: int = 0
+            while idx < size {
+                const p: list[bytes] = inclusion_proof(lvs, idx)
+                self.assertTrue(verify_inclusion(lvs[idx], idx, size, p, r))
+                self.assertFalse(verify_inclusion(("x" + str(idx)).encode("utf-8"), idx, size, p, r))
+                idx = idx + 1
+            }
+            size = size + 1
+        }
+    }
+
+    def test_inclusion_wrong_root_rejected() {
+        const lvs: list[bytes] = _leaves(7)
+        const r: bytes = root(lvs)
+        const other: bytes = root(_leaves(8))
+        const p: list[bytes] = inclusion_proof(lvs, 3)
+        self.assertTrue(verify_inclusion(lvs[3], 3, 7, p, r))
+        self.assertFalse(verify_inclusion(lvs[3], 3, 7, p, other))
+    }
+
+    def test_consistency_round_trips_all_small_trees() {
+        const N: int = 12
+        n: int = 1
+        while n <= N {
+            const big: list[bytes] = _leaves(n)
+            const rn: bytes = root(big)
+            m: int = 0
+            while m <= n {
+                const rm: bytes = root(_leaves(m))
+                const proof: list[bytes] = consistency_proof(big, m, n)
+                self.assertTrue(verify_consistency(m, n, proof, rm, rn))
+                m = m + 1
+            }
+            n = n + 1
+        }
+    }
+
+    def test_consistency_rewrite_rejected() {
+        const five: list[bytes] = _leaves(5)
+        const seven: list[bytes] = _leaves(7)
+        const proof: list[bytes] = consistency_proof(seven, 5, 7)
+        self.assertTrue(verify_consistency(5, 7, proof, root(five), root(seven)))
+        forged: list[bytes] = _leaves(7)
+        forged[0] = b"rewritten"
+        self.assertFalse(verify_consistency(5, 7, proof, root(five), root(forged)))
+    }
+}
+
+main([AeadTests(), AsymmetricTests(), Ed25519Tests(), HotpRfc4226Tests(), TotpRfc6238Tests(), VerifyTests(), CompareDigestTests(), TokenTests(), RandbelowTests(), MerkleTests()])

@@ -1,0 +1,316 @@
+from unittest import TestCase, main
+
+class Box[T] {
+    def(v: T) {
+        self.value = v
+    }
+    def get() -> T {
+        return self.value
+    }
+    def set(v: T) {
+        self.value = v
+    }
+}
+
+class Stack[T] {
+    items: list[T] = []
+    def push(x: T) {
+        self.items.append(x)
+    }
+    def pop() -> T {
+        return self.items.pop()
+    }
+    def size() -> int {
+        return len(self.items)
+    }
+}
+
+def first[T](xs: list[T]) -> T {
+    return xs[0]
+}
+
+def last[T](xs: list[T]) -> T {
+    return xs[len(xs) - 1]
+}
+
+def identity[T](x: T) -> T {
+    return x
+}
+
+class Inner[T] {
+    def(v: T) {
+        self.v = v
+    }
+    def get() -> T {
+        return self.v
+    }
+}
+
+class Outer[T] {
+    def(v: T) {
+        self.inner = Inner[T](v)
+    }
+    def unwrap() -> T {
+        return self.inner.get()
+    }
+}
+
+class Pair[K, V] {
+    def(k: K, v: V) {
+        self.key = k
+        self.val = v
+    }
+    def get_key() -> K {
+        return self.key
+    }
+    def get_val() -> V {
+        return self.val
+    }
+}
+
+class Container[T] {
+    def(v: T) { self.v = v }
+    def wrap[U](x: U) -> U { return x }
+    def pair[U](x: U) -> tuple[T, U] { return (self.v, x) }
+}
+
+class BuildOuter[T] {
+    def() { }
+    def build[U](x: U) -> U {
+        inner: Inner[U] = Inner[U](x)
+        return inner.get()
+    }
+}
+
+def apply2[T](fn: Callable[[T, T], T], a: T, b: T) -> T {
+    return fn(a, b)
+}
+
+def fold[T](fn: Callable[[T, T], T], xs: list[T], init: T) -> T {
+    acc: T = init
+    for x in xs {
+        acc = fn(acc, x)
+    }
+    return acc
+}
+
+def add_i(a: int, b: int) -> int {
+    return a + b
+}
+
+def cat_s(a: str, b: str) -> str {
+    return a + b
+}
+
+class GenericsBasicTests(TestCase) {
+    """Decision 044 - generic classes, monomorphized to native representation.
+
+    `Box[int]` stores an `i64`, `Box[str]` a `ptr`, `Box[float]` an `f64` - each a
+    distinct stamped class, no boxing (verified at the IR level by the GoogleTest
+    companion). Here we assert the user-visible behavior: values round-trip at their
+    native type, construction works both explicitly (`Box[int](v)`) and inferred
+    from the binding annotation (`b: Box[int] = Box(v)`), and a mutating container
+    (`Stack[T]`) push/pops correctly.
+    """
+
+    def test_box_int_explicit() {
+        b: Box[int] = Box[int](5)
+        self.assertEqual(b.get(), 5)
+        b.set(9)
+        self.assertEqual(b.get(), 9)
+    }
+
+    def test_box_str() {
+        b: Box[str] = Box[str]("hello")
+        self.assertEqual(b.get(), "hello")
+    }
+
+    def test_box_float() {
+        b: Box[float] = Box[float](3.5)
+        self.assertEqual(b.get(), 3.5)
+    }
+
+    def test_box_inferred_from_annotation() {
+        b: Box[int] = Box(42)
+        self.assertEqual(b.get(), 42)
+    }
+
+    def test_stack_push_pop() {
+        s: Stack[int] = Stack[int]()
+        s.push(1)
+        s.push(2)
+        s.push(3)
+        self.assertEqual(s.size(), 3)
+        self.assertEqual(s.pop(), 3)
+        self.assertEqual(s.pop(), 2)
+        self.assertEqual(s.size(), 1)
+    }
+
+    def test_two_instantiations_independent() {
+        bi: Box[int] = Box[int](1)
+        bs: Box[str] = Box[str]("x")
+        self.assertEqual(bi.get(), 1)
+        self.assertEqual(bs.get(), "x")
+    }
+}
+
+class GenericsFunctionTests(TestCase) {
+    """Decision 044 - generic free functions, monomorphized per concrete argument.
+
+    `def first[T](xs: list[T]) -> T` is stamped once per element type. Type arguments
+    are supplied either by inference from the argument (`first(nums)`) or explicitly
+    at the call site (`first[int](nums)`). Multi-parameter generics (`pair[K, V]`)
+    and a `T`-in-return-only function exercise the unifier and the explicit path.
+    """
+
+    def test_first_int_inferred() {
+        nums: list[int] = [10, 20, 30]
+        self.assertEqual(first(nums), 10)
+    }
+
+    def test_first_str_inferred() {
+        words: list[str] = ["a", "b", "c"]
+        self.assertEqual(first(words), "a")
+    }
+
+    def test_first_explicit_type_arg() {
+        nums: list[int] = [7, 8, 9]
+        self.assertEqual(first[int](nums), 7)
+    }
+
+    def test_last_inferred() {
+        nums: list[int] = [1, 2, 3, 99]
+        self.assertEqual(last(nums), 99)
+    }
+
+    def test_identity_int() {
+        self.assertEqual(identity[int](5), 5)
+    }
+
+    def test_identity_str() {
+        self.assertEqual(identity[str]("z"), "z")
+    }
+}
+
+class GenericsTransitiveTests(TestCase) {
+    """Decision 044 - transitive instantiation + composition with Any.
+
+    Instantiating `Outer[int]` must auto-stamp the `Inner[int]` it holds (the
+    worklist follows the dependency). `Pair[K, V]` exercises multi-parameter
+    stamping. `Box[Any]` composes the monomorphized container with the D039 box for
+    a genuinely heterogeneous element - monomorphize the container, box the element.
+    """
+
+    def test_outer_auto_stamps_inner() {
+        o: Outer[int] = Outer[int](99)
+        self.assertEqual(o.unwrap(), 99)
+    }
+
+    def test_outer_str() {
+        o: Outer[str] = Outer[str]("deep")
+        self.assertEqual(o.unwrap(), "deep")
+    }
+
+    def test_pair_multi_param() {
+        p: Pair[str, int] = Pair[str, int]("age", 30)
+        self.assertEqual(p.get_key(), "age")
+        self.assertEqual(p.get_val(), 30)
+    }
+
+    def test_box_any_holds_int() {
+        b: Box[Any] = Box[Any](7)
+        self.assertEqual(b.get(), 7)
+    }
+
+    def test_box_union_explicit() {
+        b: Box[int | str] = Box[int | str](5)
+        self.assertEqual(b.get(), 5)
+    }
+
+    def test_box_union_inferred() {
+        b: Box[int | str] = Box(11)
+        self.assertEqual(b.get(), 11)
+    }
+
+    def test_box_nested_generic() {
+        inner: Box[int] = Box[int](3)
+        outer: Box[Box[int]] = Box[Box[int]](inner)
+        got: Box[int] = outer.get()
+        self.assertEqual(got.get(), 3)
+    }
+}
+
+class DoubleMonoTests(TestCase) {
+    """Generic method on a generic-class instantiation - double monomorphization.
+
+    `Container[int].wrap[str]` needs the class type param `T` AND the method type
+    param `U` bound at once. The engine composes both frames into a single
+    substitution and stamps a distinct NATIVE specialization per (class-args,
+    method-args) pair - zero boxing, zero runtime dispatch (D044): the emitted
+    symbols are `Container[int]_wrap[str]` etc., identical in shape to hand-written
+    monomorphic methods. Covers a method using only `U`, a method using BOTH `T`
+    and `U`, multiple class instantiations sharing one method, inferred-`U` from the
+    binding, and a transitive nested instantiation inside the method body.
+    """
+
+    def test_method_param_only() {
+        c: Container[int] = Container[int](42)
+        self.assertEqual(c.wrap[str]("hi"), "hi")
+        self.assertEqual(c.wrap[int](7), 7)
+    }
+
+    def test_both_class_and_method_params() {
+        c: Container[int] = Container[int](7)
+        p: tuple[int, str] = c.pair[str]("hi")
+        self.assertEqual(p[0], 7)
+        self.assertEqual(p[1], "hi")
+    }
+
+    def test_multiple_class_instantiations_share_method() {
+        a: Container[int] = Container[int](1)
+        b: Container[str] = Container[str]("z")
+        self.assertEqual(a.wrap[int](5), 5)
+        self.assertEqual(b.wrap[str]("x"), "x")
+        self.assertEqual(a.wrap[str]("from-int"), "from-int")
+    }
+
+    def test_inferred_method_param() {
+        c: Container[int] = Container[int](7)
+        r: str = c.wrap("inferred")
+        self.assertEqual(r, "inferred")
+    }
+
+    def test_transitive_nested_instantiation() {
+        o: BuildOuter[int] = BuildOuter[int]()
+        self.assertEqual(o.build[str]("via-inner"), "via-inner")
+    }
+}
+
+class CallableGenericParam(TestCase) {
+    """Generic type params in Callable positions must substitute (J8).
+
+    Regression: `def f[T](fn: Callable[[T, T], T], ...)` failed to bind T at every
+    call site, even explicit `f[int](...)`, because neither unification nor the
+    concreteness check descended into function types. This blocked any generic
+    reduce/fold written in Dragon itself.
+    """
+
+    def test_inferred_int() {
+        self.assertEqual(apply2(add_i, 3, 4), 7)
+    }
+
+    def test_explicit_int() {
+        self.assertEqual(apply2[int](add_i, 5, 6), 11)
+    }
+
+    def test_inferred_str() {
+        self.assertEqual(apply2(cat_s, "ab", "cd"), "abcd")
+    }
+
+    def test_generic_fold() {
+        self.assertEqual(fold(add_i, [1, 2, 3, 4], 0), 10)
+        self.assertEqual(fold(cat_s, ["x", "y", "z"], ""), "xyz")
+    }
+}
+
+main([GenericsBasicTests(), GenericsFunctionTests(), GenericsTransitiveTests(), DoubleMonoTests(), CallableGenericParam()])

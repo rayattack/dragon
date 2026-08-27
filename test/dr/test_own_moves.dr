@@ -1,0 +1,473 @@
+from unittest import TestCase, main
+from threading import Lock
+
+class OwnFieldSink {
+    own _payload: str
+    def(own payload: str) {
+        self._payload = own payload
+    }
+    def read() -> str {
+        return self._payload
+    }
+}
+
+def consume(own s: str) -> int {
+    return len(s)
+}
+
+class OwnParamTests(TestCase) {
+    def test_move_into_consuming_fn() {
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            b: str = "payload-" + str(i)
+            total = total + consume(own b)
+            i = i + 1
+        }
+        self.assertTrue(total > 0)
+    }
+
+    def test_move_into_ctor_and_own_field() {
+        i: int = 0
+        while i < 3000 {
+            p: str = "boxed-" + str(i)
+            s: OwnFieldSink = OwnFieldSink(own p)
+            self.assertTrue(len(s.read()) > 5)
+            i = i + 1
+        }
+    }
+
+    def test_fresh_temp_exemption() {
+        n: int = consume("fresh-" + "temp")
+        self.assertEqual(n, 10)
+    }
+
+    def test_conditional_move_closed_with_del() {
+        i: int = 0
+        while i < 3000 {
+            x: str = "job-" + str(i)
+            if i % 2 == 0 {
+                consume(own x)
+            } else {
+                del x
+            }
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+}
+
+
+class LockBox {
+    own _lk: Lock
+    n: int = 0
+    def(n: int) {
+        self._lk = Lock()
+        self.n = n
+    }
+    def bump() -> int {
+        with self._lk {
+            self.n = self.n + 1
+        }
+        return self.n
+    }
+}
+
+class OwnFieldTests(TestCase) {
+    def test_lock_field_released_on_death() {
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            b: LockBox = LockBox(i)
+            total = total + b.bump()
+            i = i + 1
+        }
+        self.assertEqual(total, 4501500)
+    }
+
+    def test_del_of_lock_local() {
+        g: Lock = Lock()
+        with g {
+            self.assertEqual(1, 1)
+        }
+        del g
+        self.assertTrue(True)
+    }
+
+    def test_bare_local_lock_scope_exit() {
+        i: int = 0
+        while i < 3000 {
+            lk: Lock = Lock()
+            lk.acquire()
+            lk.release()
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_del_then_scope_exit_no_double_destroy() {
+        i: int = 0
+        while i < 3000 {
+            lk: Lock = Lock()
+            del lk
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_lock_local_del_in_loop_scope() {
+        i: int = 0
+        while i < 3000 {
+            l: Lock = Lock()
+            l.acquire()
+            l.release()
+            del l
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+}
+
+
+class Sink {
+    def take(own head: str, *rest: int) -> int {
+        n: int = len(head)
+        for r in rest {
+            n = n + r
+        }
+        return n
+    }
+
+    def take_plain(own head: str) -> int {
+        return len(head)
+    }
+
+    @staticmethod
+    def take_static(own head: str) -> int {
+        return len(head)
+    }
+}
+
+
+class Discard {
+    seen: int = 0
+
+    def(own msg: str) {
+        self.seen = len(msg)
+    }
+}
+
+
+# Move-out guard: an own param moved into an own field nulls the slot (scope exit must not free
+# it) and the field overwrite drops the previous value; the leak fix must not become a double-free.
+class Keeper {
+    own held: str
+
+    def(own initial: str) {
+        self.held = initial
+    }
+
+    def stash(own s: str) -> None {
+        self.held = s
+    }
+
+    def peek() -> int {
+        return len(self.held)
+    }
+}
+
+
+class OwnMethodParamTests(TestCase) {
+    """An `own` regular method parameter that is consumed (read) but not stored.
+
+    The caller MOVES its +1 in (`s.take(own v, ...)`), so the callee owns the
+    value and its scope exit must release it - the caller does not drain an `own`
+    argument. If the method-body prologue mis-marks an `own` heap param as merely
+    borrowed (as a free function's prologue explicitly does NOT), the callee never
+    frees it and every call leaks one string. Probed with and without a trailing
+    `*args` so the ownership path is exercised alongside the new variadic packing.
+    """
+
+    def test_own_regular_before_varargs() {
+        s: Sink = Sink()
+        i: int = 0
+        while i < 3000 {
+            v: str = "head-" + str(i % 7)
+            self.assertTrue(s.take(own v, 1, 2, 3) >= 6)
+            i = i + 1
+        }
+    }
+
+    def test_own_plain_method_param() {
+        s: Sink = Sink()
+        i: int = 0
+        while i < 3000 {
+            v: str = "x-" + str(i % 7)
+            self.assertTrue(s.take_plain(own v) > 0)
+            i = i + 1
+        }
+    }
+
+    def test_own_param_moved_into_field_no_double_free() {
+        k: Keeper = Keeper("seed")
+        i: int = 0
+        while i < 3000 {
+            v: str = "kept-" + str(i % 7)
+            k.stash(own v)
+            self.assertTrue(k.peek() > 0)
+            i = i + 1
+        }
+    }
+
+    def test_own_static_method_param() {
+        i: int = 0
+        while i < 3000 {
+            v: str = "s-" + str(i % 7)
+            self.assertTrue(Sink.take_static(own v) > 0)
+            i = i + 1
+        }
+    }
+
+    def test_own_constructor_param_consumed() {
+        i: int = 0
+        while i < 3000 {
+            v: str = "c-" + str(i % 7)
+            d: Discard = Discard(own v)
+            self.assertTrue(d.seen > 0)
+            i = i + 1
+        }
+    }
+}
+
+
+class Holder {
+    own data: dict[str, str]
+
+    def(own d: dict[str, str]) {
+        self.data = d
+    }
+
+    def get(k: str) -> str {
+        return self.data[k]
+    }
+}
+
+
+class Node {
+    own left: Node
+    own right: Node
+
+    def(own l: Node, own r: Node) {
+        self.left = l
+        self.right = r
+    }
+}
+
+
+def make(depth: int) -> Node {
+    if depth == 0 {
+        return Node(None, None)
+    }
+    return Node(make(depth - 1), make(depth - 1))
+}
+
+
+def count(node: Node) -> int {
+    if node.left == None {
+        return 1
+    }
+    return 1 + count(node.left) + count(node.right)
+}
+
+
+class OwnTransferTests(TestCase) {
+    """own-transfer slice: storing an owned binding into an `own` field is an
+    implicit move - no `own` keyword needed at the store.
+
+    Before this landed, `self.data = d` (with `own d` param, `own data` field) was
+    rejected and you had to write `self.data = own d`. The book always specified
+    the plain form (1604-ownership.md: an own param d, `self._data = d` -> "d
+    Moved; the field adopts the value, no copy, no incref"); the compiler now
+    matches. The move consumes the name (a later use is a use-after-move error),
+    and codegen adopts the +1 into the field exactly as an explicit `own` would,
+    so there is no leak and no double free - the churn here is RC-checked under
+    the suite's sanitizer build.
+    """
+
+    def test_move_param_into_own_field() -> None {
+        const h: Holder = Holder({"k": "value"})
+        self.assertEqual(h.get("k"), "value")
+    }
+
+    def test_move_fresh_local_into_own_field() -> None {
+        v: dict[str, str] = {"a": "1", "b": "2"}
+        const h: Holder = Holder(own v)
+        self.assertEqual(h.get("b"), "2")
+    }
+
+    def test_own_field_tree_builds_and_walks() -> None {
+        const t: Node = make(6)
+        self.assertEqual(count(t), 127)
+    }
+
+    def test_churn_stays_balanced() -> None {
+        # Many build/drop cycles - a leak or double-free would surface under
+        # the sanitizer build (and a wrong count catches a mis-wired move).
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            const t: Node = make(4)
+            total = total + count(t)
+            i = i + 1
+        }
+        self.assertEqual(total, 93000)
+    }
+}
+
+
+class DubTests(TestCase) {
+    def test_snapshot_iteration_fixes_the_repro() {
+        names: list[str] = ["a", "tmp1", "tmp2", "b"]
+        for name in dub names {
+            if name.startswith("tmp") {
+                names.remove(name)
+            }
+        }
+        self.assertEqual(names, ["a", "b"])
+    }
+
+    def test_dub_is_independent() {
+        i: int = 0
+        while i < 3000 {
+            base: list[int] = [1, 2, 3]
+            mine: list[int] = dub base
+            mine.append(4)
+            self.assertEqual(len(base), 3)
+            self.assertEqual(len(mine), 4)
+            i = i + 1
+        }
+    }
+
+    def test_dub_nested_is_deep() {
+        base: list[list[int]] = [[1, 2], [3, 4]]
+        mine: list[list[int]] = dub base
+        inner: list[int] = mine[0]
+        inner.append(99)
+        self.assertEqual(len(base[0]), 2)
+        self.assertEqual(len(mine[0]), 3)
+    }
+
+    def test_dub_str_identity_retain() {
+        i: int = 0
+        while i < 3000 {
+            s: str = "payload-" + str(i)
+            t: str = dub s
+            self.assertEqual(t, s)
+            i = i + 1
+        }
+    }
+
+    def test_dub_dict() {
+        base: dict[str, int] = {"a": 1}
+        mine: dict[str, int] = dub base
+        mine["b"] = 2
+        self.assertEqual(len(base), 1)
+        self.assertEqual(len(mine), 2)
+    }
+
+    def test_collect_then_apply_still_compiles() {
+        names: list[str] = ["a", "tmp1", "b"]
+        doomed: list[str] = []
+        for name in names {
+            if name.startswith("tmp") {
+                doomed.append(name)
+            }
+        }
+        for d in doomed {
+            names.remove(d)
+        }
+        self.assertEqual(names, ["a", "b"])
+    }
+}
+
+class Registry {
+    names: list[str]
+    tags: dict[str, str]
+
+    def() {
+        self.names = ["a", "tmp1", "tmp2", "b"]
+        self.tags = {"k": "v"}
+    }
+
+    def purge() -> None {
+        for n in dub self.names {
+            if n.startswith("tmp") {
+                self.names.remove(n)
+            }
+        }
+    }
+
+    def snapshot() -> list[str] {
+        return dub self.names
+    }
+
+    def declared_snapshot() -> own dict[str, str] {
+        return dub self.tags
+    }
+}
+
+def consumes(own xs: list[str]) -> int {
+    return len(xs)
+}
+
+class DubFieldTests(TestCase) {
+    def test_snapshot_iteration_over_a_field() {
+        r: Registry = Registry()
+        r.purge()
+        self.assertEqual(r.names, ["a", "b"])
+    }
+
+    def test_dub_of_a_field_is_independent() {
+        r: Registry = Registry()
+        snapshot: dict[str, str] = dub r.tags
+        snapshot["extra"] = "x"
+        self.assertEqual(len(r.tags), 1)
+        self.assertEqual(len(snapshot), 2)
+    }
+
+    def test_dub_field_through_a_non_self_receiver() {
+        r: Registry = Registry()
+        seen: int = 0
+        for n in dub r.names {
+            seen = seen + 1
+            r.names.remove(n)
+        }
+        self.assertEqual(seen, 4)
+        self.assertEqual(len(r.names), 0)
+    }
+
+    def test_returning_a_dubbed_field_is_independent() {
+        r: Registry = Registry()
+        copy: list[str] = r.snapshot()
+        copy.append("extra")
+        self.assertEqual(len(r.names), 4)
+        self.assertEqual(len(copy), 5)
+    }
+
+    def test_a_dubbed_return_satisfies_an_own_parameter() {
+        r: Registry = Registry()
+        mine: list[str] = r.snapshot()
+        self.assertEqual(consumes(own mine), 4)
+        self.assertEqual(len(r.names), 4)
+    }
+
+    def test_declared_own_return_is_independent() {
+        r: Registry = Registry()
+        copy: dict[str, str] = r.declared_snapshot()
+        copy["extra"] = "x"
+        self.assertEqual(len(r.tags), 1)
+        self.assertEqual(len(copy), 2)
+    }
+}
+
+main([OwnParamTests(), OwnFieldTests(), OwnMethodParamTests(), OwnTransferTests(), DubTests(), DubFieldTests()])

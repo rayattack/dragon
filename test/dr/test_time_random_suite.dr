@@ -1,0 +1,395 @@
+from unittest import TestCase, main
+import random
+import uuid
+import timeit
+import sched
+from datetime import date, datetime, datetime_fromtimestamp, date_fromtimestamp
+
+const UNSEEDED_MINSTD: float = 7.826369255781174e-06
+const UNSEEDED_GLIBC: float = 0.8401877167634666
+
+class RandomSeedingTests(TestCase) {
+    def test_auto_seeds_from_entropy() {
+        const first: float = random.random()
+        self.assertTrue(first != UNSEEDED_MINSTD and first != UNSEEDED_GLIBC)
+        self.assertTrue(first >= 0.0 and first < 1.0)
+    }
+
+    def test_explicit_seed_is_reproducible() {
+        random.seed(42)
+        const a: float = random.random()
+        const b: int = random.randint(1, 6)
+        random.seed(42)
+        self.assertEqual(a, random.random())
+        self.assertEqual(b, random.randint(1, 6))
+    }
+
+    def test_explicit_seed_beats_auto_seed() {
+        random.seed(7)
+        const a: float = random.random()
+        random.seed(7)
+        self.assertEqual(a, random.random())
+    }
+
+    def test_small_seeds_are_not_correlated() {
+        random.seed(1)
+        const a: float = random.random()
+        random.seed(2)
+        const b: float = random.random()
+        const gap: float = a - b if a > b else b - a
+        self.assertTrue(gap > 0.001)
+    }
+
+    def test_seed_time_has_subsecond_resolution() {
+        random.seed_time()
+        const a: float = random.random()
+        random.seed_time()
+        const b: float = random.random()
+        self.assertTrue(a != b)
+    }
+
+    def test_range_helpers_stay_in_bounds() {
+        i: int = 0
+        while i < 200 {
+            const r: int = random.randint(1, 6)
+            self.assertTrue(r >= 1 and r <= 6)
+            const q: int = random.randrange(0, 10)
+            self.assertTrue(q >= 0 and q < 10)
+            const u: float = random.uniform(2.0, 3.0)
+            self.assertTrue(u >= 2.0 and u <= 3.0)
+            i = i + 1
+        }
+    }
+}
+
+class Uuid4Tests(TestCase) {
+    def test_uuid4_is_wellformed() {
+        const u: str = uuid.uuid4()
+        self.assertEqual(len(u), 36)
+        self.assertTrue(uuid.uuid_is_valid(u))
+        self.assertEqual(uuid.uuid_version(u), 4)
+    }
+
+    def test_uuid4_does_not_repeat() {
+        seen: dict[str, bool] = {}
+        i: int = 0
+        while i < 256 {
+            const u: str = uuid.uuid4()
+            self.assertTrue(u not in seen)
+            seen[u] = true
+            i = i + 1
+        }
+        self.assertEqual(len(seen), 256)
+    }
+
+    def test_uuid4_variant_bits() {
+        i: int = 0
+        while i < 64 {
+            const u: str = uuid.uuid4()
+            const variant: str = u[19:20]
+            self.assertTrue(variant == "8" or variant == "9" or variant == "a" or variant == "b")
+            i = i + 1
+        }
+    }
+
+    def test_uuid4_is_independent_of_random_seed() {
+        random.seed(42)
+        const a: str = uuid.uuid4()
+        random.seed(42)
+        self.assertTrue(a != uuid.uuid4())
+    }
+}
+
+
+def _choice_empty() -> None {
+    xs: list[str] = []
+    random.choice(xs)
+}
+
+def _choice_int_empty() -> None {
+    xs: list[int] = []
+    random.choice_int(xs)
+}
+
+def _randint_off_by_one() -> None {
+    random.randint(5, 4)
+}
+
+def _randint_inverted() -> None {
+    random.randint(5, 2)
+}
+
+def _randrange_empty() -> None {
+    random.randrange(5, 5)
+}
+
+def _randrange_inverted() -> None {
+    random.randrange(7, 3)
+}
+
+def _sample_oversized() -> None {
+    random.sample([1, 2, 3], 5)
+}
+
+def _sample_negative() -> None {
+    random.sample([1, 2, 3], -1)
+}
+
+
+class RandomErrorTests(TestCase) {
+    def test_choice_empty_raises() {
+        self.assertRaises(IndexError, _choice_empty)
+    }
+
+    def test_choice_int_empty_raises() {
+        self.assertRaises(IndexError, _choice_int_empty)
+    }
+
+    def test_randrange_empty_raises() {
+        self.assertRaises(ValueError, _randrange_empty)
+        self.assertRaises(ValueError, _randrange_inverted)
+    }
+
+    def test_randint_empty_range_raises() {
+        self.assertRaises(ValueError, _randint_off_by_one)
+        self.assertRaises(ValueError, _randint_inverted)
+    }
+
+    def test_randint_single_value_range() {
+        random.seed(7)
+        self.assertEqual(random.randint(6, 6), 6)
+    }
+
+    def test_sample_oversized_raises() {
+        self.assertRaises(ValueError, _sample_oversized)
+        self.assertRaises(ValueError, _sample_negative)
+    }
+
+    def test_valid_calls_unchanged() {
+        random.seed(42)
+        self.assertEqual(random.choice(["only"]), "only")
+        self.assertEqual(random.choice_int([9]), 9)
+        self.assertEqual(random.randrange(3, 4), 3)
+        const s: list[int] = random.sample([1, 2, 3], 3)
+        self.assertEqual(len(s), 3)
+        const s2: list[int] = random.sample([1, 2, 3], 0)
+        self.assertEqual(len(s2), 0)
+    }
+}
+
+
+_counter: int = 0
+
+
+def _bump() -> None {
+    global _counter
+    _counter += 1
+}
+
+
+class TimeitTests(TestCase) {
+    """timeit - measure that the callable runs the requested number of times."""
+
+    def test_timeit_runs_n_times() {
+        global _counter
+        _counter = 0
+        elapsed: float = timeit.timeit(_bump, 1000)
+        self.assertEqual(_counter, 1000)
+        self.assertTrue(elapsed >= 0.0)
+    }
+
+    def test_timeit_zero_is_zero() {
+        global _counter
+        _counter = 0
+        elapsed: float = timeit.timeit(_bump, 0)
+        self.assertEqual(_counter, 0)
+        self.assertEqual(elapsed, 0.0)
+    }
+
+    def test_repeat_yields_n_measurements() {
+        global _counter
+        _counter = 0
+        measurements: list[float] = timeit.repeat(_bump, 3, 100)
+        self.assertEqual(len(measurements), 3)
+        self.assertEqual(_counter, 300)
+    }
+
+    def test_default_timer_monotonic() {
+        t1: float = timeit.default_timer()
+        t2: float = timeit.default_timer()
+        self.assertTrue(t2 >= t1)
+    }
+}
+
+
+_log: list[str] = []
+
+
+def _alpha() -> None { global _log; _log.append("alpha") }
+def _beta() -> None { global _log; _log.append("beta") }
+def _gamma() -> None { global _log; _log.append("gamma") }
+
+
+class SchedTests(TestCase) {
+    """sched - priority-ordered event scheduler."""
+
+    def test_run_in_priority_order() {
+        global _log
+        _log = []
+        s: sched.scheduler = sched.scheduler()
+        s.enterabs(0.0, 3, _gamma)
+        s.enterabs(0.0, 1, _alpha)
+        s.enterabs(0.0, 2, _beta)
+        s.run(true)
+        self.assertEqual(_log, ["alpha", "beta", "gamma"])
+        self.assertTrue(s.empty())
+    }
+
+    def test_cancel_removes_event() {
+        global _log
+        _log = []
+        s: sched.scheduler = sched.scheduler()
+        eid_a: int = s.enter(0.0, 1, _alpha)
+        s.enter(0.0, 2, _beta)
+        ok: bool = s.cancel(eid_a)
+        self.assertTrue(ok)
+        s.run(true)
+        self.assertEqual(_log, ["beta"])
+    }
+
+    def test_cancel_unknown_returns_false() {
+        s: sched.scheduler = sched.scheduler()
+        s.enter(0.0, 1, _alpha)
+        self.assertFalse(s.cancel(999))
+    }
+
+    def test_queue_excludes_cancelled() {
+        s: sched.scheduler = sched.scheduler()
+        eid_a: int = s.enter(0.0, 1, _alpha)
+        s.enter(0.0, 2, _beta)
+        s.cancel(eid_a)
+        q: list[sched._SchedEvent] = s.queue()
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0].priority, 2)
+    }
+
+    def test_non_blocking_returns_wait() {
+        s: sched.scheduler = sched.scheduler()
+        s.enter(60.0, 1, _alpha)
+        wait: float = s.run(false)
+        self.assertTrue(wait > 0.0)
+        self.assertFalse(s.empty())
+    }
+}
+
+
+def _bad_month() {
+    const d: date = date(2024, 13, 1)
+}
+
+def _bad_day() {
+    const d: date = date(2024, 1, 32)
+}
+
+def _feb29_non_leap() {
+    const d: date = date(2023, 2, 29)
+}
+
+def _bad_year() {
+    const d: date = date(0, 1, 1)
+}
+
+def _bad_hour() {
+    const d: datetime = datetime(2024, 1, 1, 24, 0, 0, 0)
+}
+
+def _bad_minute() {
+    const d: datetime = datetime(2024, 1, 1, 0, 60, 0, 0)
+}
+
+def _bad_second() {
+    const d: datetime = datetime(2024, 1, 1, 0, 0, 60, 0)
+}
+
+def _bad_micro() {
+    const d: datetime = datetime(2024, 1, 1, 0, 0, 0, 1000000)
+}
+
+def _bad_dt_month() {
+    const d: datetime = datetime(2024, 0, 1, 0, 0, 0, 0)
+}
+
+
+class DateValidationTests(TestCase) {
+    def test_bad_month_raises() {
+        self.assertRaises(ValueError, _bad_month)
+    }
+
+    def test_bad_day_raises() {
+        self.assertRaises(ValueError, _bad_day)
+    }
+
+    def test_feb29_non_leap_raises() {
+        self.assertRaises(ValueError, _feb29_non_leap)
+    }
+
+    def test_feb29_leap_ok() {
+        const d: date = date(2024, 2, 29)
+        self.assertEqual(d.isoformat(), "2024-02-29")
+    }
+
+    def test_bad_year_raises() {
+        self.assertRaises(ValueError, _bad_year)
+    }
+}
+
+
+class DatetimeValidationTests(TestCase) {
+    def test_bad_time_fields_raise() {
+        self.assertRaises(ValueError, _bad_hour)
+        self.assertRaises(ValueError, _bad_minute)
+        self.assertRaises(ValueError, _bad_second)
+        self.assertRaises(ValueError, _bad_micro)
+        self.assertRaises(ValueError, _bad_dt_month)
+    }
+
+    def test_valid_bounds_ok() {
+        const d: datetime = datetime(9999, 12, 31, 23, 59, 59, 999999)
+        self.assertEqual(d.isoformat(), "9999-12-31T23:59:59.999999")
+        const z: datetime = datetime(1, 1, 1, 0, 0, 0, 0)
+        self.assertEqual(z.isoformat(), "0001-01-01T00:00:00")
+    }
+}
+
+
+class FromTimestampTests(TestCase) {
+    def test_negative_fraction_floors() {
+        const d: datetime = datetime_fromtimestamp(-0.5)
+        self.assertEqual(d.isoformat(), "1969-12-31T23:59:59.500000")
+    }
+
+    def test_negative_whole() {
+        const d: datetime = datetime_fromtimestamp(-1.0)
+        self.assertEqual(d.isoformat(), "1969-12-31T23:59:59")
+    }
+
+    def test_positive_fraction_unchanged() {
+        const d: datetime = datetime_fromtimestamp(1.25)
+        self.assertEqual(d.isoformat(), "1970-01-01T00:00:01.250000")
+    }
+
+    def test_epoch() {
+        const d: datetime = datetime_fromtimestamp(0.0)
+        self.assertEqual(d.isoformat(), "1970-01-01T00:00:00")
+    }
+
+    def test_date_fromtimestamp_negative_floors() {
+        const d: date = date_fromtimestamp(-0.5)
+        self.assertEqual(d.isoformat(), "1969-12-31")
+    }
+}
+
+
+main([RandomSeedingTests(), Uuid4Tests(), RandomErrorTests(),
+      TimeitTests(), SchedTests(),
+      DateValidationTests(), DatetimeValidationTests(), FromTimestampTests()])

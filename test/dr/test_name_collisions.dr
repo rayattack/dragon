@@ -1,0 +1,274 @@
+from unittest import TestCase, main
+from drs import Schema
+from json import loads
+from io import make, open
+from writer_collision_mod import make_w, Writer
+from tempfile import mkdtemp
+from os.path import join
+
+
+class FreeEntry {
+    def(page: int) {
+        self.page: int = page
+    }
+}
+
+
+def copy_freelist(src: list[FreeEntry]) -> int {
+    return len(src)
+}
+
+
+def count_eq(src: str) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(src) {
+        if src[i] == "=" {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+def count_ge(src: str) -> int {
+    n: int = 0
+    i: int = 0
+    m: int = len(src)
+    while i < m {
+        if src[i] == ">" and i + 1 < m and src[i + 1] == "=" {
+            n = n + 1
+            i = i + 2
+            continue
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+def build_manifest_schema() -> Schema {
+    s: Schema = Schema()
+    s.field("name", "str", true)
+    s.field("version", "str", true)
+    s.optional("entry", "str", "main.dr")
+    return s
+}
+
+
+class Box {
+    tag: int
+    def(tag: int) {
+        self.tag = tag
+    }
+}
+
+
+def uses_r_as_class() -> int {
+    const r: Box = Box(9)
+    return r.tag
+}
+
+
+def collect(items: list[Any]) -> str {
+    out: list[str] = []
+    for r in items {
+        const name: str = r
+        out.append(name)
+    }
+    return "|".join(out)
+}
+
+
+def _write(path: str, body: str) -> None {
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+def _read(path: str) -> str {
+    return open(path).text()
+}
+
+def _close(x: int) -> int {
+    return x
+}
+
+
+class StrEqElemClassCollisionTests(TestCase) {
+    """Whole-module `str ==` miscompile via a stale list-element class name.
+
+    You did nothing wrong. This tokenizer line is ordinary, correct Dragon:
+
+        if src[i] == "=" { ... }        # src: str
+
+    `src[i]` mints a fresh 1-char string and `== "="` should compare its VALUE.
+    It does - UNTIL another module in the same compile graph happens to declare a
+    same-named parameter typed as a list of a class:
+
+        def copy_freelist(src: list[FreeEntry]) -> ...   # elsewhere
+
+    Codegen tracks list-element class names in a program-wide map keyed by the bare
+    parameter name (`src`), and never clears it per function. So `src -> FreeEntry`
+    leaked into the tokenizer's `src: str`, and `resolveExprClassName(src[i])`
+    handed back `FreeEntry`. The `==` then took the class-instance `__eq__` path -
+    raw pointer identity (`icmp eq ptr`) - instead of `dragon_str_eq`. Two distinct
+    heap strings never share an address, so `src[i] == "="` was ALWAYS false.
+
+    WHEN it bit: only under whole-module compilation that pulled the polluting
+    module in (`from odb import ODB`). The identical tokenizer compiled in isolation
+    was correct - the answer depended on what ELSE was compiled. WHY it was nasty:
+    no crash, no diagnostic, just a silently wrong comparison (a `>=` operator that
+    never formed, then an "unexpected character '='").
+
+    Fix: `resolveExprClassName`'s subscript path now consults the receiver's own
+    resolved type first (D030: the static type is the truth). A concrete receiver
+    that is not a `list[Instance]` - here a plain `str` - means the map entry is a
+    stale same-name collision and is ignored. BEFORE: count_eq -> 0. AFTER: 3.
+    """
+
+    def test_list_class_param_does_not_poison_str_eq() {
+        fl: list[FreeEntry] = [FreeEntry(1), FreeEntry(2)]
+        self.assertEqual(copy_freelist(fl), 2)
+        self.assertEqual(count_eq("a >= b == c"), 3)
+    }
+
+    def test_two_char_operator_forms() {
+        fl: list[FreeEntry] = [FreeEntry(9)]
+        self.assertEqual(copy_freelist(fl), 1)
+        self.assertEqual(count_ge("a >= b >= c > d"), 2)
+    }
+}
+
+
+class ImportClassCollisionTests(TestCase) {
+    """an explicitly imported class must resolve to the module it was imported from,
+    even when an unrelated import pulls in a same-named class from another module.
+
+    You write correct code:
+
+        from drs import Schema      # Schema is imported from exactly ONE place
+        from json import loads      # only `loads` - you never import json's Schema
+
+        s: Schema = Schema()
+        s.field("name", "str", true)
+
+    json.dr also happens to declare a `class Schema`, and because the whole program
+    is compiled into one module, that class used to win a last-write-wins race in
+    codegen. The result: your `Schema()` silently lowered to `json__Schema_new(null)`
+    and `s.field(...)` reported "no method" - even though you imported Schema from
+    drs and nothing else. You did nothing wrong; an unrelated `from json import
+    loads` changed what `Schema` meant.
+
+    Now a `from X import Name` pins the local name to X for class resolution too
+    (importedClassAliasesByModule), so the imported name resolves to the module you
+    imported it from. This asserts on VALUES: drs.Schema's fluent builder produces
+    the field list it should, which only compiles/runs if `Schema` bound to drs.
+    """
+
+    def test_schema_resolves_to_drs_not_json() {
+        s: Schema = build_manifest_schema()
+        self.assertEqual(len(s.fields), 3)
+        self.assertFalse(s.allow_unknown)
+    }
+
+    def test_fluent_builder_and_flags() {
+        s: Schema = Schema()
+        s.field("a", "str", true).optional("b", "int", 0).allow_extra()
+        self.assertEqual(len(s.fields), 2)
+        self.assertTrue(s.allow_unknown)
+    }
+
+    def test_json_loads_still_usable() {
+        d: dict[str, Any] = loads("{\"k\": 1}")
+        self.assertEqual(d["k"], 1)
+    }
+}
+
+
+class WriterCollisionTests(TestCase) {
+    """Two dep modules each declare `class Writer` (io's has __enter__; the fixture's
+    does not). Each value must resolve against ITS OWN class, in both import orders"""
+
+    def test_with_uses_ios_writer() {
+        const dir: str = mkdtemp("drtest-", "-wc")
+        const path: str = join(dir, "out.txt")
+        with make(path) as w {
+            w.write("hello from io")
+        }
+        body: str = ""
+        with open(path) as f {
+            body = f.text()
+        }
+        self.assertEqual(body, "hello from io")
+    }
+
+    def test_fixture_writer_dispatches_to_its_own_class() {
+        const cw: Writer = make_w("mine")
+        self.assertEqual(cw.describe(), "collision-writer:mine")
+        self.assertEqual(cw.tag, "mine")
+    }
+
+    def test_both_alive_in_one_scope() {
+        const dir: str = mkdtemp("drtest-", "-wc")
+        const path: str = join(dir, "both.txt")
+        const cw: Writer = make_w("x")
+        with make(path) as w {
+            w.write(cw.describe())
+        }
+        body: str = ""
+        with open(path) as f {
+            body = f.text()
+        }
+        self.assertEqual(body, "collision-writer:x")
+    }
+}
+
+
+class AnnotKindTests(TestCase) {
+    """An explicit concrete annotation wins over RHS class-guessing.
+
+    `const name: str = <Any>` must stay a `str` - decref'd as a string at scope
+    exit - even when the RHS is an `Any`/`Union` value whose variable name has a
+    stale, program-wide class association from another function. Before the fix,
+    codegen's "detect a class instance from the RHS expression" fallback ran
+    unconditionally: it resolved the Union-kind RHS through the flat
+    `varClassNames` map, stamped the `str` target as a class instance, and emitted
+    the generic `dragon_decref` (heap-object) on a string at scope exit - memory
+    corruption. The bug only surfaced under whole-module compilation where the
+    name collision existed, so this test recreates the collision directly.
+    """
+
+    def test_str_annotation_survives_rhs_class_bleed() -> None {
+        self.assertEqual(uses_r_as_class(), 9)
+        const xs: list[Any] = ["alpha", "beta", "gamma"]
+        self.assertEqual(collect(xs), "alpha|beta|gamma")
+    }
+
+    def test_repeated_to_shake_out_uaf() -> None {
+        # Repeat so a mis-classified decref would corrupt/UAF observably.
+        i: int = 0
+        while i < 500 {
+            const xs: list[Any] = ["one", "two"]
+            self.assertEqual(collect(xs), "one|two")
+            i = i + 1
+        }
+    }
+}
+
+
+class SymbolInterpositionTests(TestCase) {
+    def test_libc_named_helpers_do_not_interpose() {
+        const dir: str = mkdtemp("drtest-", "-si")
+        const path: str = join(dir, "interpose.txt")
+        _write(path, "alpha")
+        self.assertEqual(_read(path), "alpha")
+        _write(path, "beta")
+        self.assertEqual(_read(path), "beta")
+        self.assertEqual(_close(7), 7)
+    }
+}
+
+
+main([StrEqElemClassCollisionTests(), ImportClassCollisionTests(), WriterCollisionTests(), AnnotKindTests(), SymbolInterpositionTests()])

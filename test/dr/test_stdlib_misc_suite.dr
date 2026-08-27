@@ -1,0 +1,430 @@
+from unittest import TestCase, main
+from colorsys import rgb_to_hsv, hsv_to_rgb, rgb_to_yiq, yiq_to_rgb
+from mimetypes import guess_type, guess_extension
+from functools import reduce, reduce_init, reduce_f
+from itertools import accumulate, chain, repeat, islice, pairwise, take
+from itertools import chain_t, repeat_t, islice_t, pairwise_t, take_t
+from math import factorial, isqrt, log_int
+from statistics import quantiles, median, median_low, median_high, mode_float, mode_int
+from enum import Enum, IntEnum, StrEnum, auto
+
+
+class ColorsysTests(TestCase) {
+    """colorsys - RGB <-> HSV/YIQ round-trips and known anchor colours."""
+
+    def test_rgb_to_hsv_red() {
+        h: float = 0.0
+        s: float = 0.0
+        v: float = 0.0
+        h, s, v = rgb_to_hsv(1.0, 0.0, 0.0)
+        self.assertAlmostEqual(h, 0.0)
+        self.assertAlmostEqual(s, 1.0)
+        self.assertAlmostEqual(v, 1.0)
+    }
+
+    def test_rgb_to_hsv_green() {
+        h: float = 0.0
+        s: float = 0.0
+        v: float = 0.0
+        h, s, v = rgb_to_hsv(0.0, 1.0, 0.0)
+        self.assertAlmostEqual(h, 1.0 / 3.0)
+        self.assertAlmostEqual(s, 1.0)
+        self.assertAlmostEqual(v, 1.0)
+    }
+
+    def test_hsv_roundtrip() {
+        r: float = 0.0
+        g: float = 0.0
+        b: float = 0.0
+        h: float = 0.0
+        s: float = 0.0
+        v: float = 0.0
+        h, s, v = rgb_to_hsv(0.2, 0.4, 0.6)
+        r, g, b = hsv_to_rgb(h, s, v)
+        self.assertAlmostEqual(r, 0.2)
+        self.assertAlmostEqual(g, 0.4)
+        self.assertAlmostEqual(b, 0.6)
+    }
+
+    def test_yiq_roundtrip() {
+        r: float = 0.0
+        g: float = 0.0
+        b: float = 0.0
+        y: float = 0.0
+        i: float = 0.0
+        q: float = 0.0
+        y, i, q = rgb_to_yiq(0.3, 0.5, 0.7)
+        r, g, b = yiq_to_rgb(y, i, q)
+        self.assertAlmostEqual(r, 0.3)
+        self.assertAlmostEqual(g, 0.5)
+        self.assertAlmostEqual(b, 0.7)
+    }
+}
+
+
+class MimetypesTests(TestCase) {
+    """mimetypes - guess_type / guess_extension over the common table."""
+
+    def test_guess_type() {
+        self.assertEqual(guess_type("foo.png"), "image/png")
+        self.assertEqual(guess_type("index.html"), "text/html")
+        self.assertEqual(guess_type("data.json"), "application/json")
+    }
+
+    def test_case_insensitive() {
+        self.assertEqual(guess_type("A/B/C.HTML"), "text/html")
+        self.assertEqual(guess_type("photo.JPG"), "image/jpeg")
+    }
+
+    def test_unknown() {
+        self.assertEqual(guess_type("noext"), "")
+        self.assertEqual(guess_type("file.zzz"), "")
+    }
+
+    def test_guess_extension() {
+        self.assertEqual(guess_extension("application/json"), ".json")
+        self.assertEqual(guess_extension("image/png"), ".png")
+    }
+}
+
+
+class FunctoolsTests(TestCase) {
+    """functools - reduce (monomorphic int/float) with operator-style callables."""
+
+    def test_reduce_sum() {
+        self.assertEqual(reduce(lambda (a: int, b: int) -> int { return a + b },
+                                [1, 2, 3, 4, 5]), 15)
+    }
+
+    def test_reduce_max() {
+        self.assertEqual(reduce(lambda (a: int, b: int) -> int {
+                                    if a > b { return a }
+                                    return b
+                                }, [3, 7, 2, 9, 4]), 9)
+    }
+
+    def test_reduce_init() {
+        self.assertEqual(reduce_init(lambda (a: int, b: int) -> int { return a * b },
+                                     [1, 2, 3, 4], 1), 24)
+        self.assertEqual(reduce_init(lambda (a: int, b: int) -> int { return a + b },
+                                     [], 42), 42)
+    }
+
+    def test_reduce_float() {
+        got: float = reduce_f(lambda (a: float, b: float) -> float { return a + b },
+                              [1.5, 2.5, 1.0])
+        self.assertAlmostEqual(got, 5.0)
+    }
+}
+
+
+class ItertoolsTests(TestCase) {
+    """itertools - monomorphic int building blocks.
+
+    (list[tuple] whole-list printing is a separate known repr gap; pairwise results
+    are verified via indexing/unpacking, which are correct.)
+    """
+
+    def test_accumulate() {
+        self.assertEqual(accumulate([1, 2, 3, 4]), [1, 3, 6, 10])
+    }
+
+    def test_chain() {
+        self.assertEqual(chain([1, 2], [3, 4, 5]), [1, 2, 3, 4, 5])
+    }
+
+    def test_repeat() {
+        self.assertEqual(repeat(7, 3), [7, 7, 7])
+        self.assertEqual(len(repeat(0, 0)), 0)
+    }
+
+    def test_islice() {
+        self.assertEqual(islice([10, 11, 12, 13, 14], 1, 4), [11, 12, 13])
+        self.assertEqual(take([5, 6, 7, 8], 2), [5, 6])
+    }
+
+    def test_pairwise() {
+        pairs: list[tuple[int, int]] = pairwise([1, 2, 3])
+        self.assertEqual(len(pairs), 2)
+        a0: int = 0
+        b0: int = 0
+        a0, b0 = pairs[0]
+        self.assertEqual(a0, 1)
+        self.assertEqual(b0, 2)
+        a1: int = 0
+        b1: int = 0
+        a1, b1 = pairs[1]
+        self.assertEqual(a1, 2)
+        self.assertEqual(b1, 3)
+    }
+}
+
+
+class ItertoolsGenericTests(TestCase) {
+    def test_chain_t() {
+        self.assertEqual(chain_t(["a", "b"], ["c"]), ["a", "b", "c"])
+        self.assertEqual(chain_t([1, 2], [3, 4, 5]), [1, 2, 3, 4, 5])
+    }
+
+    def test_repeat_t() {
+        self.assertEqual(repeat_t("z", 3), ["z", "z", "z"])
+        self.assertEqual(repeat_t(1.5, 2), [1.5, 1.5])
+        self.assertEqual(len(repeat_t(0, 0)), 0)
+    }
+
+    def test_islice_t() {
+        self.assertEqual(islice_t(["p", "q", "r", "s"], 1, 3), ["q", "r"])
+        self.assertEqual(islice_t([10, 11, 12, 13, 14], 1, 4), [11, 12, 13])
+        self.assertEqual(len(islice_t(["x"], 5, 9)), 0)
+    }
+
+    def test_take_t() {
+        self.assertEqual(take_t(["u", "v", "w"], 2), ["u", "v"])
+        self.assertEqual(take_t([5, 6, 7, 8], 9), [5, 6, 7, 8])
+    }
+
+    def test_pairwise_t() {
+        pairs: list[tuple[str, str]] = pairwise_t(["p", "q", "r"])
+        self.assertEqual(len(pairs), 2)
+        a0: str = ""
+        b0: str = ""
+        a0, b0 = pairs[0]
+        self.assertEqual(a0, "p")
+        self.assertEqual(b0, "q")
+        a1: str = ""
+        b1: str = ""
+        a1, b1 = pairs[1]
+        self.assertEqual(a1, "q")
+        self.assertEqual(b1, "r")
+    }
+}
+
+
+def _factorial_negative() -> None {
+    factorial(-1)
+}
+
+def _isqrt_negative() -> None {
+    isqrt(-1)
+}
+
+def _log_int_zero() -> None {
+    log_int(0, 2)
+}
+
+def _log_int_bad_base() -> None {
+    log_int(8, 1)
+}
+
+
+class MathDomainTests(TestCase) {
+    def test_factorial_negative_raises() {
+        self.assertRaises(ValueError, _factorial_negative)
+    }
+
+    def test_isqrt_negative_raises() {
+        self.assertRaises(ValueError, _isqrt_negative)
+    }
+
+    def test_log_int_zero_raises() {
+        self.assertRaises(ValueError, _log_int_zero)
+    }
+
+    def test_log_int_bad_base_raises() {
+        self.assertRaises(ValueError, _log_int_bad_base)
+    }
+
+    def test_valid_inputs_unchanged() {
+        self.assertEqual(factorial(0), 1)
+        self.assertEqual(factorial(5), 120)
+        self.assertEqual(isqrt(0), 0)
+        self.assertEqual(isqrt(17), 4)
+        self.assertEqual(log_int(8, 2), 3)
+        self.assertEqual(log_int(1, 2), 0)
+    }
+}
+
+
+class QuantilesTests(TestCase) {
+    def test_exclusive_four_points() {
+        const q: list[float] = quantiles([1.0, 2.0, 3.0, 4.0], 4)
+        self.assertEqual(len(q), 3)
+        self.assertAlmostEqual(q[0], 1.25)
+        self.assertAlmostEqual(q[1], 2.5)
+        self.assertAlmostEqual(q[2], 3.75)
+    }
+
+    def test_exclusive_five_points() {
+        const q: list[float] = quantiles([1.0, 2.0, 3.0, 4.0, 5.0], 4)
+        self.assertAlmostEqual(q[0], 1.5)
+        self.assertAlmostEqual(q[1], 3.0)
+        self.assertAlmostEqual(q[2], 4.5)
+    }
+
+    def test_median_via_n_two() {
+        const q: list[float] = quantiles([4.0, 1.0, 3.0, 2.0], 2)
+        self.assertEqual(len(q), 1)
+        self.assertAlmostEqual(q[0], 2.5)
+    }
+}
+
+
+class MedianTests(TestCase) {
+    def test_median_unsorted() {
+        self.assertAlmostEqual(median([3.0, 1.0, 2.0]), 2.0)
+        self.assertAlmostEqual(median([4.0, 1.0, 3.0, 2.0]), 2.5)
+    }
+
+    def test_median_low_high() {
+        self.assertAlmostEqual(median_low([4.0, 1.0, 3.0, 2.0]), 2.0)
+        self.assertAlmostEqual(median_high([4.0, 1.0, 3.0, 2.0]), 3.0)
+    }
+}
+
+
+class ModeTests(TestCase) {
+    def test_mode_float() {
+        self.assertAlmostEqual(mode_float([1.0, 2.0, 2.0, 3.0]), 2.0)
+        self.assertAlmostEqual(mode_float([1.5]), 1.5)
+    }
+
+    def test_mode_float_tie_first_seen() {
+        self.assertAlmostEqual(mode_float([3.0, 1.0, 1.0, 3.0]), 3.0)
+        self.assertAlmostEqual(mode_float([5.0, 7.0, 7.0, 7.0, 5.0, 5.0]), 5.0)
+    }
+
+    def test_mode_int() {
+        self.assertEqual(mode_int([1, 2, 2, 3, 3, 3]), 3)
+        self.assertEqual(mode_int([42]), 42)
+    }
+
+    def test_mode_int_tie_first_seen() {
+        self.assertEqual(mode_int([5, 7, 7, 7, 5, 5]), 5)
+        self.assertEqual(mode_int([2, 1, 1, 2]), 2)
+    }
+}
+
+
+class Color(Enum) {
+    RED: int = 1
+    GREEN: int = 2
+    BLUE: int = 3
+}
+
+class Mixed(Enum) {
+    A: int = auto()
+    B: int = 10
+    C: int = auto()
+    D: int = auto()
+}
+
+class Priority(IntEnum) {
+    LOW: int = 1
+    MEDIUM: int = 5
+    HIGH: int = 10
+}
+
+class FileMode(StrEnum) {
+    READ: str = "r"
+    WRITE: str = "w"
+    APPEND: str = "a"
+}
+
+enum Token { LPAREN, RPAREN, COMMA }
+
+
+class EnumTests(TestCase) {
+    """enum - class-based Enum / IntEnum / StrEnum (Python `enum` parity).
+
+    Members lower to singleton instances carrying .name/.value; iteration walks
+    the members in definition order; `C(v)` looks a member up by value; plain Enum
+    compares by identity, IntEnum/StrEnum compare by value. The native `enum`
+    keyword (fast int constants) remains a separate form and is exercised for
+    coexistence. See decisions/043-enum-import-gated-intrinsic.md.
+    """
+
+    def test_member_name_value() {
+        self.assertEqual(Color.RED.value, 1)
+        self.assertEqual(Color.GREEN.value, 2)
+        self.assertEqual(Color.BLUE.value, 3)
+        self.assertEqual(Color.RED.name, "RED")
+        self.assertEqual(Color.BLUE.name, "BLUE")
+    }
+
+    def test_str() {
+        self.assertEqual(str(Color.RED), "Color.RED")
+        self.assertEqual(str(Color.BLUE), "Color.BLUE")
+    }
+
+    def test_auto_numbering() {
+        self.assertEqual(Mixed.A.value, 1)
+        self.assertEqual(Mixed.B.value, 10)
+        self.assertEqual(Mixed.C.value, 11)
+        self.assertEqual(Mixed.D.value, 12)
+    }
+
+    def test_iteration_order() {
+        names: list[str] = []
+        for c in Color {
+            names.append(c.name)
+        }
+        self.assertEqual(len(names), 3)
+        self.assertEqual(names[0], "RED")
+        self.assertEqual(names[1], "GREEN")
+        self.assertEqual(names[2], "BLUE")
+    }
+
+    def test_value_lookup() {
+        got: Color = Color(2)
+        self.assertEqual(got.name, "GREEN")
+        self.assertEqual(got.value, 2)
+        self.assertTrue(Color(1) == Color.RED)
+    }
+
+    def test_value_lookup_invalid_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            bad: Color = Color(99)
+        })
+    }
+
+    def test_identity_equality() {
+        self.assertTrue(Color.RED == Color.RED)
+        self.assertFalse(Color.RED == Color.GREEN)
+        self.assertTrue(Color.RED != Color.GREEN)
+    }
+
+    def test_intenum_compares_to_int() {
+        self.assertTrue(Priority.LOW == 1)
+        self.assertTrue(Priority.HIGH == 10)
+        self.assertFalse(Priority.LOW == 10)
+        self.assertTrue(Priority.LOW == Priority.LOW)
+        self.assertFalse(Priority.LOW == Priority.HIGH)
+    }
+
+    def test_intenum_ordering() {
+        self.assertTrue(Priority.LOW < Priority.HIGH)
+        self.assertTrue(Priority.HIGH > Priority.MEDIUM)
+        self.assertTrue(Priority.LOW <= Priority.LOW)
+        self.assertTrue(Priority.MEDIUM >= Priority.LOW)
+    }
+
+    def test_strenum_compares_to_str() {
+        self.assertTrue(FileMode.READ == "r")
+        self.assertTrue(FileMode.WRITE == "w")
+        self.assertFalse(FileMode.READ == "w")
+        self.assertEqual(FileMode.APPEND.value, "a")
+        self.assertEqual(FileMode.READ.name, "READ")
+    }
+
+    def test_native_keyword_coexists() {
+        self.assertEqual(Token.LPAREN, 0)
+        self.assertEqual(Token.RPAREN, 1)
+        self.assertEqual(Token.COMMA, 2)
+    }
+}
+
+
+main([ColorsysTests(), MimetypesTests(), FunctoolsTests(),
+      ItertoolsTests(), ItertoolsGenericTests(),
+      MathDomainTests(), QuantilesTests(), MedianTests(), ModeTests(),
+      EnumTests()])

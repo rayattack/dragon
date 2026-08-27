@@ -1,0 +1,187 @@
+from unittest import TestCase, main
+from fwdsig_store import FwdStore
+
+const CSTR: str = str(8091) + "/runtime/computed"
+const CLIT: str = "just a literal"
+const CLIST: list[int] = [1, 2, 3, 4, 5]
+const CDICT_INT: dict[int, str] = {1: "alpha", 2: "beta"}
+const CDICT_STR: dict[str, list[int]] = {"xs": [10, 20], "ys": [30]}
+const CTUP: tuple[int, str] = (7, "seven")
+const CSET: set[str] = {"a", "b", "c"}
+
+
+class Cfg {
+    def(name: str, vals: list[int]) {
+        self.name = name
+        self.vals = vals
+    }
+
+    def get_name() -> str {
+        return self.name
+    }
+}
+
+
+const CINST: Cfg = Cfg("cfg" + str(1), [10, 20, 30])
+
+GSTR: str = "start" + str(0)
+GDICT: dict[str, int] = {"one": 1, "two": 2}
+
+
+class SharedGlobalRcTests(TestCase) {
+    """Module-global SHARED marking - vthread global-refcount race
+
+    Given the code below:
+
+        const GLIST: list[int] = [1, 2, 3, 4, 5]
+
+        def h_copy(req: Request, res: Response, ctx: Context) -> None {
+            const x: list[int] = GLIST      # plain copy of a global
+            res.json(json.dumps({"len": len(x)}))
+        }
+
+    What happens here is that `fire` runs each connection's handler on a green
+    thread multiplexed over a POOL of OS workers, and Dragon's refcount is non-atomic
+    by default. A module global never crosses a `fire` boundary (handlers reach it BY NAME),
+    so nothing marked it SHARED and two workers doing `const x = GLIST` at once tore its
+    refcount premature free, then heap use-after-free (glibc `malloc() unaligned tcache
+    chunk detected`, ASan heap-use-after-free on worker threads). Under 400 requests at
+    24-way concurrency the server corrupted (404s on registered routes) or died. serial
+    traiffc never failed
+
+    BEFORE: every global-store shape below raced when read from vthread handlers.
+    AFTER: the global-store site marks the stored object graph SHARED
+    (dragon_mark_shared_deep / _str / _boxed), routing its refcount ops to the
+    atomic path; a CONST STR global is promoted to immortal instead (zero refcount
+    traffic; sound because const reassignment is a compile error and str is an
+    immutable leaf).
+
+    The race itself needs the multi-threaded HTTP server, so it is exercised by a
+    manual load test, not this suite
+
+    What THIS suite locks in (marking runs at every global store, single-process
+    too): the markers must neither corrupt values nor misread layouts. The
+    int-keyed dict global below is the sharpest edge: shared_walk_dict assumed
+    every dict key was a DragonString, but an int-keyed dict stores the i64 key
+    cast into the pointer slot (keys_are_ptr == 0), so marking read wild memory
+    and this file crashed at startup. Tombstoned entries (key/value cleared by
+    pop/del) must likewise be skipped, not dereferenced.
+
+    One line: values stored into module globals are SHARED-marked (const strings
+    immortalized) at the store site, and the walkers must respect every container
+    layout while doing it
+    """
+
+    def test_const_runtime_str_survives_repeated_copies() {
+        i: int = 0
+        while i < 2000 {
+            v: str = CSTR
+            self.assertEqual(len(v), 21)
+            i = i + 1
+        }
+        self.assertEqual(CSTR, "8091/runtime/computed")
+        self.assertEqual(CLIT, "just a literal")
+    }
+
+    def test_const_list_copy_like_a_handler() {
+        i: int = 0
+        while i < 2000 {
+            const x: list[int] = CLIST
+            self.assertEqual(len(x), 5)
+            i = i + 1
+        }
+        self.assertEqual(CLIST[4], 5)
+    }
+
+    def test_int_keyed_dict_global_marks_without_wild_read() {
+        self.assertEqual(CDICT_INT[1], "alpha")
+        const d: dict[int, str] = CDICT_INT
+        self.assertEqual(d[2], "beta")
+        self.assertEqual(len(d), 2)
+    }
+
+    def test_nested_dict_global_bfs() {
+        const xs: list[int] = CDICT_STR["xs"]
+        self.assertEqual(xs[1], 20)
+        self.assertEqual(CDICT_STR["ys"][0], 30)
+    }
+
+    def test_tuple_and_set_globals() {
+        self.assertEqual(CTUP[0], 7)
+        self.assertEqual(CTUP[1], "seven")
+        self.assertEqual(len(CSET), 3)
+        self.assertTrue("b" in CSET)
+    }
+
+    def test_instance_global_fields_intact() {
+        self.assertEqual(CINST.get_name(), "cfg1")
+        self.assertEqual(CINST.vals[2], 30)
+        const v: list[int] = CINST.vals
+        self.assertEqual(len(v), 3)
+    }
+
+    def test_nonconst_str_reassignment_marks_new_value() {
+        global GSTR
+        self.assertEqual(GSTR, "start0")
+        GSTR = "second" + str(2)
+        self.assertEqual(GSTR, "second2")
+        GSTR = "third" + str(3)
+        self.assertEqual(GSTR, "third3")
+    }
+
+    def test_tombstoned_dict_marks_dead_slots_skipped() {
+        global GDICT
+        d: dict[str, int] = {"a": 1, "b": 2, "c": 3}
+        d.pop("b")
+        GDICT = d
+        self.assertEqual(GDICT["c"], 3)
+        self.assertEqual(len(GDICT), 2)
+    }
+}
+
+
+class LeakBox {
+    tag: int
+    label: str
+
+    def(t: int) {
+        self.tag = t
+        self.label = "b"
+    }
+}
+
+def probe(s: FwdStore) -> bool {
+    return make_box(s).tag != 0
+}
+
+def make_box(s: FwdStore) -> LeakBox {
+    return LeakBox(s.n)
+}
+
+class FwdImportTempLeak(TestCase) {
+    """Forward call with an imported-type signature must release its result temp.
+
+    Regression for issue-6: `probe` forward-calls `make_box` (defined BELOW it)
+    whose parameter type is imported from another module. The signature pre-pass
+    once silently skipped import-typed signatures, the forward call typed Unknown,
+    and the drain gate skipped the release - one leaked LeakBox per call, forever.
+    Both conditions (callee below caller, imported param type) are load-bearing;
+    removing either used to hide the leak. Must stay clean under
+    ASAN_OPTIONS=detect_leaks=1.
+    """
+
+    def test_fwd_call_result_temp_released() {
+        s: FwdStore = FwdStore(7)
+        i: int = 0
+        hits: int = 0
+        while i < 1000 {
+            if probe(s) {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 1000)
+    }
+}
+
+main([SharedGlobalRcTests(), FwdImportTempLeak()])

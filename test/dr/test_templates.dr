@@ -1,0 +1,124 @@
+from unittest import TestCase, main
+from html import HTML
+
+const JS: str = template("tmpl_bang_data.js")
+
+
+def tmpl_pair(p: tuple[str, str]) -> str {
+    h: HTML = template[HTML] {!{p[0]}=!{p[1]}}
+    return h.to_str()
+}
+
+
+def tmpl_mixed(t: tuple[int, str]) -> str {
+    h: HTML = template[HTML] {!{t[0]}:!{t[1]}}
+    return h.to_str()
+}
+
+
+def tmpl_block(pairs: list[tuple[str, str]]) -> str {
+    h: HTML = template[HTML] {
+        <ul>!{ for p in pairs { :{ <li>!{p[0]}=!{p[1]}</li> } } }</ul>
+    }
+    return h.to_str()
+}
+
+
+class TemplateFileBangTests(TestCase) {
+    """A file template containing `!!` must embed, not hang the compiler.
+
+    You write ordinary, correct-looking Dragon:
+
+        const X: str = template("f.js")
+
+    and f.js is ordinary JavaScript using the standard boolean-coercion idiom:
+
+        var a = !!b;
+
+    You did nothing wrong: only `!!{` and `!!}` are template escapes, so a bare
+    `!!` is plain literal text. But the template body scanner broke its literal
+    run at ANY `!!` while the escape dispatcher consumed nothing, so `dragon
+    build` spun forever on a byte position that never advanced. `dragon check`
+    passed (file templates are read at codegen), which made it look like a
+    backend hang, not a source issue. Any minified JS triggered it (htmx has 2
+    occurrences of `!!`, Alpine 7).
+
+    Now the literal-run break mirrors the dispatcher exactly: it stops only at
+    `!{`, `!!{`, or `!!}`. The same program compiles and the file embeds
+    byte-for-byte, escapes still applied. The data file also ends in `!!` at EOF
+    with no trailing newline - the other former hang - and carries one
+    `!!{ok!!}` escape to pin that file templates keep processing escapes.
+    """
+
+    def test_file_embeds_byte_for_byte_with_escapes_applied() {
+        expected: str = "var a = !!b;\nvar re = !!t ? \"gim\" : \"im\";\nvar c = ! !d;\nesc !{ok}\n!!"
+        self.assertEqual(JS, expected)
+    }
+
+    def test_double_bang_survives_verbatim() {
+        self.assertTrue("var a = !!b;" in JS)
+        self.assertTrue("!!t" in JS)
+    }
+}
+
+
+class TemplateTupleInterpTests(TestCase) {
+    """template interpolations must flow at their native type (root-cause fix).
+
+    You write ordinary, correct-looking Dragon:
+
+        const pairs: list[tuple[str, str]] = [("a", "x")]
+        for p in pairs {
+            const t: HTML = template[HTML] {!{p[0]}=!{p[1]}}
+        }
+
+    and the SAME `p[0]` that renders as `a` in an f-string used to render as a big
+    decimal (`94577401478784`) inside a template. You did nothing wrong: the
+    template body was re-parsed and lowered ONLY in codegen, so the TypeChecker
+    never saw `p[0]`. With no static type on the subscript, codegen could not turn
+    the i64 that `dragon_tuple_get` returns back into the native `str*` - it printed
+    the raw pointer instead of the value.
+
+    Now the Parser splits the template body into typed parts and the TypeChecker
+    walks each interpolation, so `p[0]` carries its element type and materializes
+    the value. This test asserts on VALUES (not stdout): a tuple element
+    interpolated in a template equals its f-string rendering, never a pointer.
+    """
+
+    def test_str_tuple_matches_fstring() {
+        p: tuple[str, str] = ("a", "x")
+        self.assertEqual(tmpl_pair(p).strip(), "a=x")
+        self.assertEqual(tmpl_pair(p).strip(), f"{p[0]}={p[1]}")
+    }
+
+    def test_mixed_tuple_elements() {
+        t: tuple[int, str] = (42, "hi")
+        self.assertEqual(tmpl_mixed(t).strip(), "42:hi")
+    }
+
+    def test_tuple_subscript_in_block_interp() {
+        pairs: list[tuple[str, str]] = [("a", "x"), ("b", "y")]
+        out: str = ""
+        i: int = 0
+        while i < 20 {
+            out = tmpl_block(pairs)
+            i = i + 1
+        }
+        self.assertTrue("<li>a=x</li>" in out)
+        self.assertTrue("<li>b=y</li>" in out)
+        self.assertTrue("=x</li>" in out)
+        self.assertFalse("0x" in out)
+    }
+
+    def test_tuple_from_list_iteration() {
+        pairs: list[tuple[str, str]] = [("k1", "v1"), ("k2", "v2")]
+        joined: str = ""
+        for p in pairs {
+            joined = joined + tmpl_pair(p).strip() + ";"
+        }
+        self.assertEqual(joined, "k1=v1;k2=v2;")
+    }
+}
+
+
+main([TemplateFileBangTests(), TemplateTupleInterpTests()])

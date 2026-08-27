@@ -1,0 +1,527 @@
+from unittest import TestCase, main
+
+class Probe {
+    hits: int
+
+    def () {
+        self.hits = 0
+    }
+
+    def tap(v: str) -> str {
+        self.hits = self.hits + 1
+        return v
+    }
+}
+
+def maybe(k: str) -> str | None {
+    if k == "a" {
+        return "found"
+    }
+    return none
+}
+
+def vmod(a: int, b: int) -> int { return a % b }
+def vdiv(a: int, b: int) -> int { return a // b }
+
+class AndOrValueTests(TestCase) {
+    def test_or_returns_first_truthy_str() {
+        self.assertEqual("" or "ok", "ok")
+        self.assertEqual("a" or "b", "a")
+    }
+
+    def test_and_returns_first_falsy_str() {
+        self.assertEqual("" and "b", "")
+        self.assertEqual("a" and "b", "b")
+    }
+
+    def test_or_returns_int_operand() {
+        self.assertEqual(0 or 7, 7)
+        self.assertEqual(3 or 7, 3)
+    }
+
+    def test_and_returns_int_operand() {
+        self.assertEqual(0 and 5, 0)
+        self.assertEqual(3 and 5, 5)
+    }
+
+    def test_or_returns_float_operand() {
+        self.assertEqual(0.0 or 2.5, 2.5)
+        self.assertEqual(1.5 or 2.5, 1.5)
+    }
+
+    def test_bool_operands_stay_bool() {
+        self.assertEqual(False or True, True)
+        self.assertEqual(True and False, False)
+        self.assertEqual(False or False, False)
+    }
+
+    def test_or_short_circuits_right_operand() {
+        p: Probe = Probe()
+        got: str = "left" or p.tap("right")
+        self.assertEqual(got, "left")
+        self.assertEqual(p.hits, 0)
+    }
+
+    def test_and_short_circuits_right_operand() {
+        p: Probe = Probe()
+        got: str = "" and p.tap("right")
+        self.assertEqual(got, "")
+        self.assertEqual(p.hits, 0)
+    }
+
+    def test_right_operand_evaluated_once() {
+        p: Probe = Probe()
+        got: str = "" or p.tap("right")
+        self.assertEqual(got, "right")
+        self.assertEqual(p.hits, 1)
+    }
+
+    def test_or_keeps_truthy_owned_temporary() {
+        a: str = "ab"
+        got: str = a.upper() or "fallback"
+        self.assertEqual(got, "AB")
+    }
+
+    def test_or_discards_falsy_owned_temporary() {
+        e: str = ""
+        got: str = e.upper() or "fallback"
+        self.assertEqual(got, "fallback")
+    }
+
+    def test_and_discards_truthy_owned_temporary() {
+        a: str = "ab"
+        got: str = a.upper() and "second"
+        self.assertEqual(got, "second")
+    }
+
+    def test_or_returns_container_operand() {
+        empty: list[int] = []
+        xs: list[int] = empty or [1, 2]
+        self.assertEqual(len(xs), 2)
+        full: dict[str, int] = {"a": 1}
+        d: dict[str, int] = full or {"b": 2}
+        self.assertEqual(len(d), 1)
+        self.assertTrue("a" in d)
+    }
+
+    def test_or_unifies_empty_container_literal() {
+        xs: list[int] = [] or [1, 2]
+        self.assertEqual(len(xs), 2)
+        d: dict[str, int] = {} or {"a": 1}
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_or_strips_none_from_left_operand() {
+        got: str = maybe("zz") or "default"
+        self.assertEqual(got, "default")
+        found: str = maybe("a") or "default"
+        self.assertEqual(found, "found")
+    }
+
+    def test_chained_or_picks_first_truthy() {
+        self.assertEqual("" or "" or "z", "z")
+        self.assertEqual(0 or 0 or 9, 9)
+        self.assertEqual("" or "y" or "z", "y")
+    }
+
+    def test_chained_and_picks_first_falsy() {
+        self.assertEqual("a" and "b" and "c", "c")
+        self.assertEqual("a" and "" and "c", "")
+    }
+
+    def test_or_result_is_usable_as_condition() {
+        e: str = ""
+        if e or "fallback" {
+            self.assertTrue(True)
+        } else {
+            self.assertTrue(False)
+        }
+        if "" or "" {
+            self.assertTrue(False)
+        } else {
+            self.assertTrue(True)
+        }
+    }
+
+    def test_numeric_operands_promote_to_float() {
+        got: float = 0 or 2.5
+        self.assertEqual(got, 2.5)
+        kept: float = 3 or 2.5
+        self.assertEqual(kept, 3.0)
+    }
+}
+
+class TruthinessContextTests(TestCase) {
+    def test_assert_accepts_truthy_non_bool() {
+        xs: list[int] = [1]
+        assert xs
+        assert "text"
+        assert 1.5
+        d: dict[str, int] = {"a": 1}
+        assert d
+        self.assertTrue(True)
+    }
+
+    def test_assert_rejects_empty_container() {
+        raised: bool = False
+        try {
+            empty: list[int] = []
+            assert empty
+        } except AssertionError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_assert_rejects_empty_str() {
+        raised: bool = False
+        try {
+            blank: str = ""
+            assert blank
+        } except AssertionError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_union_truthiness_follows_payload() {
+        v: int | str = 42
+        self.assertTrue(bool(v))
+        w: int | str = 0
+        self.assertFalse(bool(w))
+        s: int | str = "x"
+        self.assertTrue(bool(s))
+        e: int | str = ""
+        self.assertFalse(bool(e))
+    }
+
+    def test_union_as_condition() {
+        v: int | str = "text"
+        hit: int = 0
+        if v {
+            hit = 1
+        }
+        self.assertEqual(hit, 1)
+        e: int | str = ""
+        if e {
+            hit = 2
+        }
+        self.assertEqual(hit, 1)
+    }
+
+    def test_union_as_while_condition() {
+        v: int | str = 3
+        n: int = 0
+        while v {
+            n = n + 1
+            if n > 2 {
+                v = 0
+            }
+        }
+        self.assertEqual(n, 3)
+    }
+}
+
+class FloorDivModTests(TestCase) {
+    """Integer floor-division (//) and modulo (%) - Python floor semantics.
+
+    Regression for the codegen change that inlines `%` and `//` for a VARIABLE
+    divisor (previously only a constant divisor was inlined; a variable divisor
+    emitted a per-use call to dragon_mod_int / dragon_floordiv_int). The inline form
+    emits srem/sdiv + a branchless floor-correction `select`, guarded by a `b == 0`
+    branch whose cold path keeps the runtime call (which still errors on ÷0).
+
+    The result must track the sign of the DIVISOR (floor), not C's truncation:
+      -7 // 3 == -3,  -7 % 3 == 2,  7 // -3 == -3,  7 % -3 == -2.
+
+    Divisors here come through function parameters, so at codegen they are not
+    ConstantInt - this is exactly the inline variable-divisor path. The `_const`
+    tests pin the constant fast path (literal divisor) in parallel.
+    """
+
+    def test_mod_variable_divisor_all_signs() {
+        self.assertEqual(vmod(7, 3), 1)
+        self.assertEqual(vmod(-7, 3), 2)
+        self.assertEqual(vmod(7, -3), -2)
+        self.assertEqual(vmod(-7, -3), -1)
+        self.assertEqual(vmod(6, 3), 0)
+        self.assertEqual(vmod(-6, 3), 0)
+    }
+
+    def test_floordiv_variable_divisor_all_signs() {
+        self.assertEqual(vdiv(7, 3), 2)
+        self.assertEqual(vdiv(-7, 3), -3)
+        self.assertEqual(vdiv(7, -3), -3)
+        self.assertEqual(vdiv(-7, -3), 2)
+        self.assertEqual(vdiv(6, 3), 2)
+        self.assertEqual(vdiv(-6, 3), -2)
+    }
+
+    def test_mod_constant_divisor() {
+        self.assertEqual(7 % 3, 1)
+        self.assertEqual(-7 % 3, 2)
+        self.assertEqual(7 % -3, -2)
+        self.assertEqual(-7 % -3, -1)
+    }
+
+    def test_floordiv_constant_divisor() {
+        self.assertEqual(7 // 3, 2)
+        self.assertEqual(-7 // 3, -3)
+        self.assertEqual(7 // -3, -3)
+        self.assertEqual(-7 // -3, 2)
+    }
+
+    def test_aug_assign_variable_divisor() {
+        m: int = -7
+        d: int = vmod(0, 1)
+        d = 3
+        m %= d
+        self.assertEqual(m, 2)
+        q: int = -7
+        q //= d
+        self.assertEqual(q, -3)
+    }
+
+    def test_identity_a_eq_div_times_b_plus_mod() {
+        b: int = -3
+        a: int = -20
+        self.assertEqual(vdiv(a, b) * b + vmod(a, b), a)
+        a = 20
+        self.assertEqual(vdiv(a, b) * b + vmod(a, b), a)
+    }
+}
+
+class SetOperatorTests(TestCase) {
+    def test_union() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = a | b
+        self.assertEqual(len(c), 3)
+        self.assertTrue(1 in c)
+        self.assertTrue(2 in c)
+        self.assertTrue(3 in c)
+    }
+
+    def test_intersection() {
+        a: set[int] = {1, 2, 4}
+        b: set[int] = {2, 4, 8}
+        c: set[int] = a & b
+        self.assertEqual(len(c), 2)
+        self.assertTrue(2 in c)
+        self.assertTrue(4 in c)
+        self.assertFalse(1 in c)
+    }
+
+    def test_difference() {
+        a: set[int] = {1, 2, 4}
+        b: set[int] = {2, 8}
+        c: set[int] = a - b
+        self.assertEqual(len(c), 2)
+        self.assertTrue(1 in c)
+        self.assertTrue(4 in c)
+        self.assertFalse(2 in c)
+    }
+
+    def test_symmetric_difference() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = a ^ b
+        self.assertEqual(len(c), 2)
+        self.assertTrue(1 in c)
+        self.assertTrue(3 in c)
+        self.assertFalse(2 in c)
+    }
+
+    def test_str_element_sets() {
+        a: set[str] = {"red", "green"}
+        b: set[str] = {"green", "blue"}
+        u: set[str] = a | b
+        self.assertEqual(len(u), 3)
+        i: set[str] = a & b
+        self.assertEqual(len(i), 1)
+        self.assertTrue("green" in i)
+        d: set[str] = a - b
+        self.assertEqual(len(d), 1)
+        self.assertTrue("red" in d)
+    }
+
+    def test_operands_survive_unchanged() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = a | b
+        d: set[int] = a & b
+        self.assertEqual(len(a), 2)
+        self.assertEqual(len(b), 2)
+        self.assertEqual(len(c), 3)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_ops_on_returned_sets() {
+        def evens() -> set[int] {
+            return {0, 2, 4}
+        }
+        def small() -> set[int] {
+            return {0, 1, 2}
+        }
+        c: set[int] = evens() & small()
+        self.assertEqual(len(c), 2)
+        self.assertTrue(0 in c)
+        self.assertTrue(2 in c)
+    }
+
+    def test_chained_ops() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        e: set[int] = {9}
+        c: set[int] = (a | b) - (a & b) | e
+        self.assertEqual(len(c), 3)
+        self.assertTrue(1 in c)
+        self.assertTrue(3 in c)
+        self.assertTrue(9 in c)
+        self.assertFalse(2 in c)
+    }
+}
+
+
+class ListMembership(TestCase) {
+    """Regression tests for container membership and search.
+
+    Covers the fixes for four bugs found while documenting the Collections chapter:
+      1. `x in list` had no codegen branch - always returned False.
+      2. list search (in / .index / .count / .remove) compared string elements by
+         pointer, not value, so a freshly built equal string was never found.
+      3. an empty set() + .add(str) hashed strings by pointer (and leaked them),
+         so membership of an added string returned False.
+      4. the set(list) constructor was unimplemented ("Unknown function: set").
+
+    All assertions exercise the `in` operator / search methods directly rather than
+    assertIn, so the operator lowering itself is under test.
+    """
+
+    def test_int_in() {
+        const xs: list[int] = [1, 2, 3]
+        self.assertTrue(2 in xs)
+        self.assertFalse(9 in xs)
+        self.assertTrue(9 not in xs)
+    }
+
+    def test_str_in_value_equality() {
+        const xs: list[str] = ["apple", "pear", "fig"]
+        const built: str = "pe" + "ar"
+        self.assertTrue(built in xs)
+        self.assertTrue("fig" in xs)
+        self.assertFalse("kiwi" in xs)
+    }
+
+    def test_index_and_count_str() {
+        const xs: list[str] = ["a", "b", "a"]
+        self.assertEqual(xs.index("b"), 1)
+        self.assertEqual(xs.count("a"), 2)
+    }
+
+    def test_float_in() {
+        const xs: list[float] = [1.5, 2.5]
+        self.assertTrue(2.5 in xs)
+        self.assertFalse(9.9 in xs)
+    }
+
+    def test_remove_str_by_value() {
+        m: list[str] = ["a", "b", "c"]
+        m.remove("b")
+        self.assertEqual(len(m), 2)
+        self.assertFalse("b" in m)
+        self.assertTrue("c" in m)
+    }
+}
+
+
+class SetMembership(TestCase) {
+    def test_empty_set_add_str() {
+        s: set[str] = set()
+        s.add("def")
+        s.add("class")
+        self.assertEqual(len(s), 2)
+        self.assertTrue("def" in s)
+        self.assertFalse("xyz" in s)
+    }
+
+    def test_int_set() {
+        n: set[int] = set()
+        n.add(5)
+        self.assertTrue(5 in n)
+        self.assertFalse(9 in n)
+    }
+
+    def test_set_from_list_dedups() {
+        const words: list[str] = ["a", "b", "a", "c"]
+        const fl: set[str] = set(words)
+        self.assertEqual(len(fl), 3)
+        self.assertTrue("a" in fl)
+        self.assertFalse("z" in fl)
+    }
+
+    def test_set_literal_add() {
+        lit: set[str] = {"x", "y"}
+        lit.add("z")
+        self.assertTrue("x" in lit)
+        self.assertTrue("z" in lit)
+    }
+}
+
+
+class SetOrderingTests(TestCase) {
+    def test_subset_superset_bound() {
+        a: set[int] = {1, 2}
+        b: set[int] = {1, 2, 3}
+        d: set[int] = {1, 2}
+        self.assertTrue(a <= b)
+        self.assertTrue(a <= d)
+        self.assertTrue(a < b)
+        self.assertFalse(a < d)
+        self.assertTrue(b >= a)
+        self.assertTrue(b > a)
+        self.assertFalse(a > b)
+    }
+
+    def test_disjoint() {
+        a: set[int] = {1, 2}
+        c: set[int] = {3, 4}
+        self.assertFalse(a <= c)
+        self.assertFalse(a >= c)
+    }
+
+    def test_inline_literals() {
+        self.assertTrue({1, 2} <= {1, 2, 3})
+        self.assertFalse({1, 2} <= {3, 4})
+        self.assertTrue({1, 2} < {1, 2, 3})
+        self.assertTrue({1, 2, 3} > {1, 2})
+    }
+
+    def test_chained() {
+        a: set[int] = {1}
+        b: set[int] = {1, 2}
+        c: set[int] = {1, 2, 3}
+        self.assertTrue(a < b < c)
+        self.assertTrue(a <= b <= c)
+    }
+}
+
+
+class InlineSetMethodTests(TestCase) {
+    def test_len_of_inline_result() {
+        a: set[int] = {1, 2}
+        b: set[int] = {3, 4}
+        c: set[int] = {1, 2, 3}
+        self.assertEqual(len(a.union(b)), 4)
+        self.assertEqual(len(a.intersection(b)), 0)
+        self.assertEqual(len(a.difference(b)), 2)
+        self.assertEqual(len(a.symmetric_difference(b)), 4)
+        self.assertEqual(len(a.copy()), 2)
+        self.assertEqual(len(a.union(c)), 3)
+    }
+}
+
+
+main([AndOrValueTests(), TruthinessContextTests(), FloorDivModTests(),
+      SetOperatorTests(), ListMembership(), SetMembership(),
+      SetOrderingTests(), InlineSetMethodTests()])

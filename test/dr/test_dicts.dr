@@ -1,0 +1,635 @@
+from unittest import TestCase, main
+import json
+from math import nan
+from json import Schema, ValidationResult
+
+class Customer {
+    id: int
+    name: str
+    def(id: int, name: str) {
+        self.id = id
+        self.name = name
+    }
+}
+
+class Results {
+    rows: list[dict[str, Any]]
+    def(rows: list[dict[str, Any]]) {
+        self.rows = rows
+    }
+    def one[T]() -> T {
+        return T(**self.rows[0])
+    }
+}
+
+
+class Thing {
+    n: int
+
+    def(n: int) {
+        self.n = n
+    }
+}
+
+
+class Holder {
+    things: dict[str, Thing]
+
+    def() {
+        self.things = {}
+    }
+
+    def put(name: str, t: Thing) -> None {
+        self.things[name] = t
+    }
+
+    def get_n(name: str) -> int {
+        const t: Thing = self.things[name]
+        return t.n
+    }
+}
+
+
+def make(n: int) -> Thing {
+    return Thing(n)
+}
+
+
+class DictGetOptionalTests(TestCase) {
+    def test_scalar_hit_and_miss() {
+        d: dict[str, int] = {a: 10}
+        hit: int | None = d.get("a")
+        if hit is not none {
+            self.assertEqual(hit, 10)
+        }
+        miss: int | None = d.get("zz")
+        self.assertTrue(miss is none)
+    }
+
+    def test_str_valued_hit_and_miss() {
+        d: dict[str, str] = {a: "hello"}
+        hit: str | None = d.get("a")
+        if hit is not none {
+            self.assertEqual(hit, "hello")
+        }
+        miss: str | None = d.get("zz")
+        self.assertTrue(miss is none)
+    }
+
+    def test_heap_valued_hit_and_miss() {
+        d: dict[str, list[int]] = {a: [1, 2, 3]}
+        hit: list[int] | None = d.get("a")
+        if hit is not none {
+            self.assertEqual(len(hit), 3)
+        }
+        miss: list[int] | None = d.get("zz")
+        self.assertTrue(miss is none)
+    }
+
+    def test_int_keyed_hit_and_miss() {
+        d: dict[int, str] = {7: "seven"}
+        hit: str | None = d.get(7)
+        if hit is not none {
+            self.assertEqual(hit, "seven")
+        }
+        miss: str | None = d.get(99)
+        self.assertTrue(miss is none)
+    }
+
+    def test_any_valued_keeps_its_tag() {
+        d: dict[str, Any] = {n: 10, s: "string", b: True}
+        self.assertEqual(str(d.get("s")), "string")
+        self.assertEqual(str(d.get("n")), "10")
+        self.assertEqual(str(d.get("b")), "True")
+    }
+
+    def test_any_valued_default_keeps_its_tag() {
+        d: dict[str, Any] = {s: "string"}
+        self.assertEqual(str(d.get("s", "fallback")), "string")
+        self.assertEqual(str(d.get("zz", "fallback")), "fallback")
+    }
+
+    def test_any_valued_miss_is_none() {
+        d: dict[str, Any] = {s: "string"}
+        self.assertTrue(d.get("zz") is none)
+    }
+
+    def test_two_arg_get_is_unchanged() {
+        d: dict[str, int] = {a: 10}
+        self.assertEqual(d.get("a", 0), 10)
+        self.assertEqual(d.get("zz", 0), 0)
+    }
+
+    def test_bracket_and_dot_still_raise() {
+        d: dict[str, int] = {a: 10}
+        raised_bracket: bool = False
+        try {
+            probe: int = d["zz"]
+        } except KeyError {
+            raised_bracket = True
+        }
+        self.assertTrue(raised_bracket)
+        self.assertEqual(d.a, 10)
+        self.assertEqual(d["a"], 10)
+    }
+
+    def test_get_result_outlives_source_dict() {
+        d: dict[str, list[int]] = {k: [7, 8, 9, 10]}
+        keep: list[int] | None = d.get("k")
+        d = {}
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i, i]
+            i = i + 1
+        }
+        if keep is not none {
+            self.assertEqual(len(keep), 4)
+            self.assertEqual(keep[3], 10)
+        }
+    }
+
+    def test_or_supplies_a_default_for_a_miss() {
+        d: dict[str, str] = {a: "hello"}
+        got: str = d.get("zz") or "fallback"
+        self.assertEqual(got, "fallback")
+        kept: str = d.get("a") or "fallback"
+        self.assertEqual(kept, "hello")
+    }
+}
+
+
+class DictIntIterationTests(TestCase) {
+    """Iteration and lookup over int-keyed dicts.
+
+    Before the fix, every int-keyed `dict[int, V]` iteration treated the i64 key as
+    a string pointer: `for k in d` / `d.items()` IntToPtr'd the key (1 → address
+    0x1) and SIGSEGV'd on use, and a list/set/dict comprehension over a bare dict
+    walked the DragonDict bytes as a list (also a crash). `.get`/`.has_key` routed
+    to the str-keyed runtime (`const char*` key) and failed LLVM verification.
+
+    The fix binds int keys as native i64 (VarKind::Int) in the for-loop and
+    items()-unpack paths, converts a bare-dict comprehension iterable to its keys
+    list via dragon_dict_keys (owned temp, decref'd after the loop), and routes the
+    get/has_key family to the dragon_dict_int_* variants. Str-keyed dicts are
+    unaffected - the path forks on the statically-tracked key kind.
+    """
+
+    def test_for_key_loop() {
+        d: dict[int, str] = {1: "a", 2: "b", 3: "c"}
+        total: int = 0
+        for k in d {
+            total = total + k
+        }
+        self.assertEqual(total, 6)
+    }
+
+    def test_for_key_loop_subscript() {
+        d: dict[int, int] = {10: 100, 20: 200}
+        total: int = 0
+        for k in d {
+            total = total + k + d[k]
+        }
+        self.assertEqual(total, 330)
+    }
+
+    def test_items_unpack() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        keysum: int = 0
+        joined: str = ""
+        for k, v in d.items() {
+            keysum = keysum + k
+            joined = joined + v
+        }
+        self.assertEqual(keysum, 3)
+        self.assertEqual(joined, "ab")
+    }
+
+    def test_list_comprehension() {
+        d: dict[int, str] = {1: "a", 2: "b", 3: "c"}
+        ks: list[int] = [k for k in d]
+        self.assertEqual(len(ks), 3)
+        self.assertEqual(ks[0], 1)
+        self.assertEqual(ks[2], 3)
+    }
+
+    def test_list_comprehension_filtered() {
+        d: dict[int, int] = {1: 1, 2: 2, 3: 3, 4: 4}
+        evens: list[int] = [k for k in d if k % 2 == 0]
+        self.assertEqual(len(evens), 2)
+        self.assertEqual(evens[0], 2)
+        self.assertEqual(evens[1], 4)
+    }
+
+    def test_set_comprehension() {
+        d: dict[int, str] = {1: "a", 2: "b", 3: "c"}
+        s: set[int] = {k for k in d}
+        self.assertEqual(len(s), 3)
+    }
+
+    def test_dict_comprehension() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        out: dict[int, int] = {k: k * 10 for k in d}
+        self.assertEqual(out[1], 10)
+        self.assertEqual(out[2], 20)
+    }
+
+    def test_get_with_default() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        self.assertEqual(d.get(1, "z"), "a")
+        self.assertEqual(d.get(99, "missing"), "missing")
+    }
+
+    def test_get_single_arg() {
+        d: dict[int, str] = {1: "a"}
+        self.assertEqual(d.get(1), "a")
+    }
+
+    def test_has_key() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        self.assertTrue(d.has_key(1))
+        self.assertFalse(d.has_key(99))
+    }
+
+    def test_str_keyed_unaffected() {
+        d: dict[str, int] = {"x": 1, "y": 2}
+        joined: str = ""
+        for k in d {
+            joined = joined + k
+        }
+        self.assertEqual(joined, "xy")
+        ks: list[str] = [k for k in d]
+        self.assertEqual(len(ks), 2)
+    }
+}
+
+
+class DictFloatKeyTests(TestCase) {
+    """dict[float, V]: float keys hash and compare by normalized IEEE bits through
+    the int-keyed engine. -0.0 and 0.0 are one key; every NaN is one key; keys
+    read back (iteration, keys, items, pop) come back as floats."""
+
+    def test_literal_set_get_overwrite() {
+        d: dict[float, str] = {1.5: "a", 2.25: "b"}
+        self.assertEqual(d[1.5], "a")
+        self.assertEqual(d[2.25], "b")
+        d[1.5] = "c"
+        self.assertEqual(d[1.5], "c")
+        self.assertEqual(len(d), 2)
+    }
+
+    def test_empty_annotated_insert() {
+        d: dict[float, int] = {}
+        d[0.5] = 10
+        d[100.125] = 20
+        self.assertEqual(d[0.5], 10)
+        self.assertEqual(d[100.125], 20)
+        self.assertEqual(len(d), 2)
+    }
+
+    def test_negative_zero_folds_to_zero() {
+        d: dict[float, str] = {}
+        d[0.0] = "zero"
+        d[-0.0] = "negzero"
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[0.0], "negzero")
+        self.assertEqual(d[-0.0], "negzero")
+    }
+
+    def test_nan_is_one_key() {
+        d: dict[float, str] = {}
+        d[nan] = "first"
+        other: float = 0.0 / 0.0
+        d[other] = "second"
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[nan], "second")
+    }
+
+    def test_contains_and_del() {
+        d: dict[float, int] = {1.25: 1, 2.5: 2}
+        self.assertTrue(1.25 in d)
+        self.assertFalse(9.75 in d)
+        del d[1.25]
+        self.assertFalse(1.25 in d)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_get_with_default() {
+        d: dict[float, str] = {1.5: "a"}
+        self.assertEqual(d.get(1.5, "z"), "a")
+        self.assertEqual(d.get(9.5, "missing"), "missing")
+        self.assertEqual(d.get(1.5), "a")
+    }
+
+    def test_pop() {
+        d: dict[float, str] = {1.5: "a", 2.5: "b"}
+        got: str = d.pop(1.5)
+        self.assertEqual(got, "a")
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_for_key_loop() {
+        d: dict[float, str] = {0.5: "a", 1.5: "b", 2.5: "c"}
+        total: float = 0.0
+        for k in d {
+            total = total + k
+        }
+        self.assertEqual(total, 4.5)
+    }
+
+    def test_for_key_loop_subscript() {
+        d: dict[float, int] = {0.5: 10, 1.5: 20}
+        keysum: float = 0.0
+        valsum: int = 0
+        for k in d {
+            keysum = keysum + k
+            valsum = valsum + d[k]
+        }
+        self.assertEqual(keysum, 2.0)
+        self.assertEqual(valsum, 30)
+    }
+
+    def test_items_unpack() {
+        d: dict[float, str] = {0.5: "a", 1.5: "b"}
+        keysum: float = 0.0
+        joined: str = ""
+        for k, v in d.items() {
+            keysum = keysum + k
+            joined = joined + v
+        }
+        self.assertEqual(keysum, 2.0)
+        self.assertEqual(joined, "ab")
+    }
+
+    def test_keys_list() {
+        d: dict[float, str] = {0.5: "a", 1.5: "b", 2.5: "c"}
+        ks: list[float] = [k for k in d]
+        self.assertEqual(len(ks), 3)
+        self.assertEqual(ks[0], 0.5)
+        self.assertEqual(ks[2], 2.5)
+    }
+
+    def test_float_values_untouched() {
+        d: dict[float, float] = {0.5: 5.0, 1.5: 15.0}
+        self.assertEqual(d[0.5] + d[1.5], 20.0)
+    }
+
+    def test_str_of_float_keyed_dict() {
+        d: dict[float, str] = {1.5: "a"}
+        self.assertEqual(str(d), "{1.5: 'a'}")
+    }
+
+    def test_str_of_empty_then_filled() {
+        d: dict[float, int] = {}
+        d[2.5] = 7
+        self.assertEqual(str(d), "{2.5: 7}")
+    }
+
+    def test_json_dumps_float_keys() {
+        d: dict[float, str] = {1.5: "a"}
+        self.assertEqual(json.dumps(d), '{"1.5": "a"}')
+    }
+
+    def test_copy_keeps_float_keys() {
+        d: dict[float, str] = {1.5: "a"}
+        c: dict[float, str] = d.copy()
+        self.assertEqual(c[1.5], "a")
+        self.assertEqual(str(c), "{1.5: 'a'}")
+    }
+
+    def test_int_and_str_keyed_unaffected() {
+        di: dict[int, str] = {1: "a", 2: "b"}
+        ds: dict[str, int] = {"x": 1}
+        self.assertEqual(di[2], "b")
+        self.assertEqual(ds["x"], 1)
+    }
+}
+
+
+class DictSpreadTests(TestCase) {
+    """Dict construction via `**` spread - literal `{...}` and `dict(...)` forms.
+
+    Spread sources seed the dict's key/value types (so a leading/all-spread literal
+    types correctly instead of dict[<unknown>, <unknown>]), and `dict(**a, **b)` /
+    `dict(x=1, **d)` construct a dict equivalent to the corresponding literal - an
+    honest copy (Python semantics: the result is independent of its sources).
+
+    Also covers the D049 materialization shape: a single generic method
+    `def one[T]() -> T { return T(**row) }` serving BOTH a typed class fetch
+    (`T(**row)`) and the untyped `T = dict[str, Any]` path (`dict(**row)`).
+    """
+
+    def test_literal_single_spread() {
+        d: dict[str, int] = {"y": 2}
+        m: dict[str, int] = {**d}
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m["y"], 2)
+    }
+
+    def test_literal_multi_spread() {
+        a: dict[str, int] = {"x": 1, "y": 2}
+        b: dict[str, int] = {"z": 3}
+        m: dict[str, int] = {**a, **b}
+        self.assertEqual(len(m), 3)
+        self.assertEqual(m["z"], 3)
+    }
+
+    def test_literal_mixed() {
+        d: dict[str, int] = {"y": 2}
+        m: dict[str, int] = {"x": 1, **d}
+        self.assertEqual(len(m), 2)
+        self.assertEqual(m["x"], 1)
+    }
+
+    def test_call_single_spread() {
+        row: dict[str, Any] = {"id": 1, "name": "a"}
+        m: dict[str, Any] = dict(**row)
+        self.assertEqual(len(m), 2)
+    }
+
+    def test_call_multi_spread() {
+        a: dict[str, int] = {"x": 1, "y": 2}
+        b: dict[str, int] = {"z": 3}
+        m: dict[str, int] = dict(**a, **b)
+        self.assertEqual(len(m), 3)
+        self.assertEqual(m["z"], 3)
+    }
+
+    def test_call_mixed_kwargs_and_spread() {
+        d: dict[str, int] = {"y": 2}
+        m: dict[str, int] = dict(x=1, **d)
+        self.assertEqual(len(m), 2)
+        self.assertEqual(m["x"], 1)
+    }
+
+    def test_call_is_a_copy_not_alias() {
+        a: dict[str, int] = {"x": 1}
+        m: dict[str, int] = dict(**a)
+        m["x"] = 99
+        self.assertEqual(a["x"], 1)
+        self.assertEqual(m["x"], 99)
+    }
+
+    def test_d049_typed_materialization() {
+        res: Results = Results([{"id": 1, "name": "alice"}])
+        c: Customer = res.one[Customer]()
+        self.assertEqual(c.id, 1)
+        self.assertEqual(c.name, "alice")
+    }
+
+    def test_d049_untyped_dict_path() {
+        res: Results = Results([{"id": 2, "name": "bob"}])
+        row: dict[str, Any] = res.one()
+        self.assertEqual(row["name"], "bob")
+    }
+}
+
+
+class TestTypedReads(TestCase) {
+    """class instances as dict values - one tag (TAG_CLASS) across every path.
+
+    Ordinary code, no tricks:
+
+        class Thing { n: int  def(n: int) { self.n = n } }
+        d: dict[str, Thing] = {}
+        d["a"] = Thing(7)
+        const t: Thing = d["a"]      # raised "TypeError: value for key 'a' is
+                                     # list, not bytes" before the fix
+
+    You did nothing wrong - the store side tagged instance values TAG_LIST=5
+    (the list elem_tag mapping) while annotated reads expected TAG_CLASS=7 (the
+    box-domain mapping). The same split made isinstance miss on instances held in
+    dict[str, Any], sent print(d) and json.dumps(d) walking the instance as a
+    LIST (ASan heap-buffer-overflow), and an append-tracking heuristic clobbered
+    declared list[Any] receivers into the native-pointer append (another OOB).
+    All instance values now carry TAG_CLASS=7; print renders <Thing instance>;
+    json.dumps raises a catchable TypeError (Python parity)
+    """
+
+    def test_subscript_store_annotated_read() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = make(7)
+        const t: Thing = d["a"]
+        self.assertEqual(t.n, 7)
+    }
+
+    def test_literal_store_annotated_read() -> None {
+        const d: dict[str, Thing] = {"a": Thing(9)}
+        const t: Thing = d["a"]
+        self.assertEqual(t.n, 9)
+    }
+
+    def test_chained_unannotated_read() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = make(5)
+        self.assertEqual(d["a"].n, 5)
+    }
+
+    def test_intkeyed_annotated_read() -> None {
+        d: dict[int, Thing] = {}
+        d[3] = make(11)
+        const t: Thing = d[3]
+        self.assertEqual(t.n, 11)
+    }
+
+    def test_class_field_dict() -> None {
+        const h: Holder = Holder()
+        h.put("a", make(13))
+        self.assertEqual(h.get_n("a"), 13)
+    }
+
+    def test_values_and_setdefault() -> None {
+        d: dict[str, Thing] = {}
+        const t0: Thing = d.setdefault("a", make(19))
+        self.assertEqual(t0.n, 19)
+        const t1: Thing = d["a"]
+        self.assertEqual(t1.n, 19)
+        const vs: list[Thing] = d.values()
+        const t2: Thing = vs[0]
+        self.assertEqual(t2.n, 19)
+    }
+}
+
+
+class TestLifetimes(TestCase) {
+    def test_overwrite_del_and_hold() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = Thing(1)
+        d["a"] = Thing(2)
+        const kept: Thing = d["a"]
+        del d["a"]
+        self.assertEqual(kept.n, 2)
+    }
+
+    def test_churn_values_stay_correct() -> None {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            d: dict[str, Thing] = {}
+            d["a"] = Thing(i)
+            d["a"] = Thing(i + 1)
+            d["b"] = Thing(i + 2)
+            del d["b"]
+            total = total + d["a"].n
+            i = i + 1
+        }
+        self.assertEqual(total, 125250)
+    }
+}
+
+
+class TestBoxDomains(TestCase) {
+    def test_anydict_isinstance_narrow() -> None {
+        d: dict[str, Any] = {}
+        d["t"] = Thing(21)
+        const v: Any = d["t"]
+        hit: bool = False
+        if isinstance(v, Thing) {
+            const t: Thing = v
+            self.assertEqual(t.n, 21)
+            hit = True
+        }
+        self.assertEqual(hit, True)
+    }
+
+    def test_listany_append_instance() -> None {
+        l: list[Any] = []
+        l.append(Thing(3))
+        const v: Any = l[0]
+        hit: bool = False
+        if isinstance(v, Thing) {
+            const t: Thing = v
+            self.assertEqual(t.n, 3)
+            hit = True
+        }
+        self.assertEqual(hit, True)
+    }
+
+    def test_dumps_of_instance_dict_raises() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = Thing(7)
+        caught: bool = False
+        try {
+            const out: str = json.dumps(d)
+            self.assertEqual(out, "unreachable")
+        } except {
+            caught = True
+        }
+        self.assertEqual(caught, True)
+    }
+
+    def test_dict_of_schema_instances() -> None {
+        registries: dict[str, Schema] = {}
+        s: Schema = Schema("draft-07")
+        s.register("thing.made", {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer", "minimum": 1}}})
+        registries["events"] = s
+        const back: Schema = registries["events"]
+        self.assertEqual(back.validate("thing.made", json.loads('{"n": 4}')).ok, True)
+        const r: ValidationResult = back.validate("thing.made", json.loads('{"n": 0}'))
+        self.assertEqual(r.ok, False)
+        self.assertEqual(r.errors[0].path, "$.n")
+    }
+}
+
+
+main([DictGetOptionalTests(), DictIntIterationTests(), DictFloatKeyTests(),
+      DictSpreadTests(), TestTypedReads(), TestLifetimes(), TestBoxDomains()])

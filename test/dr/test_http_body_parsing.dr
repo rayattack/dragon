@@ -1,0 +1,254 @@
+from unittest import TestCase, main
+from http.multipart import parse_multipart, boundary_from_content_type, Part
+from http.server import Router, Request, Response, Context
+from http.connection import MemoryReader
+
+
+const CRLF: str = "\r\n"
+const CRLF_B: bytes = CRLF.encode()
+
+
+def _open(boundary: str) -> bytes {
+    return ("--" + boundary + CRLF).encode()
+}
+
+
+def _close(boundary: str) -> bytes {
+    return (CRLF + "--" + boundary + "--" + CRLF).encode()
+}
+
+
+def _sep(boundary: str) -> bytes {
+    return (CRLF + "--" + boundary + CRLF).encode()
+}
+
+
+def _form_handler(req: Request, res: Response, ctx: Context) -> None {
+    const fields: dict[str, str] = req.form()
+    const files: list[Part] = req.files()
+    title: str = fields["title"] if "title" in fields else ""
+    fname: str = ""
+    flen: int = 0
+    b0: int = -1
+    b1: int = -1
+    if len(files) > 0 {
+        const f: Part = files[0]
+        fname = f.filename
+        flen = len(f.data)
+        if flen > 0 { b0 = f.data[0] }
+        if flen > 1 { b1 = f.data[1] }
+    }
+    res.text(f"fields={len(fields)} files={len(files)} title={title} fname={fname} flen={flen} b0={b0} b1={b1}")
+}
+
+
+def _urlenc_handler(req: Request, res: Response, ctx: Context) -> None {
+    res.text(f"fields={len(req.form())}")
+}
+
+
+def _build_multipart(boundary: str, file_bytes: bytes) -> bytes {
+    const b: bytes = boundary.encode()
+    parts: bytes = b"--" + b + CRLF_B
+    parts = parts + b'Content-Disposition: form-data; name="title"' + CRLF_B + CRLF_B
+    parts = parts + b"Hello W3" + CRLF_B
+    parts = parts + b"--" + b + CRLF_B
+    parts = parts + b'Content-Disposition: form-data; name="avatar"; filename="a.bin"' + CRLF_B
+    parts = parts + b"Content-Type: application/octet-stream" + CRLF_B + CRLF_B
+    parts = parts + file_bytes + CRLF_B
+    parts = parts + b"--" + b + b"--" + CRLF_B
+
+    head: bytes = b"POST /upload HTTP/1.1" + CRLF_B + b"Host: x" + CRLF_B
+    head = head + (b"Content-Type: multipart/form-data; boundary=" + b) + CRLF_B
+    head = head + (b"Content-Length: " + str(len(parts)).encode()) + CRLF_B
+    head = head + b"Connection: close" + CRLF_B + CRLF_B
+    return head + parts
+}
+
+
+def _serve(app: Router, request: bytes) -> str {
+    const reader: MemoryReader = MemoryReader([request])
+    app.serve_connection(reader)
+    return reader.sent
+}
+
+
+class HttpMultipartTests(TestCase) {
+    """http.multipart - parse multipart/form-data bodies into Parts (W3).
+
+    Builds literal `bytes` payloads (no network) and verifies field/file parsing,
+    binary-verbatim survival (0x00 / 0xFF), multi-file forms, and the boundary
+    edge cases (trailing `--`, CRLF framing, quoted `boundary=`)."""
+
+    def test_boundary_from_content_type_plain() {
+        const b: str = boundary_from_content_type(
+            "multipart/form-data; boundary=----WebKitFormBoundaryABC123")
+        self.assertEqual(b, "----WebKitFormBoundaryABC123")
+    }
+
+    def test_boundary_from_content_type_quoted() {
+        const b: str = boundary_from_content_type(
+            "multipart/form-data; boundary=\"abc 123\"")
+        self.assertEqual(b, "abc 123")
+    }
+
+    def test_boundary_from_content_type_trailing_param() {
+        const b: str = boundary_from_content_type(
+            "multipart/form-data; boundary=xYz; charset=utf-8")
+        self.assertEqual(b, "xYz")
+    }
+
+    def test_boundary_from_content_type_absent() {
+        self.assertEqual(boundary_from_content_type("text/plain"), "")
+    }
+
+    def test_text_field_and_file_part() {
+        const boundary: str = "BoUnDaRy42"
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"field1\"" + CRLF + CRLF).encode()
+        body = body + "hello world".encode()
+        body = body + _sep(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"file1\"; filename=\"note.txt\"" + CRLF).encode()
+        body = body + ("Content-Type: text/plain" + CRLF + CRLF).encode()
+        body = body + "file contents".encode()
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 2)
+
+        self.assertEqual(parts[0].name, "field1")
+        self.assertEqual(parts[0].filename, "")
+        self.assertEqual(parts[0].content_type, "")
+        self.assertEqual(parts[0].data.decode(), "hello world")
+        self.assertFalse(parts[0].is_file())
+
+        self.assertEqual(parts[1].name, "file1")
+        self.assertEqual(parts[1].filename, "note.txt")
+        self.assertEqual(parts[1].content_type, "text/plain")
+        self.assertEqual(parts[1].data.decode(), "file contents")
+        self.assertTrue(parts[1].is_file())
+    }
+
+    def test_binary_file_survives_verbatim() {
+        const boundary: str = "----Bin----"
+        const payload: bytes = bytes([0, 255, 13, 10, 65, 0, 254, 127, 128])
+
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"img\"; filename=\"x.bin\"" + CRLF).encode()
+        body = body + ("Content-Type: application/octet-stream" + CRLF + CRLF).encode()
+        body = body + payload
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 1)
+        const got: bytes = parts[0].data
+
+        self.assertEqual(len(got), len(payload))
+        i: int = 0
+        while i < len(payload) {
+            self.assertEqual(got[i], payload[i])
+            i = i + 1
+        }
+        self.assertEqual(got[0], 0)
+        self.assertEqual(got[1], 255)
+        self.assertEqual(got[6], 254)
+        self.assertEqual(got[8], 128)
+    }
+
+    def test_multi_file_form() {
+        const boundary: str = "multi-file-bnd"
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"a\"; filename=\"a.dat\"" + CRLF).encode()
+        body = body + ("Content-Type: application/octet-stream" + CRLF + CRLF).encode()
+        body = body + bytes([1, 2, 3])
+        body = body + _sep(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"b\"; filename=\"b.dat\"" + CRLF).encode()
+        body = body + ("Content-Type: application/octet-stream" + CRLF + CRLF).encode()
+        body = body + bytes([9, 8, 7, 6])
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 2)
+
+        self.assertEqual(parts[0].name, "a")
+        self.assertEqual(parts[0].filename, "a.dat")
+        self.assertEqual(len(parts[0].data), 3)
+        self.assertEqual(parts[0].data[0], 1)
+        self.assertEqual(parts[0].data[2], 3)
+
+        self.assertEqual(parts[1].name, "b")
+        self.assertEqual(parts[1].filename, "b.dat")
+        self.assertEqual(len(parts[1].data), 4)
+        self.assertEqual(parts[1].data[0], 9)
+        self.assertEqual(parts[1].data[3], 6)
+    }
+
+    def test_quoted_boundary_end_to_end() {
+        const ct: str = "multipart/form-data; boundary=\"sp ace bnd\""
+        const boundary: str = boundary_from_content_type(ct)
+        self.assertEqual(boundary, "sp ace bnd")
+
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"k\"" + CRLF + CRLF).encode()
+        body = body + "v".encode()
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0].name, "k")
+        self.assertEqual(parts[0].data.decode(), "v")
+    }
+
+    def test_empty_boundary_returns_no_parts() {
+        const body: bytes = "garbage".encode()
+        const parts: list[Part] = parse_multipart(body, "")
+        self.assertEqual(len(parts), 0)
+    }
+}
+
+
+class HttpFormTests(TestCase) {
+    """http server form handling - Request.form() / Request.files() (W3 wiring).
+
+    End-to-end through the real keep-alive loop (via an in-memory ConnReader), not
+    the parser in isolation: builds a full multipart/form-data POST, drives it
+    through Router.serve_connection, and asserts (via the response body the handler
+    writes) that the handler saw the right text fields and binary file parts.
+    Covers the verbatim-bytes request-parse path - a binary file body is not valid
+    UTF-8 and must reach the handler byte-exact."""
+
+    def test_text_field_and_file_parsed() {
+        const app: Router = Router()
+        app.POST("/upload", _form_handler)
+        const sent: str = _serve(app, _build_multipart("----dragonW3", b"PLAINTEXT"))
+        self.assertIn("200", sent)
+        self.assertIn("fields=1", sent)
+        self.assertIn("files=1", sent)
+        self.assertIn("title=Hello W3", sent)
+        self.assertIn("fname=a.bin", sent)
+    }
+
+    def test_binary_file_bytes_verbatim() {
+        const app: Router = Router()
+        app.POST("/upload", _form_handler)
+        const sent: str = _serve(app, _build_multipart("----dragonW3", bytes([0, 255, 1, 254, 2, 253])))
+        self.assertIn("flen=6", sent)
+        self.assertIn("b0=0", sent)
+        self.assertIn("b1=255", sent)
+    }
+
+    def test_urlencoded_form_still_works() {
+        const app: Router = Router()
+        app.POST("/u", _urlenc_handler)
+        const body: bytes = b"a=1&b=2&c=3"
+        head: bytes = b"POST /u HTTP/1.1" + CRLF_B + b"Host: x" + CRLF_B
+        head = head + b"Content-Type: application/x-www-form-urlencoded" + CRLF_B
+        head = head + (b"Content-Length: " + str(len(body)).encode()) + CRLF_B
+        head = head + b"Connection: close" + CRLF_B + CRLF_B
+        const sent: str = _serve(app, head + body)
+        self.assertIn("fields=3", sent)
+    }
+}
+
+
+main([HttpMultipartTests(), HttpFormTests()])

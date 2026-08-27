@@ -1,0 +1,222 @@
+from unittest import TestCase, main
+from subprocess import run, check_output, call, Popen, CompletedProcess, CalledProcessError, TimeoutExpired
+import signal
+
+
+class SubprocessTests(TestCase) {
+    """subprocess - behavioral tests (POSIX spawn + pipe capture).
+
+    Exercises the public Tier-0 surface end to end against real system binaries
+    (/bin/echo, /bin/sh, /bin/cat). Exit codes go through
+    `/bin/sh -c "exit N"` rather than /bin/true|false, which macOS ships only
+    under /usr/bin:
+    - stdout capture round-trips verbatim (the `b"hello\\n"` KAT)
+    - a non-zero exit surfaces as the right returncode, and check=True raises
+    - communicate() feeds stdin and echoes it back through /bin/cat
+    - check_output / call / Popen.wait / poll front ends behave like CPython.
+
+    Tier-1 additions:
+    - communicate() multiplexes stdin/stdout/stderr so a child that fills its
+      stderr pipe while we feed >128 KB of stdin and drain >128 KB of stdout
+      round-trips without deadlock (the serial-drain failure mode).
+    - communicate(timeout=)/run(timeout=) raise TimeoutExpired and reap the child."""
+
+    def test_run_capture_stdout() {
+        const cp: CompletedProcess = run(["/bin/echo", "hello"], true)
+        self.assertEqual(cp.returncode, 0)
+        self.assertEqual(cp.stdout.decode(), "hello\n")
+        const want: bytes = b"hello\n"
+        self.assertEqual(len(cp.stdout), len(want))
+        i: int = 0
+        while i < len(want) {
+            self.assertEqual(cp.stdout[i], want[i])
+            i = i + 1
+        }
+    }
+
+    def test_nonzero_exit_returncode() {
+        const cp: CompletedProcess = run(["/bin/sh", "-c", "exit 3"])
+        self.assertEqual(cp.returncode, 3)
+    }
+
+    def test_check_true_raises_on_nonzero() {
+        raised: bool = false
+        captured_code: int = -1
+        try {
+            const cp: CompletedProcess = run(["/bin/sh", "-c", "exit 3"], false, true)
+        } except CalledProcessError as e {
+            raised = true
+            captured_code = e.returncode
+        }
+        self.assertTrue(raised)
+        self.assertEqual(captured_code, 3)
+    }
+
+    def test_check_true_passes_on_zero() {
+        const cp: CompletedProcess = run(["/bin/sh", "-c", "exit 0"], false, true)
+        self.assertEqual(cp.returncode, 0)
+    }
+
+    def test_communicate_feeds_stdin() {
+        const proc: Popen = Popen(["/bin/cat"], "", true, true, true)
+        const both: tuple[bytes, bytes] = proc.communicate(b"ping pong 123")
+        self.assertEqual(both[0].decode(), "ping pong 123")
+        self.assertEqual(proc.returncode, 0)
+    }
+
+    def test_communicate_binary_safe() {
+        const payload: bytes = bytes([0, 255, 65, 66, 0, 254, 128])
+        const proc: Popen = Popen(["/bin/cat"], "", true, false, true)
+        const both: tuple[bytes, bytes] = proc.communicate(payload)
+        const got: bytes = both[0]
+        self.assertEqual(len(got), len(payload))
+        i: int = 0
+        while i < len(payload) {
+            self.assertEqual(got[i], payload[i])
+            i = i + 1
+        }
+    }
+
+    def test_check_output() {
+        const out: bytes = check_output(["/bin/echo", "captured"])
+        self.assertEqual(out.decode(), "captured\n")
+    }
+
+    def test_check_output_raises_on_nonzero() {
+        raised: bool = false
+        try {
+            const out: bytes = check_output(["/bin/sh", "-c", "exit 1"])
+        } except CalledProcessError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_call_returns_code() {
+        self.assertEqual(call(["/bin/sh", "-c", "exit 0"]), 0)
+        self.assertEqual(call(["/bin/sh", "-c", "exit 1"]), 1)
+    }
+
+    def test_wait_is_idempotent() {
+        const proc: Popen = Popen(["/bin/echo", "x"], "", true, true, false)
+        const both: tuple[bytes, bytes] = proc.communicate(b"")
+        self.assertEqual(proc.wait(), 0)
+        self.assertEqual(proc.wait(), 0)
+        self.assertEqual(both[0].decode(), "x\n")
+    }
+
+    def test_cwd_changes_directory() {
+        const cp: CompletedProcess = run(["/bin/sh", "-c", "pwd"], true, false, b"", "/")
+        self.assertEqual(cp.stdout.decode(), "/\n")
+    }
+
+    def test_concurrent_drain_no_deadlock() {
+        const N: int = 200000
+        const payload: bytes = bytes([65] * N)
+        const proc: Popen = Popen(["/bin/sh", "-c", "dd if=/dev/zero bs=1000 count=200 status=none >&2; cat"], "", true, true, true)
+        const both: tuple[bytes, bytes] = proc.communicate(payload)
+        const out: bytes = both[0]
+        const err: bytes = both[1]
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(len(out), N)
+        self.assertEqual(out[0], 65)
+        self.assertEqual(out[N - 1], 65)
+        self.assertEqual(len(err), N)
+        self.assertEqual(err[0], 0)
+        self.assertEqual(err[N - 1], 0)
+    }
+
+    def test_communicate_timeout_raises_and_reaps() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 5"], "", true, true, false)
+        raised: bool = false
+        captured_timeout: int = -1
+        try {
+            const both: tuple[bytes, bytes] = proc.communicate(b"", 200)
+        } except TimeoutExpired as e {
+            raised = true
+            captured_timeout = e.timeout
+        }
+        self.assertTrue(raised)
+        self.assertEqual(captured_timeout, 200)
+        self.assertFalse(proc.running())
+        self.assertEqual(proc.returncode, -9)
+    }
+
+    def test_run_timeout_raises() {
+        raised: bool = false
+        try {
+            const cp: CompletedProcess = run(["/bin/sh", "-c", "sleep 5"], true, false, b"", "", 200)
+        } except TimeoutExpired {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_run_timeout_fast_child_ok() {
+        const cp: CompletedProcess = run(["/bin/echo", "quick"], true, false, b"", "", 5000)
+        self.assertEqual(cp.returncode, 0)
+        self.assertEqual(cp.stdout.decode(), "quick\n")
+    }
+}
+
+
+class ProcessStateTests(TestCase) {
+    def test_running_then_exited() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 0.3"], "", false, false, false)
+        self.assertTrue(proc.running())
+        self.assertEqual(proc.wait(), 0)
+        self.assertFalse(proc.running())
+        self.assertEqual(proc.returncode, 0)
+    }
+
+    def test_sighup_kill_disambiguated_from_running() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 5"], "", false, false, false)
+        self.assertTrue(proc.running())
+        proc.send_signal(1)
+        self.assertEqual(proc.wait(), -1)
+        self.assertFalse(proc.running())
+        self.assertEqual(proc.returncode, -1)
+    }
+
+    def test_poll_after_exit_returns_code() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "exit 7"], "", false, false, false)
+        proc.wait()
+        self.assertEqual(proc.poll(), 7)
+        self.assertFalse(proc.running())
+    }
+
+    def test_poll_while_running_is_minus_one() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 5"], "", false, false, false)
+        self.assertEqual(proc.poll(), -1)
+        self.assertTrue(proc.running())
+        proc.kill()
+        self.assertEqual(proc.wait(), -9)
+        self.assertFalse(proc.running())
+    }
+}
+
+
+class SignalTests(TestCase) {
+    """signal - constants accessed both module-qualified and via from-import."""
+
+    def test_qualified_constants() {
+        self.assertEqual(signal.SIGINT, 2)
+        self.assertEqual(signal.SIGKILL, 9)
+        self.assertEqual(signal.SIGTERM, 15)
+        self.assertEqual(signal.SIG_DFL, 0)
+        self.assertEqual(signal.SIG_IGN, 1)
+    }
+
+    def test_strsignal() {
+        msg: str = signal.strsignal_of(signal.SIGTERM)
+        self.assertTrue(len(msg) > 0)
+    }
+
+    def test_alarm_returns_previous() {
+        prev: int = signal.alarm_secs(0)
+        self.assertEqual(prev, 0)
+    }
+}
+
+
+main([SubprocessTests(), ProcessStateTests(), SignalTests()])

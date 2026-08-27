@@ -1,0 +1,289 @@
+from unittest import TestCase, main
+from threading import Barrier, Semaphore, RWLock, Thread, Lock, Event, Condition
+import time
+
+const N: int = 4
+
+barrier: Barrier = Barrier(N)
+counter_lock: Lock = Lock()
+serial_count: int = 0
+arrivals: int = 0
+
+def barrier_worker() -> None {
+    global serial_count
+    global arrivals
+    const rc: int = barrier.wait()
+    with counter_lock {
+        if rc == 1 {
+            serial_count = serial_count + 1
+        }
+        arrivals = arrivals + 1
+    }
+}
+
+class BarrierTests(TestCase) {
+    def test_rendezvous_elects_one_serial_thread() {
+        global serial_count
+        t1: Thread = Thread(target=barrier_worker)
+        t2: Thread = Thread(target=barrier_worker)
+        t3: Thread = Thread(target=barrier_worker)
+        t1.start()
+        t2.start()
+        t3.start()
+        const rc: int = barrier.wait()
+        t1.join()
+        t2.join()
+        t3.join()
+        if rc == 1 {
+            serial_count = serial_count + 1
+        }
+        self.assertEqual(arrivals, N - 1)
+        self.assertEqual(serial_count, 1)
+    }
+
+    def test_construct_and_destroy() {
+        b: Barrier = Barrier(1)
+        self.assertEqual(b.wait(), 1)
+        self.assertEqual(b.wait(), 1)
+        self.assertEqual(b.destroy(), 0)
+    }
+}
+
+class SemaphoreTests(TestCase) {
+    def test_permits_are_counted() {
+        s: Semaphore = Semaphore(2)
+        self.assertTrue(s.acquire(blocking=False))
+        self.assertTrue(s.acquire(blocking=False))
+        self.assertFalse(s.acquire(blocking=False))
+        s.release()
+        self.assertTrue(s.acquire(blocking=False))
+        s.release()
+        s.release()
+        self.assertEqual(s.destroy(), 0)
+    }
+
+    def test_available_permit_is_taken_immediately() {
+        s: Semaphore = Semaphore(1)
+        self.assertTrue(s.acquire(blocking=True, timeout=1.0))
+        s.release()
+        s.destroy()
+    }
+
+    def test_timeout_waits_then_fails() {
+        s: Semaphore = Semaphore(1)
+        s.acquire()
+        const t0: float = time.monotonic()
+        const got: bool = s.acquire(blocking=True, timeout=0.1)
+        const dt: float = time.monotonic() - t0
+        s.release()
+        s.destroy()
+        self.assertFalse(got)
+        self.assertGreaterEqual(dt, 0.05)
+    }
+}
+
+class RWLockTests(TestCase) {
+    def test_construct_read_release_destroy() {
+        rw: RWLock = RWLock()
+        self.assertTrue(rw.acquire())
+        self.assertEqual(rw.release(), 0)
+        self.assertTrue(rw.acquire(write=True))
+        self.assertEqual(rw.release(), 0)
+        self.assertEqual(rw.destroy(), 0)
+    }
+}
+
+class ResourceLifetimeTests(TestCase) {
+    def test_destroy_is_idempotent() {
+        rw: RWLock = RWLock()
+        self.assertEqual(rw.destroy(), 0)
+        self.assertEqual(rw.destroy(), 0)
+        sem: Semaphore = Semaphore(1)
+        self.assertEqual(sem.destroy(), 0)
+        self.assertEqual(sem.destroy(), -1)
+        ev: Event = Event()
+        self.assertEqual(ev.destroy(), 0)
+        self.assertEqual(ev.destroy(), 0)
+        cond: Condition = Condition()
+        self.assertEqual(cond.destroy(), 0)
+        self.assertEqual(cond.destroy(), 0)
+        bar: Barrier = Barrier(1)
+        self.assertEqual(bar.destroy(), 0)
+        self.assertEqual(bar.destroy(), -1)
+    }
+
+    def test_churn_without_destroy_stays_correct() {
+        n: int = 0
+        i: int = 0
+        while i < 200 {
+            rw: RWLock = RWLock()
+            if rw.acquire(write=True) {
+                n = n + rw.release()
+            }
+            sem: Semaphore = Semaphore(1)
+            if sem.acquire() {
+                n = n + sem.release()
+            }
+            ev: Event = Event()
+            ev.set()
+            if ev.is_set() {
+                n = n + 1
+            }
+            cond: Condition = Condition()
+            n = n + cond.acquire() + cond.release()
+            i = i + 1
+        }
+        self.assertEqual(n, 200)
+    }
+}
+
+class ClockTests(TestCase) {
+    def test_monotonic_is_not_stuck_at_zero() {
+        const a: float = time.monotonic()
+        self.assertTrue(a > 0.0)
+    }
+
+    def test_monotonic_advances() {
+        const a: float = time.monotonic()
+        time.sleep_ms(20)
+        const b: float = time.monotonic()
+        self.assertTrue(b > a)
+    }
+
+    def test_perf_counter_is_live() {
+        const a: float = time.perf_counter()
+        self.assertTrue(a > 0.0)
+    }
+
+    def test_realtime_still_works() {
+        self.assertTrue(time.now_float() > 1000000000.0)
+    }
+}
+
+
+rw_lock: RWLock = RWLock()
+rw_result: bool = True
+rw_waited: float = 0.0
+
+def rw_reader() -> None {
+    global rw_result
+    global rw_waited
+    a: float = time.monotonic()
+    rw_result = rw_lock.acquire(timeout=0.15)
+    rw_waited = time.monotonic() - a
+}
+
+def rw_write_blocks_timed_read() -> bool {
+    rw_lock.acquire(write=True)
+    th: Thread = Thread(target=rw_reader)
+    th.start()
+    th.join()
+    rw_lock.release()
+    return rw_result
+}
+
+def rw_free_read_succeeds() -> bool {
+    got: bool = rw_lock.acquire(timeout=1.0)
+    rw_lock.release()
+    return got
+}
+
+class ThreadingTimeoutTests(TestCase) {
+    def test_rwlock_write_blocks_timed_read() {
+        self.assertFalse(rw_write_blocks_timed_read())
+        self.assertGreaterEqual(rw_waited, 0.12)
+    }
+    def test_rwlock_free_read_succeeds() {
+        self.assertTrue(rw_free_read_succeeds())
+    }
+}
+
+
+class WithBox {
+    own _lock: Lock
+
+    def() {
+        self._lock = Lock()
+        self._d: dict[str, int] = {}
+    }
+
+    def put(k: str, v: int) -> None {
+        with self._lock {
+            self._d[k] = v
+        }
+    }
+
+    def size() -> int {
+        with self._lock {
+            return len(self._d)
+        }
+    }
+}
+
+
+class AcquireBox {
+    own _lock: Lock
+
+    def() {
+        self._lock = Lock()
+        self._d: dict[str, int] = {}
+    }
+
+    def put(k: str, v: int) -> None {
+        self._lock.acquire()
+        self._d[k] = v
+        self._lock.release()
+    }
+
+    def size() -> int {
+        self._lock.acquire()
+        const n: int = len(self._d)
+        self._lock.release()
+        return n
+    }
+}
+
+
+const WB: WithBox = WithBox()
+const AB: AcquireBox = AcquireBox()
+
+
+def with_worker(prefix: str) -> None {
+    i: int = 0
+    while i < 5000 {
+        WB.put(prefix + str(i), i)
+        i = i + 1
+    }
+}
+
+
+def acquire_worker(prefix: str) -> None {
+    i: int = 0
+    while i < 5000 {
+        AB.put(prefix + str(i), i)
+        i = i + 1
+    }
+}
+
+
+class LockFieldTests(TestCase) {
+    def test_with_field_lock_serializes_parallel_mutation() {
+        t1: Task = fire with_worker("a")
+        t2: Task = fire with_worker("b")
+        t1.join()
+        t2.join()
+        self.assertEqual(WB.size(), 10000)
+    }
+
+    def test_explicit_field_acquire_release_serializes() {
+        t1: Task = fire acquire_worker("a")
+        t2: Task = fire acquire_worker("b")
+        t1.join()
+        t2.join()
+        self.assertEqual(AB.size(), 10000)
+    }
+}
+
+
+main([BarrierTests(), SemaphoreTests(), RWLockTests(), ResourceLifetimeTests(),
+      ClockTests(), ThreadingTimeoutTests(), LockFieldTests()])

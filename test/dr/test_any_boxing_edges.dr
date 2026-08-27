@@ -1,0 +1,472 @@
+from unittest import TestCase, main
+from json import loads
+from anybox_src import give_bytes, give_str
+
+
+class IntField {
+    id: int
+
+    def(d: dict[str, Any]) {
+        self.id = d['id']
+    }
+}
+
+
+class StrField {
+    name: str
+
+    def(d: dict[str, Any]) {
+        self.name = d['name']
+    }
+}
+
+
+class MixedFields {
+    id: int
+    name: str
+
+    def(d: dict[str, Any]) {
+        self.id = d['id']
+        self.name = d['name']
+    }
+}
+
+
+class MethodStore {
+    id: int
+    name: str
+
+    def() {
+        self.id = 0
+        self.name = ""
+    }
+
+    def load(d: dict[str, Any]) -> None {
+        self.id = d['id']
+        self.name = d['name']
+    }
+}
+
+
+class FloatField {
+    price: float
+
+    def(d: dict[str, Any]) {
+        self.price = d['price']
+    }
+}
+
+
+class ListAnySource {
+    first: int
+
+    def(xs: list[Any]) {
+        self.first = xs[0]
+    }
+}
+
+
+class TestAnyFieldStore(TestCase) {
+    """Storing an Any expression directly into a typed field must unbox.
+
+    Regression test for the self-field sibling of the fixed module-global bug:
+    `self.id = d['id']` with d: dict[str, Any] stored the box (or nothing)
+    instead of the unboxed value. int fields silently read 0, str fields held a
+    garbage pointer that crashed later. The via-a-typed-local path always worked;
+    these tests pin the direct path to the same answers
+    """
+
+    def test_int_field_direct_store() -> None {
+        a: IntField = IntField({'id': 42})
+        self.assertEqual(a.id, 42)
+    }
+
+    def test_str_field_direct_store() -> None {
+        b: StrField = StrField({name: 'Ada'})
+        self.assertEqual(b.name, "Ada")
+    }
+
+    def test_mixed_fields_ctor() -> None {
+        c: MixedFields = MixedFields({'id': 7, name: 'Peter'})
+        self.assertEqual(c.id, 7)
+        self.assertEqual(c.name, "Peter")
+    }
+
+    def test_method_store() -> None {
+        m: MethodStore = MethodStore()
+        m.load({'id': 9, name: 'Grace'})
+        self.assertEqual(m.id, 9)
+        self.assertEqual(m.name, "Grace")
+    }
+
+    def test_float_field_direct_store() -> None {
+        f: FloatField = FloatField({'price': 2.5})
+        self.assertEqual(f.price, 2.5)
+    }
+
+    def test_list_any_element_store() -> None {
+        l: ListAnySource = ListAnySource([11, 22])
+        self.assertEqual(l.first, 11)
+    }
+
+    def test_direct_matches_via_local() -> None {
+        d: dict[str, Any] = {'id': 42}
+        direct: IntField = IntField(d)
+        tmp: int = d['id']
+        self.assertEqual(direct.id, tmp)
+    }
+}
+
+
+def mk_str_list() -> dict[str, Any] { return {"required": ["id", "name"]} }
+def mk_int_list() -> dict[str, Any] { return {"nums": [1, 2, 3, 4]} }
+def mk_schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def mk_list_of_dict() -> list[dict[str, Any]] { return [{"required": ["id", "name"]}] }
+def mk_dict_of_dict() -> dict[str, dict[str, Any]] {
+    return {"outer": {"required": ["id", "name", "x"]}}
+}
+
+
+def count_list(s: dict[str, Any], key: str) -> int {
+    v: Any = s[key]
+    if isinstance(v, list) { vl: list[Any] = v  return len(vl) }
+    return -1
+}
+
+def count_dict(s: dict[str, Any], key: str) -> int {
+    v: Any = s[key]
+    if isinstance(v, dict) { vd: dict[str, Any] = v  return len(vd) }
+    return -1
+}
+
+
+class DictAnyListLiteralBornBoxed(TestCase) {
+    """A list/dict literal used as a VALUE in a dict[str, Any] literal is born boxed.
+
+    Ordinary code, no tricks:
+
+        def mk() -> dict[str, Any] { return {"required": ["id", "name"]} }
+        def use(s: dict[str, Any]) -> int {
+            ra: Any = s["required"]
+            if isinstance(ra, list) { rl: list[Any] = ra  return len(rl) }
+            return 0
+        }
+
+    You did nothing wrong. `dict[K, V] <: dict[K, Any]` is admitted covariantly,
+    so `{"required": ["id", "name"]}` PASSED the return-type assignability check
+    as dict[str, list[str]] and the born-box retype (tryExpectedTypeLiteral) never
+    fired. The nested list was BUILT monomorphized (list[str], 8B/elem native) yet
+    stored under an Any tag; read back as list[Any] (16B/elem box) it walked the
+    wrong stride and raised the view-check TypeError.
+
+    BEFORE: `use(mk())` -> "TypeError: expected a boxed-element list ... value holds
+    a monomorphized list".
+    AFTER: the return literal is born list[Any], so `len(rl)` reads 2.
+
+    The fix is scoped to LITERALS. A NAMED list[str] variable placed in an Any dict
+    slot still follows the load-bearing invariance rule (test_named_list_str_stays_
+    invariant proves it still raises), never a silent wrong value.
+    """
+
+    def test_str_list_value() -> None {
+        self.assertEqual(count_list(mk_str_list(), "required"), 2)
+    }
+
+    def test_int_list_value() -> None {
+        self.assertEqual(count_list(mk_int_list(), "nums"), 4)
+    }
+
+    def test_nested_dict_and_list() -> None {
+        sch: dict[str, Any] = mk_schema()
+        self.assertEqual(count_dict(sch, "properties"), 2)
+        self.assertEqual(count_list(sch, "required"), 2)
+    }
+
+    def test_read_inline_still_works() -> None {
+        s: dict[str, Any] = {"tags": ["a", "b", "c"]}
+        self.assertEqual(count_list(s, "tags"), 3)
+    }
+
+    def test_list_of_dict_any() -> None {
+        xs: list[dict[str, Any]] = mk_list_of_dict()
+        self.assertEqual(count_list(xs[0], "required"), 2)
+    }
+
+    def test_dict_of_dict_any() -> None {
+        s: dict[str, dict[str, Any]] = mk_dict_of_dict()
+        inner: dict[str, Any] = s["outer"]
+        self.assertEqual(count_list(inner, "required"), 3)
+    }
+}
+
+
+const _str_box: Any = "hello"
+const _gstr: str = _str_box
+const _glen: int = len(_gstr)
+
+const _int_box: Any = 42
+const _gint: int = _int_box
+const _gint2: int = _gint + 1
+
+const _float_box: Any = 2.5
+const _gfloat: float = _float_box
+
+const _astral_box: Any = loads("\"a\\ud83d\\ude00b\"")
+const _gastral: str = _astral_box
+const _galen: int = len(_gastral)
+
+_reassigned: str = "x"
+const _re_box: Any = "world!"
+_reassigned = _re_box
+const _relen: int = len(_reassigned)
+
+
+class TopLevelAnyUnboxTests(TestCase) {
+    def test_str_narrow_and_len() {
+        self.assertEqual(_gstr, "hello")
+        self.assertEqual(_glen, 5)
+    }
+
+    def test_int_narrow() {
+        self.assertEqual(_gint, 42)
+        self.assertEqual(_gint2, 43)
+    }
+
+    def test_float_narrow() {
+        self.assertEqual(_gfloat, 2.5)
+    }
+
+    def test_astral_str_narrow() {
+        self.assertEqual(_galen, 3)
+    }
+
+    def test_bare_reassign_narrow() {
+        self.assertEqual(_reassigned, "world!")
+        self.assertEqual(_relen, 6)
+    }
+}
+
+
+data: bytes = give_bytes()
+
+def _bind_wrong() {
+    wrong: bytes = give_str()
+}
+
+class AnyBytesUnbox(TestCase) {
+    """Any -> bytes checked unbox must accept a bytes payload (J2).
+
+    Regression: bytes-typed slots collapse onto the generic heap VarKind, so the
+    checked unbox expected a list tag and raised a spurious
+    "TypeError: expected list" for a perfectly ordinary `b: bytes = anyval`.
+    The mismatch case must still raise: an Any holding a str into a bytes slot
+    is a genuine type error.
+    """
+
+    def test_module_global_bytes_from_any() {
+        self.assertEqual(len(data), 3)
+        self.assertEqual(data[0], 97)
+    }
+
+    def test_local_bytes_from_any() {
+        b: bytes = give_bytes()
+        self.assertEqual(len(b), 3)
+        self.assertEqual(b, b"abc")
+    }
+
+    def test_mismatch_still_raises() {
+        self.assertRaises(TypeError, _bind_wrong)
+    }
+}
+
+
+class Dog {
+    def(name: str) {
+        self.name = name
+    }
+
+    def get_name() -> str {
+        return self.name
+    }
+}
+
+
+def park_and_return(n: int) -> int {
+    p: Any = Dog("rex" + str(n))
+    return n * 2
+}
+
+
+class BoxedInstanceScopeTests(TestCase) {
+    """
+    Given the code below:
+
+        def run() -> None {
+            p: Any = Dog("rex")
+            print("hi")
+        }                          # SIGSEGV here (before the fix)
+
+    An `Any` local is 16-byte {tag, payload} box slot. Binding a class
+    instance to it is ordinary code, but the class-name tracking that powers
+    member dispatch also overrdes the slot's cleanup kind from Union to
+    ClassInstance. Scope cleanup then treats the box slot as a plain pointer
+    slot: it loads the FIRST 8 bytes - the tag word (7) - and calls dragon_decref(7),
+    dereferencing the integer as a heap header
+    (AddressSanitizer: SEGV on address 0x7). Every function that ever parked
+    an instance in an `Any` local crashed at return.
+
+    WHY the unwind path never crashed: exception cleanup registered the
+    extracted payload with its tag; only the NORMAL scope-exit decref read the
+    slot with the wrong shape.
+
+    BEFORE: the snippet above SEGV'd at scope exit. AFTER: the kind override
+    skips box slots (the slot stays Union, so cleanup extracts tag + payload),
+    and the cleanup emitter treats the slot's LLVM type as ground truth - a
+    16-byte box slot takes the tag-dispatched decref no matter what the kind
+    map drifted to. The instance is decref'd properly (LSan-verified: freed,
+    not leaked).
+
+    One line: an Any-boxed instance now dies by its tag, not as its tag
+    """
+
+    def test_boxed_instance_scope_exit_no_crash() {
+        self.assertEqual(park_and_return(1), 2)
+        i: int = 0
+        while i < 500 {
+            self.assertEqual(park_and_return(i), i * 2)
+            i = i + 1
+        }
+    }
+
+    def test_boxed_instance_narrowed_use_then_exit() {
+        p: Any = Dog("odo")
+        if isinstance(p, Dog) {
+            self.assertEqual(p.get_name(), "odo")
+        }
+        self.assertTrue(True)
+    }
+}
+
+
+def _takes_any(x: Any) -> int { return 1 }
+def _is_str(x: Any) -> bool { return isinstance(x, str) }
+def _is_str_hop(y: Any) -> bool { return _is_str(y) }
+def _is_str_two_hops(z: Any) -> bool { return _is_str_hop(z) }
+
+
+# An escaping sink: the ctor/method STORE the Any into a field (adopt the temp's
+# +1). Draining the caller temp here would be a use-after-free.
+class Box {
+    v: Any
+    def(v: Any) { self.v = v }
+    def replace(v: Any) -> None { self.v = v }
+    def get() -> Any { return self.v }
+}
+
+
+class AnyBorrowDrainTests(TestCase) {
+    def test_direct_borrow_drained() {
+        i: int = 0
+        while i < 2000 {
+            self.assertEqual(_takes_any(loads("\"ada\"")), 1)
+            i = i + 1
+        }
+    }
+
+    def test_container_payload_borrow_drained() {
+        i: int = 0
+        while i < 2000 {
+            self.assertTrue(not _is_str(loads("[1, 2, 3]")))
+            i = i + 1
+        }
+    }
+
+    def test_transitive_borrow_drained() {
+        i: int = 0
+        while i < 2000 {
+            self.assertTrue(_is_str_hop(loads("\"x\"")))
+            self.assertTrue(_is_str_two_hops(loads("\"y\"")))
+            i = i + 1
+        }
+    }
+
+    def test_bound_local_not_double_freed() {
+        i: int = 0
+        while i < 2000 {
+            const p: Any = loads("\"bound\"")
+            self.assertEqual(_takes_any(p), 1)
+            self.assertTrue(isinstance(p, str))
+            i = i + 1
+        }
+    }
+
+    def test_field_store_not_drained() {
+        i: int = 0
+        while i < 2000 {
+            const b: Box = Box(loads("\"stored\""))
+            const back: Any = b.get()
+            self.assertTrue(isinstance(back, str))
+            const s: str = back
+            self.assertEqual(s, "stored")
+            i = i + 1
+        }
+    }
+
+    # Method store that OVERWRITES a prior field value: field-overwrite decref plus the new
+    # adopt, with no double-free of the replaced value.
+    def test_field_overwrite_not_drained() {
+        i: int = 0
+        while i < 2000 {
+            const b: Box = Box(loads("\"first\""))
+            b.replace(loads("\"second\""))
+            const back: Any = b.get()
+            const s: str = back
+            self.assertEqual(s, "second")
+            i = i + 1
+        }
+    }
+}
+
+
+def make_adder(n: int) -> Callable[[], int] {
+    x: int = n
+    def get() -> int { return x }
+    return get
+}
+
+class ClosureBoxSubscriptUAF(TestCase) {
+    """Any-subscripting a monomorphic list of closures must incref the element.
+
+    Regression for the closure-box use-after-free: `dragon_box_subscript`'s
+    monomorphic-list switch increfed TAG_STR/LIST/DICT/BYTES to honor the
+    owned-return contract, but DRAGON_TAG_CLOSURE fell into the not-refcounted
+    default arm. The returned box aliased the list's closure with a refcount one
+    short; dropping the box freed the closure while the list still referenced it.
+    Indexing an Any-typed list of closures in a loop then using a live element was
+    a heap-use-after-free (ASan: dragon_decref_callable). Must stay clean under
+    ASAN_OPTIONS=detect_leaks=1.
+    """
+
+    def test_any_subscript_of_closure_list_keeps_element_alive() {
+        fns: list[Callable[[], int]] = [make_adder(10), make_adder(20)]
+        boxed: Any = fns
+        i: int = 0
+        while i < 2000 {
+            const got: Any = boxed[0]
+            i = i + 1
+        }
+        const first: Callable[[], int] = fns[0]
+        const second: Callable[[], int] = fns[1]
+        self.assertEqual(first(), 10)
+        self.assertEqual(second(), 20)
+    }
+}
+
+
+main([TestAnyFieldStore(), DictAnyListLiteralBornBoxed(), TopLevelAnyUnboxTests(), AnyBytesUnbox(), BoxedInstanceScopeTests(), AnyBorrowDrainTests(), ClosureBoxSubscriptUAF()])

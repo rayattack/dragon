@@ -1,0 +1,342 @@
+# dict.get on a heap-valued dict returned a BORROW, so the binding's scope-exit decref freed the
+# dict's still-held value (proven UAF in dragon_list_len); owned-returning getters incref on return.
+
+from unittest import TestCase, main
+
+
+class DictGetHeapRcTests(TestCase) {
+    def test_str_keyed_get_keeps_dict_value() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        if True {
+            g: list[int] | None = d.get("a")
+            if g is not none {
+                self.assertEqual(len(g), 3)
+                self.assertEqual(g[0], 1)
+            }
+        }
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+            self.assertEqual(again[2], 3)
+        }
+    }
+
+    def test_str_keyed_get_default_present_and_absent() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        if True {
+            h: list[int] = d.get("a", [0])
+            self.assertEqual(len(h), 3)
+        }
+        if True {
+            m: list[int] = d.get("zzz", [9, 9])
+            self.assertEqual(len(m), 2)
+            self.assertEqual(m[0], 9)
+        }
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
+    }
+
+    def test_int_keyed_get_keeps_dict_value() {
+        d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
+        if True {
+            g: list[int] | None = d.get(7)
+            if g is not none {
+                self.assertEqual(len(g), 4)
+                self.assertEqual(g[1], 5)
+            }
+        }
+        again: list[int] | None = d.get(7)
+        if again is not none {
+            self.assertEqual(len(again), 4)
+        }
+    }
+
+    def test_int_keyed_get_default_present_and_absent() {
+        d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
+        if True {
+            h: list[int] = d.get(7, [0])
+            self.assertEqual(len(h), 4)
+        }
+        if True {
+            m: list[int] = d.get(99, [1, 2, 3])
+            self.assertEqual(len(m), 3)
+        }
+        again: list[int] | None = d.get(7)
+        if again is not none {
+            self.assertEqual(len(again), 4)
+        }
+    }
+
+    def test_get_result_outlives_dropped_dict() {
+        # The dual property: the get result OWNS its ref and survives the SOURCE dict being
+        # dropped; a missing incref frees the list out from under `keep` (ASan-caught UAF).
+        d: dict[str, list[int]] = {"k": [7, 8, 9, 10]}
+        keep: list[int] | None = d.get("k")
+        d = {}
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i, i]
+            i = i + 1
+        }
+        if keep is not none {
+            self.assertEqual(len(keep), 4)
+            self.assertEqual(keep[3], 10)
+        }
+    }
+
+    def test_get_loop_stress() {
+        # Hammer the (formerly UAF/leaking) get path; values stay correct and the
+        # dict's stored value is untouched across many bind-and-drop cycles.
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        acc: int = 0
+        i: int = 0
+        while i < 1000 {
+            if True {
+                g: list[int] | None = d.get("a")
+                if g is not none {
+                    acc = acc + len(g)
+                }
+            }
+            i = i + 1
+        }
+        self.assertEqual(acc, 3000)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
+    }
+
+    def test_set_valued_get_generality() {
+        d: dict[str, set[int]] = {"s": {1, 2, 3}}
+        if True {
+            g: set[int] | None = d.get("s")
+            if g is not none {
+                self.assertEqual(len(g), 3)
+            }
+        }
+        again: set[int] | None = d.get("s")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
+    }
+}
+
+
+# setdefault carried the same borrow-return UAF as .get (the present branch returned with no
+# incref) and stored heap defaults as TAG_INT on insert (leak, invisible to the cycle collector).
+
+class DictSetdefaultHeapRcTests(TestCase) {
+    def test_str_present_returns_existing_keeps_value() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        if True {
+            g: list[int] = d.setdefault("a", [9, 9])
+            self.assertEqual(len(g), 3)
+            self.assertEqual(g[0], 1)
+        }
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
+    }
+
+    def test_str_absent_inserts_and_returns() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        if True {
+            g: list[int] = d.setdefault("z", [7, 7, 7, 7])
+            self.assertEqual(len(g), 4)
+        }
+        again: list[int] | None = d.get("z")
+        if again is not none {
+            self.assertEqual(len(again), 4)
+            self.assertEqual(again[0], 7)
+        }
+    }
+
+    def test_str_absent_borrowed_default_aliases() {
+        d: dict[str, list[int]] = {}
+        seed: list[int] = [5, 5, 5]
+        r: list[int] = d.setdefault("k", seed)
+        self.assertEqual(len(r), 3)
+        d = {}
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i]
+            i = i + 1
+        }
+        self.assertEqual(len(seed), 3)
+        self.assertEqual(seed[1], 5)
+    }
+
+    def test_int_keyed_present_and_absent() {
+        d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
+        if True {
+            g: list[int] = d.setdefault(7, [0])
+            self.assertEqual(len(g), 4)
+        }
+        if True {
+            h: list[int] = d.setdefault(9, [1, 2, 3])
+            self.assertEqual(len(h), 3)
+        }
+        a7: list[int] | None = d.get(7)
+        a9: list[int] | None = d.get(9)
+        if a7 is not none {
+            self.assertEqual(len(a7), 4)
+        }
+        if a9 is not none {
+            self.assertEqual(len(a9), 3)
+        }
+    }
+
+    def test_result_outlives_dropped_dict() {
+        # The result OWNS its ref, so it survives the source dict being dropped.
+        # A missing incref would free the list out from under `keep` (UAF).
+        d: dict[str, list[int]] = {"k": [8, 8, 8, 8, 8]}
+        keep: list[int] = d.setdefault("k", [0])
+        d = {}
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i, i]
+            i = i + 1
+        }
+        self.assertEqual(len(keep), 5)
+        self.assertEqual(keep[4], 8)
+    }
+
+    def test_loop_stress() {
+        d: dict[str, list[int]] = {}
+        acc: int = 0
+        i: int = 0
+        while i < 1000 {
+            if True {
+                g: list[int] = d.setdefault("a", [1, 2, 3])
+                acc = acc + len(g)
+            }
+            i = i + 1
+        }
+        self.assertEqual(acc, 3000)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
+    }
+
+    def test_set_valued_generality() {
+        d: dict[str, set[int]] = {}
+        if True {
+            g: set[int] = d.setdefault("s", {1, 2, 3})
+            self.assertEqual(len(g), 3)
+        }
+        again: set[int] | None = d.get("s")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
+    }
+
+    def test_borrowed_key_on_insert_survives() {
+        # Key-on-insert dangle: the dict only BORROWS block-local keys, so a stored key dangled
+        # once its scope ended; the fix increfs borrowed heap keys (ASan-caught UAF on read-back).
+        d: dict[str, list[int]] = {}
+        i: int = 0
+        while i < 50 {
+            kk: str = "key" + str(i)
+            d.setdefault(kk, [i, i])
+            i = i + 1
+        }
+        self.assertEqual(len(d), 50)
+        total: int = 0
+        for k in d.keys() {
+            total = total + len(k)
+        }
+        self.assertEqual(total, 240)
+        probe: str = "key7"
+        got: list[int] | None = d.get(probe)
+        if got is not none {
+            self.assertEqual(len(got), 2)
+        }
+    }
+
+    def test_borrowed_key_present_branch_balanced() {
+        d: dict[str, list[int]] = {"seed": [1]}
+        acc: int = 0
+        i: int = 0
+        while i < 500 {
+            kk: str = "se" + "ed"
+            g: list[int] = d.setdefault(kk, [9, 9])
+            acc = acc + len(g)
+            i = i + 1
+        }
+        self.assertEqual(acc, 500)
+        self.assertEqual(len(d), 1)
+    }
+
+    # The key dangle is independent of value type: a SCALAR-valued dict still dangled its
+    # borrowed key through the generic dragon_dict_setdefault path. These pin the scalar path.
+
+    def test_scalar_borrowed_key_on_insert_survives() {
+        d: dict[str, int] = {}
+        i: int = 0
+        while i < 50 {
+            kk: str = "key" + str(i)
+            d.setdefault(kk, i)
+            i = i + 1
+        }
+        self.assertEqual(len(d), 50)
+        total: int = 0
+        for k in d.keys() {
+            total = total + len(k)
+        }
+        self.assertEqual(total, 240)
+        got: int | None = d.get("key7")
+        if got is not none {
+            self.assertEqual(got, 7)
+        }
+    }
+
+    def test_scalar_borrowed_key_present_balanced() {
+        d: dict[str, int] = {"seed": 1}
+        acc: int = 0
+        i: int = 0
+        while i < 500 {
+            kk: str = "se" + "ed"
+            v: int = d.setdefault(kk, 9)
+            acc = acc + v
+            i = i + 1
+        }
+        self.assertEqual(acc, 500)
+        self.assertEqual(len(d), 1)
+    }
+}
+
+
+def loads_ints() -> dict[str, int] {
+    return {"k": 42, "j": 7}
+}
+
+
+class DictRecvScalarTests(TestCase) {
+    def test_owned_dict_receiver_int_val() {
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            v: int = loads_ints()["k"]
+            total = total + v
+            i = i + 1
+        }
+        self.assertEqual(total, 126000)
+    }
+
+    def test_borrowed_receiver_guard() {
+        d: dict[str, int] = {"k": 9}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d["k"], 9)
+            i = i + 1
+        }
+        self.assertEqual(d["k"], 9)
+    }
+}
+
+
+main([DictGetHeapRcTests(), DictSetdefaultHeapRcTests(), DictRecvScalarTests()])

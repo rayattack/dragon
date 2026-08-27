@@ -77,7 +77,7 @@ class RecvTimeoutTests(TestCase) {
         lis: TcpListener = TcpListener("127.0.0.1", 54482)
         self.assertEqual(lis.bind(), 0)
         lis.listen(8)
-        const app: Router = Router(0)
+        const app: Router = Router()
         app.set_idle_timeout(250)
         app.POST("/x", _never)
         t: Task[None] = fire _serve_once(lis, app)

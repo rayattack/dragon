@@ -1,0 +1,190 @@
+from unittest import TestCase, main
+from collide_dispatch_one import one_direct, one_defer, one_fire, one_make_iter, one_log_last, one_log_len
+from collide_dispatch_one import one_leaf_override, one_leaf_through_base_slot
+from collide_dispatch_two import two_direct, two_defer, two_fire, two_make_iter, two_log_last, two_log_len
+from collide_dispatch_two import two_leaf_override, two_leaf_through_base_slot
+from collide_globals_one import one_shared, one_rate, one_counter
+from collide_globals_two import two_shared, two_rate, two_counter, SHARED
+from collide_vars_one import one_scan
+
+counter: int = 42
+
+
+def entry_direct_over_one() -> str {
+    out: str = ""
+    for w in one_make_iter() {
+        out = w.run()
+    }
+    return out
+}
+
+
+def entry_direct_over_two() -> str {
+    out: str = ""
+    for w in two_make_iter() {
+        out = w.run()
+    }
+    return out
+}
+
+
+def entry_fire_over_one() -> str {
+    out: str = ""
+    for w in one_make_iter() {
+        t: Task[str] = fire w.run()
+        out = t.join()
+    }
+    return out
+}
+
+
+def entry_fire_over_two() -> str {
+    out: str = ""
+    for w in two_make_iter() {
+        t: Task[str] = fire w.run()
+        out = t.join()
+    }
+    return out
+}
+
+
+def entry_defer_over_one() -> str {
+    before: int = one_log_len()
+    for w in one_make_iter() {
+        defer w.log_run()
+    }
+    if one_log_len() == before {
+        return "missing"
+    }
+    return one_log_last()
+}
+
+
+def entry_defer_over_two() -> str {
+    before: int = two_log_len()
+    for w in two_make_iter() {
+        defer w.log_run()
+    }
+    if two_log_len() == before {
+        return "missing"
+    }
+    return two_log_last()
+}
+
+
+def entry_scan() -> str {
+    items: list[str] = ["a", "b"]
+    if "b" in items {
+        return "found"
+    }
+    return "missing"
+}
+
+
+def entry_count() -> int {
+    items: list[int] = [10, 20, 30]
+    total: int = 0
+    for n in items {
+        total = total + n
+    }
+    return total
+}
+
+
+class CollideDispatchTests(TestCase) {
+    """Direct, defer, and fire method dispatch on a loop-bound receiver must stay
+    per-module. Pre-fix: when the receiver's owning module was untracked, dispatch
+    fell back to the last-wins bare classOwningModule map, so the other module's
+    same-named Worker method ran on this module's instance.
+
+    The Store / MemStore arms add inheritance to the same collision. A stale owning
+    module mangles the correct leaf class under the wrong module, finds nothing, and
+    the MRO walk falls UP to the parent, so an override silently loses to its base."""
+
+    def test_direct_call_stays_per_module() {
+        self.assertEqual(one_direct(), "one:one-tag")
+        self.assertEqual(two_direct(), "two:two-tag")
+    }
+
+    def test_defer_dispatch_stays_per_module() {
+        self.assertEqual(one_defer(), "one:one-tag")
+        self.assertEqual(two_defer(), "two:two-tag")
+    }
+
+    def test_importer_direct_dispatch_stays_per_module() {
+        self.assertEqual(entry_direct_over_one(), "one:one-tag")
+        self.assertEqual(entry_direct_over_two(), "two:two-tag")
+    }
+
+    def test_importer_defer_dispatch_stays_per_module() {
+        self.assertEqual(entry_defer_over_one(), "one:one-tag")
+        self.assertEqual(entry_defer_over_two(), "two:two-tag")
+    }
+
+    def test_fire_dispatch_stays_per_module() {
+        self.assertEqual(one_fire(), "one:one-tag")
+        self.assertEqual(two_fire(), "two:two-tag")
+    }
+
+    def test_importer_fire_dispatch_stays_per_module() {
+        self.assertEqual(entry_fire_over_one(), "one:one-tag")
+        self.assertEqual(entry_fire_over_two(), "two:two-tag")
+    }
+
+    def test_leaf_override_beats_parent_per_module() {
+        self.assertEqual(one_leaf_override(), "one:leaf")
+        self.assertEqual(two_leaf_override(), "two:leaf")
+    }
+
+    def test_leaf_override_through_base_slot_per_module() {
+        self.assertEqual(one_leaf_through_base_slot(), "one:leaf")
+        self.assertEqual(two_leaf_through_base_slot(), "two:leaf")
+    }
+}
+
+
+class CollideGlobalsTests(TestCase) {
+    """Same top-level names in two modules must stay per-module bindings.
+    Pre-fix: one flat `global.<name>` cell per name, shared by every module."""
+
+    def test_class_typed_consts_stay_per_module() {
+        self.assertEqual(one_shared(), "handle:real")
+        self.assertEqual(two_shared(), "thing:decoy")
+    }
+
+    def test_same_type_consts_stay_per_module() {
+        self.assertEqual(one_rate(), 111)
+        self.assertEqual(two_rate(), 999)
+    }
+
+    def test_entry_var_does_not_shadow_dep_vars() {
+        self.assertEqual(one_counter(), 5)
+        self.assertEqual(two_counter(), 800)
+        self.assertEqual(counter, 42)
+    }
+
+    def test_imported_const_binds_to_its_module() {
+        self.assertEqual(SHARED.describe(), "thing:decoy")
+    }
+}
+
+
+class CollideVarsTests(TestCase) {
+    """A same-named local in another module must not poison this one's types.
+    Pre-fix: per-variable metadata was program-wide and never cleared (segfault)."""
+
+    def test_dep_scan_works() {
+        self.assertEqual(one_scan(), 2)
+    }
+
+    def test_entry_str_list_keeps_str_semantics() {
+        self.assertEqual(entry_scan(), "found")
+    }
+
+    def test_entry_int_list_keeps_int_semantics() {
+        self.assertEqual(entry_count(), 60)
+    }
+}
+
+
+main([CollideDispatchTests(), CollideGlobalsTests(), CollideVarsTests()])

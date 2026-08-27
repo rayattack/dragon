@@ -1,0 +1,265 @@
+from unittest import TestCase, main
+from http.server import Response
+from http.cookies import parse, SimpleCookie
+from http.cookiejar import Cookie, CookieJar, parse_set_cookie
+
+
+const TAINTED: str = "ok\r\nX-Injected: yes"
+
+
+def _count(haystack: str, needle: str) -> int {
+    count: int = 0
+    rest: str = haystack
+    while true {
+        const p: int = rest.find(needle)
+        if p < 0 {
+            break
+        }
+        count = count + 1
+        rest = rest[p + len(needle):]
+    }
+    return count
+}
+
+class _NoBodyResponse(Response) {
+    def flip_no_body() -> None {
+        self._no_body = true
+    }
+}
+
+
+class CookieSerializeTests(TestCase) {
+    def test_two_cookies_normal_path() {
+        const res: Response = Response()
+        res.text("hi")
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertIn("set-cookie: a=1", out)
+        self.assertIn("set-cookie: b=2", out)
+    }
+
+    def test_two_cookies_chunked_path() {
+        const res: Response = Response()
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        res.chunk("streamed")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertIn("transfer-encoding: chunked", out)
+        self.assertIn("set-cookie: a=1", out)
+        self.assertIn("set-cookie: b=2", out)
+    }
+
+    def test_three_cookies() {
+        const res: Response = Response()
+        res.text("hi")
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        res.cookie("c", "3")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 3)
+    }
+
+    def test_cookie_attributes_per_line() {
+        const res: Response = Response()
+        res.cookie("sid", "abc", 3600, "/", true, true, "Strict")
+        res.cookie("theme", "dark")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertIn("set-cookie: sid=abc", out)
+        self.assertIn("Max-Age=3600", out)
+        self.assertIn("HttpOnly", out)
+        self.assertIn("SameSite=Strict", out)
+        self.assertIn("set-cookie: theme=dark", out)
+    }
+
+    def test_two_cookies_no_body_path() {
+        const res: _NoBodyResponse = _NoBodyResponse()
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        res.flip_no_body()
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertNotIn("content-length", out)
+        self.assertIn("set-cookie: a=1", out)
+        self.assertIn("set-cookie: b=2", out)
+    }
+
+    def test_no_cookies_no_line() {
+        const res: Response = Response()
+        res.text("hi")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 0)
+    }
+}
+
+
+class HeaderInjectionTests(TestCase) {
+    def test_set_header_rejects_crlf_in_value() {
+        res: Response = Response()
+        def run() {
+            res.set_header("x-trace", TAINTED)
+        }
+        self.assertRaises(ValueError, run)
+    }
+
+    def test_tuple_setter_rejects_crlf_in_value() {
+        res: Response = Response()
+        def run() {
+            res.headers = "x-trace", TAINTED
+        }
+        self.assertRaises(ValueError, run)
+    }
+
+    def test_tuple_setter_rejects_crlf_in_name() {
+        res: Response = Response()
+        def run() {
+            res.headers = "x-bad\r\nX-Injected", "ok"
+        }
+        self.assertRaises(ValueError, run)
+    }
+
+    def test_tuple_setter_still_sets_ordinary_headers() {
+        res: Response = Response()
+        res.body = "hi"
+        res.headers = "x-trace", "abc123"
+        const wire: str = res.serialize()
+        self.assertIn("x-trace: abc123", wire)
+    }
+
+    def test_injected_header_never_reaches_the_wire() {
+        res: Response = Response()
+        res.body = "hi"
+        try {
+            res.headers = "x-trace", TAINTED
+        } except ValueError {
+            pass
+        }
+        self.assertNotIn("X-Injected", res.serialize())
+    }
+}
+
+
+class HttpCookiesTests(TestCase) {
+    """http.cookies - parse a Cookie header and render Set-Cookie lines."""
+
+    def test_parse() {
+        d: dict[str, str] = parse("sessionid=abc123; theme=dark; lang=\"en\"")
+        self.assertEqual(d["sessionid"], "abc123")
+        self.assertEqual(d["theme"], "dark")
+        self.assertEqual(d["lang"], "en")
+    }
+
+    def test_parse_empty_and_malformed() {
+        d: dict[str, str] = parse("  ; =noname; good=1 ;")
+        self.assertEqual(d["good"], "1")
+        self.assertFalse("noname" in d)
+    }
+
+    def test_simplecookie() {
+        c: SimpleCookie = SimpleCookie()
+        c.set("a", "1")
+        c.set("b", "2")
+        self.assertEqual(c.get("a"), "1")
+        self.assertEqual(c.output(), "Set-Cookie: a=1\nSet-Cookie: b=2")
+    }
+
+    def test_load() {
+        c: SimpleCookie = SimpleCookie()
+        c.load("x=10; y=20")
+        self.assertEqual(c.get("x"), "10")
+        self.assertEqual(c.get("y"), "20")
+    }
+}
+
+
+class CookieJarTests(TestCase) {
+    """http.cookiejar - store / select / render cookies."""
+
+    def test_set_and_get() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sid", "abc", "example.com", "/"))
+        c: Cookie = jar.get_cookie("sid", "example.com", "/")
+        self.assertEqual(c.value, "abc")
+    }
+
+    def test_replace_existing() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sid", "old", "x", "/"))
+        jar.set_cookie(Cookie("sid", "new", "x", "/"))
+        self.assertEqual(jar.__len__(), 1)
+        self.assertEqual(jar.get_cookie("sid", "x", "/").value, "new")
+    }
+
+    def test_cookies_for_filters_by_domain_and_path() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("a", "1", "x.com", "/"))
+        jar.set_cookie(Cookie("b", "2", "x.com", "/api"))
+        jar.set_cookie(Cookie("c", "3", "y.com", "/"))
+        sent_root: list[Cookie] = jar.cookies_for("x.com", "/", false)
+        self.assertEqual(len(sent_root), 1)
+        self.assertEqual(sent_root[0].name, "a")
+        sent_api: list[Cookie] = jar.cookies_for("x.com", "/api/data", false)
+        self.assertEqual(len(sent_api), 2)
+    }
+
+    def test_secure_only_on_https() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sid", "x", "x.com", "/", 0, true, false))
+        sent_http: list[Cookie] = jar.cookies_for("x.com", "/", false)
+        sent_https: list[Cookie] = jar.cookies_for("x.com", "/", true)
+        self.assertEqual(len(sent_http), 0)
+        self.assertEqual(len(sent_https), 1)
+    }
+
+    def test_cookie_header_format() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("a", "1", "x", "/"))
+        jar.set_cookie(Cookie("b", "2", "x", "/"))
+        h: str = jar.cookie_header("x", "/", false)
+        self.assertTrue("a=1" in h)
+        self.assertTrue("b=2" in h)
+        self.assertTrue("; " in h)
+    }
+
+    def test_clear_expired() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("session", "x", "y", "/", 0))
+        jar.set_cookie(Cookie("stale", "x", "y", "/", 100))
+        jar.set_cookie(Cookie("fresh", "x", "y", "/", 9999999999))
+        removed: int = jar.clear_expired(1000)
+        self.assertEqual(removed, 1)
+        self.assertEqual(jar.__len__(), 2)
+    }
+
+    def test_clear_session_cookies() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sess", "x", "y", "/", 0))
+        jar.set_cookie(Cookie("perm", "x", "y", "/", 9999999999))
+        jar.clear_session_cookies()
+        self.assertEqual(jar.__len__(), 1)
+        self.assertEqual(jar.all()[0].name, "perm")
+    }
+
+    def test_parse_set_cookie_basic() {
+        c: Cookie = parse_set_cookie("sid=abc; Path=/; Secure", "x.com")
+        self.assertEqual(c.name, "sid")
+        self.assertEqual(c.value, "abc")
+        self.assertEqual(c.path, "/")
+        self.assertTrue(c.secure)
+        self.assertFalse(c.http_only)
+        self.assertEqual(c.domain, "x.com")
+    }
+
+    def test_parse_set_cookie_with_domain_and_httponly() {
+        c: Cookie = parse_set_cookie("k=v; Domain=foo.com; HttpOnly; Path=/api")
+        self.assertEqual(c.domain, "foo.com")
+        self.assertEqual(c.path, "/api")
+        self.assertTrue(c.http_only)
+    }
+}
+
+
+main([CookieSerializeTests(), HeaderInjectionTests(), HttpCookiesTests(), CookieJarTests()])

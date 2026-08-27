@@ -1,0 +1,451 @@
+from unittest import TestCase, main
+from http.server import Router, Request, Response, Context
+from http.server import ConnReader, FdReader, MemoryReader
+from http.websocket import compute_accept_key, is_websocket_upgrade
+from http.websocket import parse_frame, build_frame, frame_length
+from http.websocket import build_text_frame, build_binary_frame
+from http.websocket import build_close_frame, build_ping_frame, build_pong_frame
+from http.websocket import Frame, MessageReassembler, WebSocket
+from http.websocket import ProtocolError, IncompleteFrameError
+from http.websocket import OPCODE_CONT, OPCODE_TEXT, OPCODE_BINARY
+from http.websocket import OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG
+from socket import TcpListener, TcpStream, SocketHandle
+
+const _RFC_KEY: str = "dGhlIHNhbXBsZSBub25jZQ=="
+const _RFC_ACCEPT: str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+def _upgrade_get(path: str) -> str {
+    return f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {_RFC_KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+}
+
+def _upgrade_get_ver(path: str, ver: str) -> str {
+    return f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {_RFC_KEY}\r\nSec-WebSocket-Version: {ver}\r\n\r\n"
+}
+
+
+def _ws_echo(ws: WebSocket) -> None {
+    while True {
+        const msg: str = ws.recv_text()
+        ws.send(msg)
+    }
+}
+
+
+def _ws_accept_serve(lis: TcpListener, app: Router, n: int, fds: list[int]) -> None {
+    i: int = 0
+    while i < n {
+        const conn: TcpStream = lis.accept()
+        fds.append(conn.raw_fd())
+        const reader: ConnReader = FdReader(own conn)
+        app.serve_connection(reader)
+        i = i + 1
+    }
+}
+
+
+class _WsClient {
+    stream: TcpStream
+    inbuf: bytes
+
+    def(stream: TcpStream) {
+        self.stream = stream
+        self.inbuf = b""
+    }
+
+    def send_text(text: str) -> None {
+        const f: bytes = build_frame(OPCODE_TEXT, text.encode("utf-8"), True, True,
+                                     bytes([0xAA, 0xBB, 0xCC, 0xDD]))
+        self.stream.send_bytes(f)
+    }
+
+    def send_close(code: int) -> None {
+        const payload: bytes = bytes([(code >> 8) & 0xFF, code & 0xFF])
+        const f: bytes = build_frame(OPCODE_CLOSE, payload, True, True,
+                                     bytes([0x11, 0x22, 0x33, 0x44]))
+        self.stream.send_bytes(f)
+    }
+
+    def recv_frame() -> Frame {
+        while True {
+            if len(self.inbuf) >= 2 {
+                try {
+                    const fr: Frame = parse_frame(self.inbuf)
+                    const consumed: int = frame_length(self.inbuf)
+                    self.inbuf = self.inbuf[consumed:]
+                    return fr
+                } except IncompleteFrameError as e {
+                }
+            }
+            const chunk: bytes = self.stream.recv_bytes(4096)
+            if len(chunk) == 0 {
+                raise IncompleteFrameError("eof before a full frame")
+            }
+            self.inbuf = self.inbuf + chunk
+        }
+        raise IncompleteFrameError("unreachable")
+    }
+}
+
+def _recv_handshake(stream: TcpStream) -> str {
+    buf: str = ""
+    i: int = 0
+    while i < 200 {
+        if "\r\n\r\n" in buf {
+            return buf
+        }
+        const chunk: str = stream.recv(1024)
+        if len(chunk) == 0 {
+            return buf
+        }
+        buf = buf + chunk
+        i = i + 1
+    }
+    return buf
+}
+
+
+class WebSocketTests(TestCase) {
+    """http.websocket - RFC 6455 handshake + frame codec conformance.
+
+    W2 codec core: the network-independent pieces (handshake accept-key, frame
+    parse/build, fragmentation reassembly, control frames) tested against the
+    canonical RFC 6455 vectors with literal `bytes` - no sockets. The `WebSocket`
+    handle's frame I/O is exercised indirectly through parse_frame / build_frame
+    (its socket calls need a live fd and belong to an integration test).
+    """
+
+    def test_accept_key_rfc_vector() {
+        accept: str = compute_accept_key("dGhlIHNhbXBsZSBub25jZQ==")
+        self.assertEqual(accept, _RFC_ACCEPT)
+    }
+
+    def test_is_websocket_upgrade_positive() {
+        headers: dict[str, str] = {"upgrade": "websocket", "connection": "keep-alive, Upgrade", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ=="}
+        self.assertTrue(is_websocket_upgrade(headers))
+    }
+
+    def test_is_websocket_upgrade_case_insensitive() {
+        headers: dict[str, str] = {"upgrade": "WebSocket", "connection": "UPGRADE", "sec-websocket-key": "x"}
+        self.assertTrue(is_websocket_upgrade(headers))
+    }
+
+    def test_is_websocket_upgrade_negatives() {
+        h1: dict[str, str] = {"upgrade": "h2c", "connection": "Upgrade", "sec-websocket-key": "x"}
+        self.assertFalse(is_websocket_upgrade(h1))
+        h2: dict[str, str] = {"upgrade": "websocket", "connection": "Upgrade"}
+        self.assertFalse(is_websocket_upgrade(h2))
+        h3: dict[str, str] = {"upgrade": "websocket", "connection": "keep-alive", "sec-websocket-key": "x"}
+        self.assertFalse(is_websocket_upgrade(h3))
+        h4: dict[str, str] = {"host": "example.com"}
+        self.assertFalse(is_websocket_upgrade(h4))
+    }
+
+    def test_text_frame_roundtrip() {
+        framed: bytes = build_text_frame("Hello")
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_TEXT)
+        self.assertTrue(f.fin)
+        self.assertEqual(f.payload, b"Hello")
+        self.assertTrue(f.is_text())
+        self.assertFalse(f.is_control())
+        self.assertEqual(frame_length(framed), 7)
+    }
+
+    def test_binary_frame_roundtrip() {
+        payload: bytes = bytes([0x00, 0xFF, 0x10, 0x7F, 0x80])
+        framed: bytes = build_binary_frame(payload)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_BINARY)
+        self.assertTrue(f.is_binary())
+        self.assertEqual(f.payload, payload)
+    }
+
+    def test_build_frame_exact_bytes() {
+        framed: bytes = build_text_frame("Hello")
+        self.assertEqual(framed.hex(), "81" + "05" + b"Hello".hex())
+    }
+
+    def test_masked_client_frame_unmasks() {
+        masked: bytes = bytes([0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d,
+                               0x7f, 0x9f, 0x4d, 0x51, 0x58])
+        f: Frame = parse_frame(masked)
+        self.assertEqual(f.opcode, OPCODE_TEXT)
+        self.assertTrue(f.fin)
+        self.assertEqual(f.payload, b"Hello")
+        self.assertEqual(f.payload.decode("utf-8"), "Hello")
+        self.assertEqual(frame_length(masked), 11)
+    }
+
+    def test_masked_roundtrip_via_build() {
+        key: bytes = bytes([0x01, 0x02, 0x03, 0x04])
+        framed: bytes = build_frame(OPCODE_BINARY, b"masked-data", True, True, key)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.payload, b"masked-data")
+        self.assertEqual(f.opcode, OPCODE_BINARY)
+    }
+
+    def test_extended_length_16bit() {
+        big: bytes = bytes([0x41] * 200)
+        framed: bytes = build_binary_frame(big)
+        self.assertEqual(framed[1], 126)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(len(f.payload), 200)
+        self.assertEqual(f.payload, big)
+        self.assertEqual(frame_length(framed), 4 + 200)
+    }
+
+    def test_extended_length_64bit() {
+        big: bytes = bytes([0x42] * 70000)
+        framed: bytes = build_binary_frame(big)
+        self.assertEqual(framed[1], 127)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(len(f.payload), 70000)
+        self.assertEqual(f.payload, big)
+        self.assertEqual(frame_length(framed), 10 + 70000)
+    }
+
+    def test_fragmented_message_reassembles() {
+        frag1: bytes = build_frame(OPCODE_TEXT, b"Hel", False)
+        frag2: bytes = build_frame(OPCODE_CONT, b"lo", True)
+        asm: MessageReassembler = MessageReassembler()
+        done1: bool = asm.add(parse_frame(frag1))
+        self.assertFalse(done1)
+        done2: bool = asm.add(parse_frame(frag2))
+        self.assertTrue(done2)
+        self.assertEqual(asm.message(), b"Hello")
+        self.assertEqual(asm.opcode, OPCODE_TEXT)
+    }
+
+    def test_fragmented_three_parts() {
+        f1: bytes = build_frame(OPCODE_BINARY, b"aa", False)
+        f2: bytes = build_frame(OPCODE_CONT, b"bb", False)
+        f3: bytes = build_frame(OPCODE_CONT, b"cc", True)
+        asm: MessageReassembler = MessageReassembler()
+        self.assertFalse(asm.add(parse_frame(f1)))
+        self.assertFalse(asm.add(parse_frame(f2)))
+        self.assertTrue(asm.add(parse_frame(f3)))
+        self.assertEqual(asm.message(), b"aabbcc")
+        self.assertEqual(asm.opcode, OPCODE_BINARY)
+    }
+
+    def test_reassembler_reset() {
+        asm: MessageReassembler = MessageReassembler()
+        self.assertTrue(asm.add(parse_frame(build_text_frame("one"))))
+        self.assertEqual(asm.message(), b"one")
+        asm.reset()
+        self.assertTrue(asm.add(parse_frame(build_text_frame("two"))))
+        self.assertEqual(asm.message(), b"two")
+    }
+
+    def test_ping_recognized_by_opcode() {
+        ping: bytes = build_ping_frame(b"ping-payload")
+        f: Frame = parse_frame(ping)
+        self.assertEqual(f.opcode, OPCODE_PING)
+        self.assertTrue(f.is_control())
+        self.assertFalse(f.is_text())
+        self.assertEqual(f.payload, b"ping-payload")
+    }
+
+    def test_pong_recognized_by_opcode() {
+        pong: bytes = build_pong_frame(b"abc")
+        f: Frame = parse_frame(pong)
+        self.assertEqual(f.opcode, OPCODE_PONG)
+        self.assertTrue(f.is_control())
+    }
+
+    def test_close_frame_carries_code_and_reason() {
+        framed: bytes = build_close_frame(1000, "bye")
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_CLOSE)
+        self.assertTrue(f.is_control())
+        code: int = (f.payload[0] << 8) | f.payload[1]
+        self.assertEqual(code, 1000)
+        self.assertEqual(f.payload[2:], b"bye")
+    }
+
+    def test_empty_close_frame() {
+        framed: bytes = build_close_frame(0, "")
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_CLOSE)
+        self.assertEqual(len(f.payload), 0)
+    }
+
+    def test_incomplete_frame_raises() {
+        self.assertRaises(IncompleteFrameError, lambda () -> None {
+            parse_frame(bytes([0x81]))
+        })
+        self.assertRaises(IncompleteFrameError, lambda () -> None {
+            parse_frame(bytes([0x81, 0x05, 0x48, 0x65]))
+        })
+    }
+
+    def test_rsv_bits_rejected() {
+        self.assertRaises(ProtocolError, lambda () -> None {
+            parse_frame(bytes([0xC1, 0x00]))
+        })
+    }
+
+    def test_control_frame_too_large_rejected() {
+        self.assertRaises(ProtocolError, lambda () -> None {
+            hdr: list[int] = [0x89, 126, 0x00, 126]
+            j: int = 0
+            while j < 126 {
+                hdr.append(0x00)
+                j = j + 1
+            }
+            parse_frame(bytes(hdr))
+        })
+    }
+
+    def test_two_frames_in_buffer_advance() {
+        first: bytes = build_text_frame("AB")
+        second: bytes = build_text_frame("CD")
+        buf: bytes = first + second
+        f1: Frame = parse_frame(buf)
+        self.assertEqual(f1.payload, b"AB")
+        consumed: int = frame_length(buf)
+        rest: bytes = buf[consumed:]
+        f2: Frame = parse_frame(rest)
+        self.assertEqual(f2.payload, b"CD")
+    }
+}
+
+
+class WebSocketServerTests(TestCase) {
+    """WebSocket server integration (W2) - real loopback sockets + the handshake.
+
+    The frame codec itself is unit-tested in WebSocketTests; this drives the
+    *server wiring*: the HTTP→WebSocket upgrade through Router, and the post-upgrade
+    frame I/O over a live fd.
+
+    Two layers:
+      1. Socket-free handshake checks (MemoryReader) - the 101 Switching Protocols
+         response: status line, the RFC 6455 §1.3 accept-key vector, the upgrade
+         headers, NO content-length, and the non-matching-path fall-through.
+      2. Real loopback-socket round trips - a Router served on a `fire` green thread,
+         a client on the main thread: masked client frames echoed back unmasked, the
+         close handshake, and an fd-leak smoke test under connection churn (the
+         accepted fd numbers must stay bounded, proving each fd is freed exactly
+         once - the regression guard for the recv()-CLOSE / close() fd leak)."""
+
+    def test_handshake_101_response() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get("/echo").encode("utf-8")])
+        app.serve_connection(reader)
+        const sent: str = reader.sent
+        self.assertIn("101 Switching Protocols", sent)
+        self.assertIn("sec-websocket-accept: " + _RFC_ACCEPT, sent)
+        self.assertIn("upgrade: websocket", sent)
+        self.assertIn("connection: Upgrade", sent)
+        self.assertNotIn("content-length", sent)
+        self.assertNotIn("content-type", sent)
+    }
+
+    def test_upgrade_on_unregistered_path_falls_through_to_404() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get("/nope").encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertIn("404", reader.sent)
+        self.assertNotIn("101", reader.sent)
+    }
+
+    def test_plain_get_on_ws_path_is_not_upgraded() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const req: str = "GET /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        const reader: MemoryReader = MemoryReader([req.encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertNotIn("101", reader.sent)
+        self.assertIn("404", reader.sent)
+    }
+
+    def test_unsupported_version_gets_426() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get_ver("/echo", "8").encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertIn("426 Upgrade Required", reader.sent)
+        self.assertIn("sec-websocket-version: 13", reader.sent)
+        self.assertNotIn("101", reader.sent)
+    }
+
+    def test_supported_version_13_handshakes() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get_ver("/echo", "13").encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertIn("101 Switching Protocols", reader.sent)
+    }
+
+    def test_echo_and_close_handshake() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const lis: TcpListener = TcpListener("127.0.0.1", 19971)
+        lis.bind()
+        lis.listen(64)
+        const fds: list[int] = []
+        const t: Task[None] = fire _ws_accept_serve(lis, app, 1, fds)
+
+        const stream: TcpStream = TcpStream.open("127.0.0.1", 19971)
+        stream.send(_upgrade_get("/echo"))
+        const resp: str = _recv_handshake(stream)
+        self.assertIn("101 Switching Protocols", resp)
+        self.assertIn("sec-websocket-accept: " + _RFC_ACCEPT, resp)
+
+        const client: _WsClient = _WsClient(stream)
+        client.send_text("hello dragon")
+        const echo: Frame = client.recv_frame()
+        self.assertTrue(echo.is_text())
+        self.assertEqual(echo.payload.decode("utf-8"), "hello dragon")
+
+        client.send_close(1000)
+        const closing: Frame = client.recv_frame()
+        self.assertEqual(closing.opcode, OPCODE_CLOSE)
+        const tail: bytes = stream.recv_bytes(64)
+        self.assertEqual(len(tail), 0)
+
+        stream.close()
+        await t
+        lis.close()
+    }
+
+    def test_no_fd_leak_under_churn() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const lis: TcpListener = TcpListener("127.0.0.1", 19972)
+        lis.bind()
+        lis.listen(128)
+        const fds: list[int] = []
+        const N: int = 60
+        const t: Task[None] = fire _ws_accept_serve(lis, app, N, fds)
+
+        last_upgraded: bool = false
+        i: int = 0
+        while i < N {
+            const c: TcpStream = TcpStream.open("127.0.0.1", 19972)
+            c.send(_upgrade_get("/echo"))
+            const resp: str = _recv_handshake(c)
+            if i == N - 1 {
+                last_upgraded = "101 Switching Protocols" in resp
+            }
+            c.close()
+            i = i + 1
+        }
+        await t
+        lis.close()
+
+        self.assertTrue(last_upgraded)
+        self.assertEqual(len(fds), N)
+        mn: int = fds[0]
+        mx: int = fds[0]
+        for f in fds {
+            if f < mn { mn = f }
+            if f > mx { mx = f }
+        }
+        self.assertTrue(mx - mn < 10)
+    }
+}
+
+main([WebSocketTests(), WebSocketServerTests()])

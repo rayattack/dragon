@@ -1,0 +1,608 @@
+from unittest import TestCase, main
+
+
+def rec(log: list[str], v: str) {
+    log.append(v)
+}
+
+
+def join_into(log: list[str], parts: list[str]) {
+    log.append("".join(parts))
+}
+
+
+def nothing() {
+}
+
+
+def fallthrough_path(log: list[str]) {
+    defer rec(log, "cleanup")
+    rec(log, "body")
+}
+
+
+def return_path(log: list[str]) -> int {
+    n: int = 1
+    defer rec(log, "cleanup")
+    return n + 41
+}
+
+
+def branch_paths(log: list[str], flag: bool) -> str {
+    defer rec(log, "cleanup")
+    if flag {
+        return "yes"
+    }
+    return "no"
+}
+
+
+def lifo_order(log: list[str]) {
+    defer rec(log, "first")
+    defer rec(log, "second")
+    defer rec(log, "third")
+    rec(log, "body")
+}
+
+
+def snapshot_int(log: list[str]) {
+    i: int = 1
+    defer rec(log, "i=" + str(i))
+    i = 9
+    rec(log, "now=" + str(i))
+}
+
+
+def snapshot_survives_reassignment(log: list[str]) {
+    s: str = "al" + "pha"
+    defer rec(log, s)
+    s = "re" + "bound"
+    rec(log, s)
+}
+
+
+def borrow_reads_latest(log: list[str]) {
+    parts: list[str] = ["a", "b"]
+    defer join_into(log, parts)
+    parts.append("c")
+}
+
+
+def block_scope(log: list[str]) {
+    if true {
+        defer rec(log, "inner")
+        rec(log, "in-block")
+    }
+    rec(log, "after-block")
+}
+
+
+def nested_scopes_return(log: list[str]) -> int {
+    defer rec(log, "outer")
+    if true {
+        defer rec(log, "inner")
+        return 5
+    }
+    return 0
+}
+
+
+def loop_iterations(log: list[str]) {
+    for i in range(3) {
+        defer rec(log, "d" + str(i))
+        rec(log, "b" + str(i))
+    }
+    rec(log, "after")
+}
+
+
+def loop_break_continue(log: list[str]) {
+    for i in range(4) {
+        defer rec(log, "d" + str(i))
+        if i == 1 {
+            continue
+        }
+        if i == 3 {
+            break
+        }
+        rec(log, "b" + str(i))
+    }
+}
+
+
+def while_loop_defer(log: list[str]) {
+    i: int = 0
+    while i < 2 {
+        defer rec(log, "w" + str(i))
+        i = i + 1
+    }
+}
+
+
+def raises_with_defer(log: list[str]) {
+    defer rec(log, "cleanup")
+    raise ValueError("boom")
+}
+
+
+def local_catch(log: list[str]) {
+    try {
+        defer rec(log, "deferred")
+        raise ValueError("x")
+    } except ValueError {
+        rec(log, "handler")
+    }
+}
+
+
+def try_finally_return(log: list[str]) -> int {
+    try {
+        defer rec(log, "deferred")
+        return 1
+    } finally {
+        rec(log, "finally")
+    }
+}
+
+
+class Counter {
+    n: int
+    def() {
+        self.n = 0
+    }
+    def bump() {
+        self.n = self.n + 1
+    }
+}
+
+
+def method_defer(c: Counter) {
+    defer c.bump()
+    c.bump()
+}
+
+
+class LogGuard {
+    log: list[str]
+    def(log: list[str]) {
+        self.log = log
+    }
+    def __enter__() -> LogGuard {
+        self.log.append("enter")
+        return self
+    }
+    def __exit__() -> int {
+        self.log.append("exit")
+        return 0
+    }
+}
+
+
+def with_body_defer(log: list[str]) {
+    with LogGuard(log) {
+        defer rec(log, "deferred")
+        rec(log, "body")
+    }
+}
+
+
+class DeferBasicTests(TestCase) {
+    """defer: scope-exit calls (the other half of the fire coin).
+
+    `defer <call>` schedules a direct call to run when the current scope ends, on
+    every exit path: fall-through, return, break, continue, and unwind. Arguments
+    (and the method receiver) evaluate AT the defer statement into snapshot slots;
+    only the call runs at scope exit. Within a scope, deferred calls run LIFO,
+    before the scope's own RC cleanup, so borrowed snapshots are alive at call
+    time. Block-scoped, not function-scoped: a defer in a loop body runs at the
+    end of every iteration, statically lowered, no accumulation.
+
+    The reassignment probe (test_snapshot_survives_reassignment) is the
+    adversarial RC case: the snapshot must hold its own +1, otherwise rebinding
+    the source name frees the value the defer still points at - a use-after-free
+    this suite's sanitizer build would catch.
+    """
+
+    def test_fallthrough_runs_defer_last() {
+        log: list[str] = []
+        fallthrough_path(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "body")
+        self.assertEqual(log[1], "cleanup")
+    }
+
+    def test_return_value_evaluated_before_defer() {
+        log: list[str] = []
+        self.assertEqual(return_path(log), 42)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0], "cleanup")
+    }
+
+    def test_every_branch_runs_defer() {
+        log: list[str] = []
+        self.assertEqual(branch_paths(log, true), "yes")
+        self.assertEqual(branch_paths(log, false), "no")
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "cleanup")
+        self.assertEqual(log[1], "cleanup")
+    }
+
+    def test_lifo_order() {
+        log: list[str] = []
+        lifo_order(log)
+        self.assertEqual(len(log), 4)
+        self.assertEqual(log[0], "body")
+        self.assertEqual(log[1], "third")
+        self.assertEqual(log[2], "second")
+        self.assertEqual(log[3], "first")
+    }
+
+    def test_arguments_snapshot_at_statement() {
+        log: list[str] = []
+        snapshot_int(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "now=9")
+        self.assertEqual(log[1], "i=1")
+    }
+
+    def test_snapshot_survives_reassignment() {
+        log: list[str] = []
+        snapshot_survives_reassignment(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "rebound")
+        self.assertEqual(log[1], "alpha")
+    }
+
+    def test_borrowed_arg_reads_state_at_exit() {
+        log: list[str] = []
+        borrow_reads_latest(log)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0], "abc")
+    }
+
+    def test_block_scoped_not_function_scoped() {
+        log: list[str] = []
+        block_scope(log)
+        self.assertEqual(len(log), 3)
+        self.assertEqual(log[0], "in-block")
+        self.assertEqual(log[1], "inner")
+        self.assertEqual(log[2], "after-block")
+    }
+
+    def test_return_unwinds_scopes_innermost_first() {
+        log: list[str] = []
+        self.assertEqual(nested_scopes_return(log), 5)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "inner")
+        self.assertEqual(log[1], "outer")
+    }
+
+    def test_loop_body_defer_runs_each_iteration() {
+        log: list[str] = []
+        loop_iterations(log)
+        self.assertEqual(len(log), 7)
+        self.assertEqual(log[0], "b0")
+        self.assertEqual(log[1], "d0")
+        self.assertEqual(log[2], "b1")
+        self.assertEqual(log[3], "d1")
+        self.assertEqual(log[4], "b2")
+        self.assertEqual(log[5], "d2")
+        self.assertEqual(log[6], "after")
+    }
+
+    def test_break_and_continue_run_iteration_defers() {
+        log: list[str] = []
+        loop_break_continue(log)
+        self.assertEqual(len(log), 6)
+        self.assertEqual(log[0], "b0")
+        self.assertEqual(log[1], "d0")
+        self.assertEqual(log[2], "d1")
+        self.assertEqual(log[3], "b2")
+        self.assertEqual(log[4], "d2")
+        self.assertEqual(log[5], "d3")
+    }
+
+    def test_while_body_defer() {
+        log: list[str] = []
+        while_loop_defer(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "w0")
+        self.assertEqual(log[1], "w1")
+    }
+
+    def test_defer_runs_during_unwind_across_frames() {
+        log: list[str] = []
+        caught: int = 0
+        try {
+            raises_with_defer(log)
+        } except ValueError {
+            caught = 1
+            rec(log, "caught")
+        }
+        self.assertEqual(caught, 1)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "cleanup")
+        self.assertEqual(log[1], "caught")
+    }
+
+    def test_defer_runs_before_local_handler() {
+        log: list[str] = []
+        local_catch(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "deferred")
+        self.assertEqual(log[1], "handler")
+    }
+
+    def test_defer_in_try_runs_before_finally_on_return() {
+        log: list[str] = []
+        self.assertEqual(try_finally_return(log), 1)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "deferred")
+        self.assertEqual(log[1], "finally")
+    }
+
+    def test_method_defer_receiver_snapshot() {
+        c: Counter = Counter()
+        method_defer(c)
+        self.assertEqual(c.n, 2)
+    }
+
+    def test_defer_in_with_body_runs_before_exit() {
+        log: list[str] = []
+        with_body_defer(log)
+        self.assertEqual(len(log), 4)
+        self.assertEqual(log[0], "enter")
+        self.assertEqual(log[1], "body")
+        self.assertEqual(log[2], "deferred")
+        self.assertEqual(log[3], "exit")
+    }
+
+    def test_zero_arg_defer_smoke() {
+        defer nothing()
+        self.assertTrue(true)
+    }
+}
+
+
+def adopt(log: list[str], own d: list[int]) {
+    log.append("adopted" + str(len(d)))
+}
+
+
+def adopt_quiet(own d: list[int]) {
+}
+
+
+def count_into(log: list[str], vals: list[int]) {
+    log.append("saw" + str(len(vals)))
+}
+
+
+def own_move_normal_exit(log: list[str]) {
+    d: list[int] = [1, 2, 3]
+    defer adopt(log, own d)
+    rec(log, "working")
+}
+
+
+def own_move_raise(log: list[str]) {
+    d: list[int] = [1, 2, 3]
+    defer adopt(log, own d)
+    raise ValueError("mid-flight")
+}
+
+
+def dub_copy_independent(log: list[str]) {
+    d: list[int] = [1, 2]
+    defer count_into(log, dub d)
+    d.append(3)
+    d.append(4)
+    log.append("live" + str(len(d)))
+}
+
+
+def own_churn_once() {
+    d: list[int] = [1, 2, 3, 4]
+    defer adopt_quiet(own d)
+}
+
+
+def borrow_churn_once() -> int {
+    parts: list[str] = ["x", "y"]
+    defer count_len(parts)
+    parts.append("z")
+    return len(parts)
+}
+
+
+def count_len(parts: list[str]) {
+    n: int = len(parts)
+}
+
+
+def reassign_churn_once() {
+    s: str = "he" + "ap"
+    defer sink_s(s)
+    s = "re" + "bound"
+}
+
+
+def sink_s(v: str) {
+}
+
+
+def raise_churn_once() {
+    d: list[int] = [7, 8]
+    defer adopt_quiet(own d)
+    raise ValueError("churn")
+}
+
+
+class DeferOwnTests(TestCase) {
+    """defer with ownership: `defer f(own x)` moves x at the STATEMENT, the call
+    runs at scope exit, and the deferred call receives the +1. `defer f(dub x)`
+    copies at the statement and the source stays live.
+
+    These are the adversarial RC shapes for the own-move path, written before the
+    lowering per the audit rule:
+      - own move then normal exit: exactly one release (double-free probe)
+      - own move then raise: the unwind path must hand the SAME single +1 to the
+        deferred call, never zero (leak) or two (double free)
+      - dub copy independence: mutations after the defer don't reach the copy
+      - churn loops: leaks are linear, a few thousand iterations surface them
+        under the suite's ASan/LSan build
+    """
+
+    def test_own_move_delivers_plus_one_at_exit() {
+        log: list[str] = []
+        own_move_normal_exit(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "working")
+        self.assertEqual(log[1], "adopted3")
+    }
+
+    def test_own_move_delivers_plus_one_on_unwind() {
+        log: list[str] = []
+        caught: int = 0
+        try {
+            own_move_raise(log)
+        } except ValueError {
+            caught = 1
+        }
+        self.assertEqual(caught, 1)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0], "adopted3")
+    }
+
+    def test_dub_copies_at_statement() {
+        log: list[str] = []
+        dub_copy_independent(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "live4")
+        self.assertEqual(log[1], "saw2")
+    }
+
+    def test_own_churn_stays_balanced() {
+        i: int = 0
+        while i < 3000 {
+            own_churn_once()
+            i = i + 1
+        }
+        self.assertTrue(true)
+    }
+
+    def test_borrow_churn_stays_balanced() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            total = total + borrow_churn_once()
+            i = i + 1
+        }
+        self.assertEqual(total, 9000)
+    }
+
+    def test_reassign_snapshot_churn_stays_balanced() {
+        i: int = 0
+        while i < 3000 {
+            reassign_churn_once()
+            i = i + 1
+        }
+        self.assertTrue(true)
+    }
+
+    def test_unwind_own_churn_stays_balanced() {
+        caught: int = 0
+        i: int = 0
+        while i < 2000 {
+            try {
+                raise_churn_once()
+            } except ValueError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 2000)
+    }
+
+    def test_loop_body_defer_churn() {
+        i: int = 0
+        while i < 3000 {
+            s: str = "x" + str(i)
+            defer sink_s(s)
+            i = i + 1
+        }
+        self.assertEqual(i, 3000)
+    }
+}
+
+
+class Base {
+    hits: list[str]
+
+    def() {
+        self.hits = []
+    }
+
+    def close() -> None {
+        self.hits.append("base")
+    }
+
+    def tag() -> None {
+        self.hits.append("base-tag")
+    }
+}
+
+class Sub(Base) {
+    def close() -> None {
+        self.hits.append("sub")
+    }
+}
+
+def deferred_close(b: Base) -> None {
+    defer b.close()
+}
+
+def deferred_tag(b: Base) -> None {
+    defer b.tag()
+}
+
+def deferred_close_on_raise(b: Base) -> None {
+    defer b.close()
+    raise ValueError("boom")
+}
+
+
+class DeferVirtualDispatchTest(TestCase) {
+    def test_deferred_override_dispatches() -> None {
+        s: Sub = Sub()
+        deferred_close(s)
+        self.assertEqual(",".join(s.hits), "sub")
+    }
+
+    def test_deferred_base_receiver_stays_base() -> None {
+        b: Base = Base()
+        deferred_close(b)
+        self.assertEqual(",".join(b.hits), "base")
+    }
+
+    def test_non_overridden_stays_direct() -> None {
+        s: Sub = Sub()
+        deferred_tag(s)
+        self.assertEqual(",".join(s.hits), "base-tag")
+    }
+
+    def test_dispatch_on_unwind() -> None {
+        s: Sub = Sub()
+        raised: bool = False
+        try {
+            deferred_close_on_raise(s)
+        } except ValueError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        self.assertEqual(",".join(s.hits), "sub")
+    }
+}
+
+
+main([DeferBasicTests(), DeferOwnTests(), DeferVirtualDispatchTest()])

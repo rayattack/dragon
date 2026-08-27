@@ -1,0 +1,404 @@
+from unittest import TestCase, main
+from time import sleep_ms
+from threading import Lock
+
+const SUM_OF_SQUARES_1_TO_50: int = 42925
+
+
+def square(n: int) -> int {
+    return n * n
+}
+
+
+def make_task(n: int) -> Task[int] {
+    t: Task[int] = fire square(n)
+    return t
+}
+
+
+def consume(task: Task[int]) -> int {
+    return await task
+}
+
+
+def make_and_pass(n: int) -> int {
+    t: Task[int] = fire square(n)
+    return consume(t)
+}
+
+
+def fire_unused(n: int) -> None {
+    t: Task[int] = fire square(n)
+}
+
+
+def poll_no_join(n: int) -> int {
+    t: Task[int] = fire square(n)
+    spins: int = 0
+    while t.is_alive() {
+        spins = spins + 1
+        if spins > 1000000 {
+            return spins
+        }
+    }
+    return spins
+}
+
+
+# CONDITIONAL await (the case that used to leak): the await path consumes and empties the slot,
+# the drop path frees the still-held handle at scope exit. No leak or double-free on EITHER path.
+def conditional(n: int, c: bool) -> int {
+    t: Task[int] = fire square(n)
+    if c {
+        return await t
+    }
+    return -1
+}
+
+
+def poll_then_await(n: int) -> int {
+    t: Task[int] = fire square(n)
+    while t.is_alive() {
+        sleep_ms(1)
+    }
+    return await t
+}
+
+
+side_effects: int = 0
+effect_lock: Lock = Lock()
+
+def bump_effect() -> None {
+    global side_effects
+    with effect_lock { side_effects = side_effects + 1 }
+}
+
+def read_effects() -> int {
+    n: int = 0
+    with effect_lock { n = side_effects }
+    return n
+}
+
+def reset_effects() -> None {
+    global side_effects
+    with effect_lock { side_effects = 0 }
+}
+
+async def make_payload(n: int) -> str {
+    return "p" * 64 + str(n)
+}
+
+async def effectful(n: int) -> str {
+    bump_effect()
+    return f"ran:{n}"
+}
+
+async def nested_inner(n: int) -> str {
+    bump_effect()
+    return f"inner:{n}"
+}
+
+def wait_for_effects(target: int) -> int {
+    waited: int = 0
+    while read_effects() < target and waited < 400 {
+        sleep_ms(5)
+        waited = waited + 1
+    }
+    return read_effects()
+}
+
+
+def sum_lengths(s: list[str]) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(s) {
+        n = n + len(s[i])
+        i = i + 1
+    }
+    return n
+}
+
+
+def sum_values(d: dict[str, int]) -> int {
+    total: int = 0
+    total = total + d["a"]
+    total = total + d["b"]
+    total = total + d["c"]
+    return total
+}
+
+
+# fire/thread block capture: referencing an enclosing local used to emit invalid cross-function IR.
+# Captured locals marshal as spawn args (read-only borrow); heap captures pin the no-double-free path.
+
+def fire_int_capture() -> int {
+    n: int = 10
+    t: Task[int] = fire { return n + 1 }
+    return t.join()
+}
+
+def fire_str_capture() -> int {
+    s: str = "hello"
+    t: Task[int] = fire { return len(s) }
+    return t.join()
+}
+
+def fire_no_capture() -> int {
+    t: Task[int] = fire { return 42 }
+    return t.join()
+}
+
+def thread_int_capture() -> int {
+    out: list[int] = [0]
+    n: int = 5
+    thread { out[0] = n * n }
+    return out[0]
+}
+
+def thread_str_capture() -> int {
+    out: list[int] = [0]
+    s: str = "dragon"
+    thread { out[0] = len(s) }
+    return out[0]
+}
+
+
+class TaskDetachRcTests(TestCase) {
+    """Task scope-exit lifetime - bound-Task tail + conditional-await.
+
+    Source of truth: a bound `Task[T]` is owned by its SCOPE. `await t` / `t.join()`
+    CONSUME it (the runtime frees the vthread) and codegen then blanks t's slot to
+    NULL; at scope exit the scope frees whatever Task is STILL in its slot - i.e. the
+    abandoned ones. So:
+      - bound + never used        -> abandoned -> scope frees it (no leak)
+      - bound + is_alive-polled   -> abandoned -> scope frees it (no leak)
+      - bound + await on SOME paths, dropped on others -> the drop path's scope frees
+        it; the await path emptied the slot so the scope-exit detach is a no-op (no
+        double-free) - this is the conditional-await case that used to leak
+      - returned / passed / stored / captured -> TRANSFERRED -> the new owner frees it
+    A second `await t` / `t.join()` / `t.is_alive()` after a consume is a compile
+    error (the result moves out exactly once); polling BEFORE the await stays legal.
+    All cases below are ASan/LSan-clean (no leak, no UAF, no double-free); the
+    leak/UAF magnitudes are A/B-proven in the scratch probes.
+    """
+
+    def test_returned_task_awaited_by_caller() {
+        i: int = 1
+        total: int = 0
+        while i <= 50 {
+            t: Task[int] = make_task(i)
+            total = total + await t
+            i = i + 1
+        }
+        self.assertEqual(total, SUM_OF_SQUARES_1_TO_50)
+    }
+
+    def test_passed_task_joined_in_callee() {
+        total: int = 0
+        i: int = 1
+        while i <= 50 {
+            total = total + make_and_pass(i)
+            i = i + 1
+        }
+        self.assertEqual(total, SUM_OF_SQUARES_1_TO_50)
+    }
+
+    def test_straightline_join_still_correct() {
+        # await consumes + empties the slot; scope-exit detach is a no-op. Result
+        # must be correct and there must be no double-free.
+        i: int = 1
+        total: int = 0
+        while i <= 50 {
+            t: Task[int] = fire square(i)
+            total = total + await t
+            i = i + 1
+        }
+        self.assertEqual(total, SUM_OF_SQUARES_1_TO_50)
+    }
+
+    def test_bound_fire_and_forget_does_not_crash() {
+        i: int = 0
+        while i < 50 {
+            fire_unused(i)
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_is_alive_poll_no_join_detached() {
+        i: int = 0
+        while i < 50 {
+            const _spins: int = poll_no_join(i)
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_conditional_await_both_paths() {
+        i: int = 1
+        awaited: int = 0
+        dropped: int = 0
+        while i <= 50 {
+            awaited = awaited + conditional(i, True)
+            dropped = dropped + conditional(i, False)
+            i = i + 1
+        }
+        self.assertEqual(awaited, SUM_OF_SQUARES_1_TO_50)
+        self.assertEqual(dropped, -50)
+    }
+
+    def test_poll_then_await_no_uaf() {
+        i: int = 1
+        total: int = 0
+        while i <= 50 {
+            total = total + poll_then_await(i)
+            i = i + 1
+        }
+        self.assertEqual(total, SUM_OF_SQUARES_1_TO_50)
+    }
+}
+
+
+class TaskOwnershipTests(TestCase) {
+    """Task result ownership (docs/1604 outbound edge): the result slot is an own
+    field of the task, join/await moves it out, del detaches, and a task that dies
+    unclaimed releases what it still owns. ASan CI proves the release; the value
+    assertions here prove the moves and the del path still run the work."""
+
+    def test_await_moves_result_out() {
+        got: str = await make_payload(7)
+        self.assertEqual(got, "p" * 64 + "7")
+    }
+
+    def test_fanout_handles_each_own_their_result() {
+        a: Task[str] = make_payload(1)
+        b: Task[str] = make_payload(2)
+        ra: str = await a
+        rb: str = await b
+        self.assertEqual(ra, "p" * 64 + "1")
+        self.assertEqual(rb, "p" * 64 + "2")
+    }
+
+    def test_del_detaches_but_task_still_runs() {
+        reset_effects()
+        i: int = 0
+        while i < 50 {
+            t: Task[str] = effectful(i)
+            del t
+            i = i + 1
+        }
+        self.assertEqual(wait_for_effects(50), 50)
+    }
+
+    def test_dropped_bound_task_still_runs() {
+        reset_effects()
+        i: int = 0
+        while i < 50 {
+            t: Task[str] = effectful(i)
+            i = i + 1
+        }
+        self.assertEqual(wait_for_effects(50), 50)
+    }
+
+    def test_fire_on_async_def_runs_nested_task() {
+        reset_effects()
+        fire nested_inner(9)
+        self.assertEqual(wait_for_effects(1), 1)
+    }
+
+    def test_join_returns_the_moved_value() {
+        t: Task[str] = make_payload(3)
+        got: str = t.join()
+        self.assertEqual(got, "p" * 64 + "3")
+    }
+}
+
+
+class FireForgetTests(TestCase) {
+    def test_fire_and_forget_runs_and_frees() {
+        reset_effects()
+        n: int = 0
+        while n < 500 {
+            fire bump_effect()
+            n = n + 1
+        }
+        self.assertEqual(wait_for_effects(500), 500)
+    }
+}
+
+
+class FireReadOnlyShareTests(TestCase) {
+    """A read-only value fans out across `fire` at zero copy.
+
+    You want the obvious worker-pool shape - fire one task per worker over the SAME
+    shared data, then join them all:
+
+        shared: list[str] = build()
+        while w < N {
+            t: Task[int] = fire worker(shared)   # every worker READS `shared`
+            tasks.append(t)
+            w = w + 1
+        }
+        for t in tasks { total = total + t.join() }
+
+    Before door 5 this was E10 ("'shared' deleted on iteration 1; iteration 2 would
+    use a dead name"): the single-task lend could track only ONE outstanding borrow
+    and killed `shared` on the back edge. But `fire` already marks every heap arg
+    SHARED (atomic refcount via mark_shared_deep), so N tasks reading the same value
+    concurrently cannot race on its refcount - and because `worker` provably never
+    MUTATES its parameter, there is no data race on its contents either. So it is
+    safe to share at zero copy, and no `dub` is needed.
+
+    The invariant this locks in: a plain `fire worker(shared)` that COMPILES is proof
+    the worker only reads `shared`. If it mutated, you would have had to say
+    `dub shared` (a visible copy) or `own shared` (a move). `dub` stays the marker
+    that a copy was needed. Memory-safety of the fan-out is proven under ASan/LSan by
+    the scratch probe (12 workers x 3000 reads over 8 shared strings, clean); this
+    test locks in the rendered VALUES end to end.
+    """
+
+    def test_list_fanout_joins_to_expected_total() {
+        shared: list[str] = ["item_a", "item_b", "item_c"]
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 8 {
+            t: Task[int] = fire sum_lengths(shared)
+            tasks.append(t)
+            w = w + 1
+        }
+        total: int = 0
+        for t in tasks {
+            total = total + t.join()
+        }
+        self.assertEqual(total, 144)
+    }
+
+    def test_dict_fanout_joins_to_expected_total() {
+        cfg: dict[str, int] = {a: 10, b: 20, c: 30}
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 5 {
+            t: Task[int] = fire sum_values(cfg)
+            tasks.append(t)
+            w = w + 1
+        }
+        total: int = 0
+        for t in tasks {
+            total = total + t.join()
+        }
+        self.assertEqual(total, 300)
+    }
+}
+
+
+class ConcurrencyCaptureTests(TestCase) {
+    def test_fire_captures_int() { self.assertEqual(fire_int_capture(), 11) }
+    def test_fire_captures_str() { self.assertEqual(fire_str_capture(), 5) }
+    def test_fire_no_capture() { self.assertEqual(fire_no_capture(), 42) }
+    def test_thread_captures_int() { self.assertEqual(thread_int_capture(), 25) }
+    def test_thread_captures_str() { self.assertEqual(thread_str_capture(), 6) }
+}
+
+
+main([TaskDetachRcTests(), TaskOwnershipTests(), FireForgetTests(),
+      FireReadOnlyShareTests(), ConcurrencyCaptureTests()])

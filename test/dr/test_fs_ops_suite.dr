@@ -1,0 +1,364 @@
+from unittest import TestCase, main
+import shutil
+import filecmp
+import fileinput
+import linecache
+import netrc
+from netrc import NetrcParseError
+import gettext
+from gettext import GNUTranslations
+import os
+from os.path import join, exists, isfile
+from io import open, make
+
+
+def _write(path: str, body: str) -> None {
+    if exists(path) {
+        os.remove(path)
+    }
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+
+class ShutilTests(TestCase) {
+    """shutil - copy/copytree/move/rmtree/which against a real temp tree."""
+
+    def _setup(root: str) -> None {
+        if exists(root) {
+            shutil.rmtree(root)
+        }
+        os.mkdir(root, 493)
+        os.mkdir(join(root, "sub"), 493)
+        _write(join(root, "a.txt"), "alpha")
+        _write(join(join(root, "sub"), "b.txt"), "beta")
+    }
+
+    def test_copyfile() {
+        root: str = "/tmp/dr_shutil_cf"
+        self._setup(root)
+        dst: str = join(root, "a_copy.txt")
+        shutil.copyfile(join(root, "a.txt"), dst)
+        self.assertTrue(isfile(dst))
+        self.assertEqual(open(dst).text(), "alpha")
+        shutil.rmtree(root)
+    }
+
+    def test_copytree_and_rmtree() {
+        root: str = "/tmp/dr_shutil_ct"
+        tree: str = "/tmp/dr_shutil_ct_dst"
+        self._setup(root)
+        if exists(tree) { shutil.rmtree(tree) }
+        shutil.copytree(root, tree)
+        self.assertTrue(isfile(join(tree, "a.txt")))
+        self.assertTrue(isfile(join(join(tree, "sub"), "b.txt")))
+        shutil.rmtree(tree)
+        self.assertFalse(exists(tree))
+        shutil.rmtree(root)
+    }
+
+    def test_move() {
+        root: str = "/tmp/dr_shutil_mv"
+        self._setup(root)
+        src: str = join(root, "a.txt")
+        dst: str = join(root, "moved.txt")
+        shutil.move(src, dst)
+        self.assertFalse(exists(src))
+        self.assertTrue(isfile(dst))
+        shutil.rmtree(root)
+    }
+
+    def test_which() {
+        found: str = shutil.which("sh")
+        self.assertTrue(found != "")
+        self.assertEqual(shutil.which("dr_no_such_binary_zzz"), "")
+    }
+}
+
+
+def _setup(root: str) -> None {
+    if exists(root) {
+        shutil.rmtree(root)
+    }
+    os.mkdir(root, 493)
+    os.mkdir(join(root, "L"), 493)
+    os.mkdir(join(root, "R"), 493)
+    _write(join(join(root, "L"), "same.txt"), "identical")
+    _write(join(join(root, "R"), "same.txt"), "identical")
+    _write(join(join(root, "L"), "diff.txt"), "alpha")
+    _write(join(join(root, "R"), "diff.txt"), "BETA")
+    _write(join(join(root, "L"), "only_l.txt"), "L")
+    _write(join(join(root, "R"), "only_r.txt"), "R")
+    os.mkdir(join(join(root, "L"), "subdir"), 493)
+    os.mkdir(join(join(root, "R"), "subdir"), 493)
+}
+
+
+class FileCmpTests(TestCase) {
+    """filecmp - file/directory comparison."""
+
+    def test_cmp_identical_deep() {
+        root: str = "/tmp/dr_filecmp_1"
+        _setup(root)
+        a: str = join(join(root, "L"), "same.txt")
+        b: str = join(join(root, "R"), "same.txt")
+        self.assertTrue(filecmp.cmp(a, b, false))
+        shutil.rmtree(root)
+    }
+
+    def test_cmp_different() {
+        root: str = "/tmp/dr_filecmp_2"
+        _setup(root)
+        a: str = join(join(root, "L"), "diff.txt")
+        b: str = join(join(root, "R"), "diff.txt")
+        self.assertFalse(filecmp.cmp(a, b, false))
+        shutil.rmtree(root)
+    }
+
+    def test_cmp_missing() {
+        self.assertFalse(filecmp.cmp("/no/such/x", "/no/such/y", false))
+    }
+
+    def test_cmpfiles() {
+        root: str = "/tmp/dr_filecmp_3"
+        _setup(root)
+        L: str = join(root, "L")
+        R: str = join(root, "R")
+        out: dict[str, list[str]] = filecmp.cmpfiles(L, R, ["same.txt", "diff.txt", "ghost.txt"], false)
+        self.assertEqual(out["match"], ["same.txt"])
+        self.assertEqual(out["mismatch"], ["diff.txt"])
+        self.assertEqual(out["errors"], ["ghost.txt"])
+        shutil.rmtree(root)
+    }
+
+    def test_dircmp() {
+        root: str = "/tmp/dr_filecmp_4"
+        _setup(root)
+        L: str = join(root, "L")
+        R: str = join(root, "R")
+        dc: filecmp.dircmp = filecmp.dircmp(L, R)
+        self.assertTrue("only_l.txt" in dc.left_only)
+        self.assertTrue("only_r.txt" in dc.right_only)
+        self.assertTrue("same.txt" in dc.same_files)
+        self.assertTrue("diff.txt" in dc.diff_files)
+        self.assertTrue("subdir" in dc.common_dirs)
+        shutil.rmtree(root)
+    }
+}
+
+
+class FileInputTests(TestCase) {
+    """fileinput - line iteration across multiple files."""
+
+    def test_concatenates_lines() {
+        _write("/tmp/dr_fi_a.txt", "a1\na2\n")
+        _write("/tmp/dr_fi_b.txt", "b1\n")
+        fi: fileinput.FileInput = fileinput.input(["/tmp/dr_fi_a.txt", "/tmp/dr_fi_b.txt"])
+        collected: list[str] = []
+        for line in fi {
+            collected.append(line.strip())
+        }
+        self.assertEqual(len(collected), 3)
+        self.assertEqual(collected[0], "a1")
+        self.assertEqual(collected[1], "a2")
+        self.assertEqual(collected[2], "b1")
+        os.remove("/tmp/dr_fi_a.txt")
+        os.remove("/tmp/dr_fi_b.txt")
+    }
+
+    def test_metadata_during_iteration() {
+        _write("/tmp/dr_fi_m1.txt", "x\ny\n")
+        _write("/tmp/dr_fi_m2.txt", "z\n")
+        fi: fileinput.FileInput = fileinput.input(["/tmp/dr_fi_m1.txt", "/tmp/dr_fi_m2.txt"])
+        seen_files: list[str] = []
+        seen_lineno: list[int] = []
+        seen_filelineno: list[int] = []
+        for line in fi {
+            seen_files.append(fi.filename())
+            seen_lineno.append(fi.lineno())
+            seen_filelineno.append(fi.filelineno())
+        }
+        self.assertEqual(seen_files[0], "/tmp/dr_fi_m1.txt")
+        self.assertEqual(seen_files[2], "/tmp/dr_fi_m2.txt")
+        self.assertEqual(seen_lineno, [1, 2, 3])
+        self.assertEqual(seen_filelineno, [1, 2, 1])
+        os.remove("/tmp/dr_fi_m1.txt")
+        os.remove("/tmp/dr_fi_m2.txt")
+    }
+
+    def test_isfirstline_and_nextfile() {
+        _write("/tmp/dr_fi_n1.txt", "1\n2\n3\n")
+        _write("/tmp/dr_fi_n2.txt", "x\n")
+        fi: fileinput.FileInput = fileinput.input(["/tmp/dr_fi_n1.txt", "/tmp/dr_fi_n2.txt"])
+        line1: str = fi.__next__()
+        self.assertTrue(fi.isfirstline())
+        fi.__next__()
+        fi.nextfile()
+        line_next: str = fi.__next__()
+        self.assertEqual(line_next.strip(), "x")
+        self.assertTrue(fi.isfirstline())
+        os.remove("/tmp/dr_fi_n1.txt")
+        os.remove("/tmp/dr_fi_n2.txt")
+    }
+}
+
+
+class LineCacheTests(TestCase) {
+    """linecache - line-by-line cached read of a file."""
+
+    def test_getline_basic() {
+        path: str = "/tmp/dr_linecache_a.txt"
+        _write(path, "alpha\nbeta\ngamma\n")
+        linecache.clearcache()
+        self.assertEqual(linecache.getline(path, 1).strip(), "alpha")
+        self.assertEqual(linecache.getline(path, 2).strip(), "beta")
+        self.assertEqual(linecache.getline(path, 3).strip(), "gamma")
+        os.remove(path)
+    }
+
+    def test_out_of_range_and_missing() {
+        path: str = "/tmp/dr_linecache_b.txt"
+        _write(path, "only one\n")
+        linecache.clearcache()
+        self.assertEqual(linecache.getline(path, 0), "")
+        self.assertEqual(linecache.getline(path, 99), "")
+        self.assertEqual(linecache.getline("/no/such/file/xyz", 1), "")
+        os.remove(path)
+    }
+
+    def test_cache_survives_file_removal() {
+        path: str = "/tmp/dr_linecache_c.txt"
+        _write(path, "cached\n")
+        linecache.clearcache()
+        linecache.getline(path, 1)
+        os.remove(path)
+        self.assertEqual(linecache.getline(path, 1).strip(), "cached")
+        linecache.checkcache(path)
+        self.assertEqual(linecache.getline(path, 1), "")
+    }
+
+    def test_updatecache() {
+        path: str = "/tmp/dr_linecache_d.txt"
+        _write(path, "first\n")
+        linecache.clearcache()
+        self.assertEqual(linecache.getline(path, 1).strip(), "first")
+        _write(path, "second\n")
+        self.assertEqual(linecache.getline(path, 1).strip(), "first")
+        linecache.updatecache(path)
+        self.assertEqual(linecache.getline(path, 1).strip(), "second")
+        os.remove(path)
+    }
+}
+
+
+class NetrcTests(TestCase) {
+    """netrc - parse a real `.netrc`-style file."""
+
+    def test_single_machine() {
+        path: str = "/tmp/dr_netrc_1"
+        _write(path,
+"machine example.com\n" +
+"  login alice\n" +
+"  password s3cret\n")
+        nrc: netrc.netrc = netrc.netrc(path)
+        auth: tuple[str, str, str] = nrc.authenticators("example.com")
+        self.assertEqual(auth[0], "alice")
+        self.assertEqual(auth[2], "s3cret")
+        os.remove(path)
+    }
+
+    def test_multiple_machines_and_default() {
+        path: str = "/tmp/dr_netrc_2"
+        _write(path,
+"machine a.example\n" +
+"  login user_a\n" +
+"  password pw_a\n" +
+"machine b.example\n" +
+"  login user_b\n" +
+"  password pw_b\n" +
+"  account acct_b\n" +
+"default\n" +
+"  login anon\n" +
+"  password guest\n")
+        nrc: netrc.netrc = netrc.netrc(path)
+        a: tuple[str, str, str] = nrc.authenticators("a.example")
+        b: tuple[str, str, str] = nrc.authenticators("b.example")
+        d: tuple[str, str, str] = nrc.authenticators("c.unknown")
+        self.assertEqual(a[0], "user_a")
+        self.assertEqual(a[2], "pw_a")
+        self.assertEqual(b[0], "user_b")
+        self.assertEqual(b[1], "acct_b")
+        self.assertEqual(b[2], "pw_b")
+        self.assertEqual(d[0], "anon")
+        self.assertEqual(d[2], "guest")
+        os.remove(path)
+    }
+
+    def test_missing_file_raises() {
+        raised: bool = false
+        try {
+            nrc: netrc.netrc = netrc.netrc("/no/such/netrc/dr_zzz")
+        } except NetrcParseError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_unknown_host_no_default() {
+        path: str = "/tmp/dr_netrc_3"
+        _write(path,
+"machine a.example\n" +
+"  login u\n" +
+"  password p\n")
+        nrc: netrc.netrc = netrc.netrc(path)
+        miss: tuple[str, str, str] = nrc.authenticators("c.unknown")
+        self.assertEqual(miss[0], "")
+        self.assertEqual(miss[1], "")
+        self.assertEqual(miss[2], "")
+        os.remove(path)
+    }
+}
+
+
+_PO_SAMPLE: str = "# Sample .po\nmsgid \"hello\"\nmsgstr \"hola\"\n\nmsgid \"%d apple\"\nmsgid_plural \"%d apples\"\nmsgstr[0] \"%d manzana\"\nmsgstr[1] \"%d manzanas\"\n"
+
+
+class GettextTests(TestCase) {
+    """gettext - `.po` parser + singular/plural lookup."""
+
+    def test_basic_lookup() {
+        path: str = "/tmp/dr_gettext_1.po"
+        _write(path, _PO_SAMPLE)
+        t: GNUTranslations = GNUTranslations(path)
+        self.assertEqual(t.gettext("hello"), "hola")
+        self.assertEqual(t.gettext("missing"), "missing")
+        os.remove(path)
+    }
+
+    def test_ngettext_singular_and_plural() {
+        path: str = "/tmp/dr_gettext_2.po"
+        _write(path, _PO_SAMPLE)
+        t: GNUTranslations = GNUTranslations(path)
+        self.assertEqual(t.ngettext("%d apple", "%d apples", 1), "%d manzana")
+        self.assertEqual(t.ngettext("%d apple", "%d apples", 5), "%d manzanas")
+    }
+
+    def test_install_module_level() {
+        path: str = "/tmp/dr_gettext_3.po"
+        _write(path, _PO_SAMPLE)
+        t: GNUTranslations = GNUTranslations(path)
+        gettext.install(t)
+        self.assertEqual(gettext.gettext("hello"), "hola")
+        self.assertEqual(gettext.ngettext("%d apple", "%d apples", 1), "%d manzana")
+        os.remove(path)
+    }
+
+    def test_missing_file_safe() {
+        t: GNUTranslations = GNUTranslations("/no/such/dr_zzz.po")
+        self.assertEqual(t.gettext("hello"), "hello")
+    }
+}
+
+
+main([ShutilTests(), FileCmpTests(), FileInputTests(), LineCacheTests(), NetrcTests(), GettextTests()])

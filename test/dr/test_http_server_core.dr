@@ -1,0 +1,507 @@
+from unittest import TestCase, main
+from http.server import Router, Request, Response, Context
+from http.server import MemoryReader, RequestReader, FramedRequest, ConnReader
+from time import monotonic
+
+const TINY_CHUNK_COUNT: int = 20000
+const DECHUNK_BUDGET_SECS: float = 2.0
+const MARKER: str = "DRAGON_GZIP_MARKER_"
+
+def _echo_path(req: Request, res: Response, ctx: Context) -> None {
+    res.text("hi:" + req.path)
+}
+
+def _echo_body(req: Request, res: Response, ctx: Context) -> None {
+    res.text("len=" + str(len(req.body)))
+}
+
+def _stream(req: Request, res: Response, ctx: Context) -> None {
+    res.chunk("part1-")
+    res.chunk("part2")
+}
+
+def _build_app() -> Router {
+    const app: Router = Router()
+    app.GET("/a", _echo_path)
+    app.GET("/b", _echo_path)
+    app.POST("/body", _echo_body)
+    app.GET("/s", _stream)
+    return app
+}
+
+def _make_body(piece: bytes, count: int) -> bytes {
+    out: bytes = b""
+    i: int = 0
+    while i < count {
+        out = out + piece
+        i = i + 1
+    }
+    return out
+}
+
+def _chunked_wire_of_tiny_chunks(n: int) -> bytes {
+    parts: list[bytes] = [b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"]
+    i: int = 0
+    while i < n {
+        parts.append(b"1\r\na\r\n")
+        i = i + 1
+    }
+    parts.append(b"0\r\n\r\n")
+    return b"".join(parts)
+}
+
+def _boom(req: Request, res: Response, ctx: Context) -> None {
+    raise ValueError("handler blew up")
+}
+
+def _boom_after_writing(req: Request, res: Response, ctx: Context) -> None {
+    res.set_header("x-leaked", "yes")
+    res.text("half-written secret")
+    raise RuntimeError("blew up mid-response")
+}
+
+def _fine(req: Request, res: Response, ctx: Context) -> None {
+    res.text("fine")
+}
+
+def _boom_mw(req: Request, res: Response, ctx: Context) -> None {
+    raise RuntimeError("middleware blew up")
+}
+
+def _get(path: str) -> bytes {
+    return ("GET " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n").encode("utf-8")
+}
+
+def _get_keepalive(path: str) -> bytes {
+    return ("GET " + path + " HTTP/1.1\r\nHost: h\r\n\r\n").encode("utf-8")
+}
+
+def _big(req: Request, res: Response, ctx: Context) -> None {
+    res.text(MARKER * 200)
+}
+
+def _small(req: Request, res: Response, ctx: Context) -> None {
+    res.text("hi")
+}
+
+def _png(req: Request, res: Response, ctx: Context) -> None {
+    res.text(MARKER * 200)
+    res.set_header("content-type", "image/png")
+}
+
+def _app() -> Router {
+    const app: Router = Router()
+    app.GET("/big", _big)
+    app.GET("/small", _small)
+    app.GET("/png", _png)
+    return app
+}
+
+def _req(path: str, accept_gzip: bool) -> bytes {
+    enc: str = "Accept-Encoding: gzip\r\n" if accept_gzip else ""
+    const head: str = "GET " + path + " HTTP/1.1\r\nHost: h\r\n" + enc + "Connection: close\r\n\r\n"
+    return head.encode("utf-8")
+}
+
+def _greet(req: Request, res: Response, ctx: Context) -> None {
+    const body: Any = req.json()
+    if isinstance(body, dict) {
+        const m: dict[str, Any] = body
+        const name: str = m["name"]
+        const age: int = m["age"]
+        res.text("hello:" + name + ":" + str(age))
+    } else {
+        res.text("not-object")
+    }
+}
+
+def _post(path: str, body: str) -> str {
+    const clen: str = str(len(body))
+    return "POST " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: " + clen + "\r\n\r\n" + body
+}
+
+
+class RequestReaderTests(TestCase) {
+    def test_content_length_single_read() {
+        const req: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"
+        const rr: RequestReader = RequestReader(MemoryReader([req]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "hello")
+    }
+
+    def test_fragmented_body() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 11\r\n\r\nhel",
+            b"lo wo",
+            b"rld"]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "hello world")
+    }
+
+    def test_header_body_split_across_boundary() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 4\r\n\r",
+            b"\nWXYZ"]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "WXYZ")
+    }
+
+    def test_large_body_over_64k() {
+        const body: bytes = _make_body(b"abcdefghij", 10000)
+        const head: bytes = b"POST /x HTTP/1.1\r\nContent-Length: 100000\r\n\r\n"
+        const rr: RequestReader = RequestReader(MemoryReader([head + body]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(len(fr.body), 100000)
+    }
+
+    def test_large_body_fragmented() {
+        const head: bytes = b"POST /x HTTP/1.1\r\nContent-Length: 30000\r\n\r\n"
+        const piece: bytes = _make_body(b"x", 1000)
+        const chunks: list[bytes] = [head]
+        i: int = 0
+        while i < 30 {
+            chunks.append(piece)
+            i = i + 1
+        }
+        const rr: RequestReader = RequestReader(MemoryReader(chunks))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(len(fr.body), 30000)
+    }
+
+    def test_chunked_request_decodes() {
+        const req: bytes = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+        const rr: RequestReader = RequestReader(MemoryReader([req]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "hello world")
+        const raw: str = fr.raw.decode("utf-8")
+        self.assertIn("content-length: 11", raw)
+        self.assertNotIn("transfer-encoding", raw)
+    }
+
+    def test_eof_is_clean() {
+        const rr: RequestReader = RequestReader(MemoryReader([]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.eof)
+        self.assertFalse(fr.bad)
+    }
+
+    def test_truncated_body_is_bad() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 100\r\n\r\nonly-a-few"]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.bad)
+    }
+}
+
+
+class KeepAliveLoopTests(TestCase) {
+    def test_two_sequential_requests() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /a HTTP/1.1\r\nHost: h\r\n\r\n",
+            b"GET /b HTTP/1.1\r\nHost: h\r\n\r\n"])
+        _build_app().serve_connection(mr)
+        self.assertIn("hi:/a", mr.sent)
+        self.assertIn("hi:/b", mr.sent)
+        self.assertTrue(mr.closed)
+    }
+
+    def test_connection_close() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /a HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+            b"GET /b HTTP/1.1\r\nHost: h\r\n\r\n"])
+        _build_app().serve_connection(mr)
+        self.assertIn("hi:/a", mr.sent)
+        self.assertNotIn("hi:/b", mr.sent)
+        self.assertIn("connection: close", mr.sent)
+    }
+
+    def test_http10_closes_by_default() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /a HTTP/1.0\r\nHost: h\r\n\r\n",
+            b"GET /b HTTP/1.0\r\nHost: h\r\n\r\n"])
+        _build_app().serve_connection(mr)
+        self.assertIn("hi:/a", mr.sent)
+        self.assertNotIn("hi:/b", mr.sent)
+    }
+
+    def test_post_body_through_loop() {
+        const body: bytes = _make_body(b"z", 5000)
+        const head: bytes = b"POST /body HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 5000\r\n\r\n"
+        const mr: MemoryReader = MemoryReader([head, body])
+        _build_app().serve_connection(mr)
+        self.assertIn("len=5000", mr.sent)
+    }
+}
+
+
+class ChunkedResponseTests(TestCase) {
+    def test_chunked_response_framing() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /s HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"])
+        _build_app().serve_connection(mr)
+        self.assertIn("transfer-encoding: chunked", mr.sent)
+        self.assertNotIn("content-length", mr.sent)
+        self.assertIn("6\r\npart1-\r\n", mr.sent)
+        self.assertIn("5\r\npart2\r\n", mr.sent)
+        self.assertIn("0\r\n\r\n", mr.sent)
+    }
+}
+
+
+class CedeSeamTests(TestCase) {
+    def test_cede_with_body_raises() -> None {
+        const res: Response = Response()
+        res.text("half a document")
+        raised: bool = false
+
+        def own_conn(conn: ConnReader) -> None {
+        }
+        try {
+            res.cede(own_conn)
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+
+        const res2: Response = Response()
+        res2.chunk("half a stream")
+        raised = false
+        try {
+            res2.cede(own_conn)
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_cede_invokes_callback_and_skips_close() {
+        const app: Router = Router()
+
+        def upgrade(req: Request, res: Response, ctx: Context) -> None {
+            res.status = 101
+
+            def own(conn: ConnReader) -> None {
+                conn.send("OWNED")
+            }
+            res.cede(own)
+        }
+        app.GET("/ws", upgrade)
+
+        const mr: MemoryReader = MemoryReader([
+            b"GET /ws HTTP/1.1\r\nHost: h\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"])
+        app.serve_connection(mr)
+        self.assertIn("101", mr.sent)
+        self.assertIn("OWNED", mr.sent)
+        self.assertFalse(mr.closed)
+    }
+}
+
+
+class ChunkedDechunkPerfTests(TestCase) {
+    def test_many_tiny_chunks_decode_within_time_budget() {
+        const wire: bytes = _chunked_wire_of_tiny_chunks(TINY_CHUNK_COUNT)
+        const rr: RequestReader = RequestReader(MemoryReader([wire]))
+        const t0: float = monotonic()
+        const fr: FramedRequest = rr.read_request()
+        const elapsed: float = monotonic() - t0
+        self.assertTrue(fr.ok)
+        self.assertEqual(len(fr.body), TINY_CHUNK_COUNT)
+        self.assertEqual(fr.body, b"a" * TINY_CHUNK_COUNT)
+        self.assertTrue(elapsed < DECHUNK_BUDGET_SECS)
+    }
+}
+
+class ChunkedCorrectnessGuardTests(TestCase) {
+    def test_hex_size_with_chunk_extension() {
+        const wire: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1a;name=val\r\nabcdefghijklmnopqrstuvwxyz\r\n0\r\n\r\n"
+        const rr: RequestReader = RequestReader(MemoryReader([wire]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "abcdefghijklmnopqrstuvwxyz")
+        self.assertIn("content-length: 26", fr.raw.decode("utf-8"))
+    }
+
+    def test_pipelined_request_after_chunked_survives() {
+        const wire: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /next HTTP/1.1\r\nHost: h\r\n\r\n"
+        const rr: RequestReader = RequestReader(MemoryReader([wire]))
+        const fr1: FramedRequest = rr.read_request()
+        self.assertTrue(fr1.ok)
+        self.assertEqual(fr1.body.decode("utf-8"), "abc")
+        const fr2: FramedRequest = rr.read_request()
+        self.assertTrue(fr2.ok)
+        self.assertIn("GET /next", fr2.raw.decode("utf-8"))
+    }
+
+    def test_chunk_data_split_across_reads_after_rewrite() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhe",
+            b"llo\r\n1",
+            b"4\r\nabcdefghij",
+            b"0123456789\r\n0\r\n\r\n"]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "helloabcdefghij0123456789")
+    }
+}
+
+
+class HandlerRaisesTests(TestCase) {
+    """A handler that raises must not cost the client its answer.
+
+    An uncaught exception in a route handler or in middleware used to unwind
+    straight past serve_connection and out of the vthread: nothing was
+    serialized, the socket was never closed, and the client blocked on a read
+    that never completed.
+    """
+
+    def test_raising_handler_answers_500() {
+        const app: Router = Router()
+        app.GET("/boom", _boom)
+        const mr: MemoryReader = MemoryReader([_get("/boom")])
+        app.serve_connection(mr)
+        self.assertIn("HTTP/1.1 500 Internal Server Error", mr.sent)
+    }
+
+    def test_raising_handler_closes_the_connection() {
+        const app: Router = Router()
+        app.GET("/boom", _boom)
+        const mr: MemoryReader = MemoryReader([_get("/boom")])
+        app.serve_connection(mr)
+        self.assertTrue(mr.closed)
+    }
+
+    def test_partial_response_is_not_leaked() {
+        const app: Router = Router()
+        app.GET("/boom", _boom_after_writing)
+        const mr: MemoryReader = MemoryReader([_get("/boom")])
+        app.serve_connection(mr)
+        self.assertIn("HTTP/1.1 500 Internal Server Error", mr.sent)
+        self.assertNotIn("half-written secret", mr.sent)
+        self.assertNotIn("x-leaked", mr.sent)
+    }
+
+    def test_raising_before_middleware_answers_500() {
+        const app: Router = Router()
+        app.BEFORE("/*", _boom_mw)
+        app.GET("/x", _fine)
+        const mr: MemoryReader = MemoryReader([_get("/x")])
+        app.serve_connection(mr)
+        self.assertIn("HTTP/1.1 500 Internal Server Error", mr.sent)
+        self.assertNotIn("fine", mr.sent)
+    }
+
+    def test_raising_after_middleware_answers_500() {
+        const app: Router = Router()
+        app.AFTER("/*", _boom_mw)
+        app.GET("/x", _fine)
+        const mr: MemoryReader = MemoryReader([_get("/x")])
+        app.serve_connection(mr)
+        self.assertIn("HTTP/1.1 500 Internal Server Error", mr.sent)
+    }
+
+    def test_keepalive_request_still_gets_closed_after_500() {
+        const app: Router = Router()
+        app.GET("/boom", _boom)
+        const mr: MemoryReader = MemoryReader([_get_keepalive("/boom")])
+        app.serve_connection(mr)
+        self.assertIn("HTTP/1.1 500 Internal Server Error", mr.sent)
+        self.assertIn("connection: close", mr.sent)
+        self.assertTrue(mr.closed)
+    }
+
+    def test_healthy_route_is_unaffected() {
+        const app: Router = Router()
+        app.GET("/x", _fine)
+        const mr: MemoryReader = MemoryReader([_get("/x")])
+        app.serve_connection(mr)
+        self.assertIn("HTTP/1.1 200 OK", mr.sent)
+        self.assertIn("fine", mr.sent)
+    }
+
+    def test_server_survives_a_raising_handler_and_serves_the_next_client() {
+        const app: Router = Router()
+        app.GET("/boom", _boom)
+        app.GET("/x", _fine)
+        const first: MemoryReader = MemoryReader([_get("/boom")])
+        app.serve_connection(first)
+        const second: MemoryReader = MemoryReader([_get("/x")])
+        app.serve_connection(second)
+        self.assertIn("HTTP/1.1 500 Internal Server Error", first.sent)
+        self.assertIn("HTTP/1.1 200 OK", second.sent)
+        self.assertIn("fine", second.sent)
+    }
+}
+
+
+class GzipGateTests(TestCase) {
+    def test_compresses_large_text() {
+        const mr: MemoryReader = MemoryReader([_req("/big", true)])
+        _app().serve_connection(mr)
+        self.assertIn("content-encoding: gzip", mr.sent)
+        self.assertIn("vary: Accept-Encoding", mr.sent)
+        self.assertNotIn(MARKER, mr.sent)
+    }
+
+    def test_no_accept_encoding_uncompressed() {
+        const mr: MemoryReader = MemoryReader([_req("/big", false)])
+        _app().serve_connection(mr)
+        self.assertNotIn("content-encoding: gzip", mr.sent)
+        self.assertIn(MARKER, mr.sent)
+    }
+
+    def test_small_body_not_compressed() {
+        const mr: MemoryReader = MemoryReader([_req("/small", true)])
+        _app().serve_connection(mr)
+        self.assertNotIn("content-encoding: gzip", mr.sent)
+        self.assertIn("hi", mr.sent)
+    }
+
+    def test_incompressible_type_skipped() {
+        const mr: MemoryReader = MemoryReader([_req("/png", true)])
+        _app().serve_connection(mr)
+        self.assertNotIn("content-encoding: gzip", mr.sent)
+        self.assertIn(MARKER, mr.sent)
+    }
+}
+
+
+class JsonBodyTests(TestCase) {
+    def test_json_body_object() {
+        const app: Router = Router()
+        app.POST("/x", _greet)
+        const mr: MemoryReader = MemoryReader([_post("/x", "{\"name\": \"Ada\", \"age\": 36}").encode("utf-8")])
+        app.serve_connection(mr)
+        self.assertIn("hello:Ada:36", mr.sent)
+    }
+
+    def test_json_body_nested() {
+        const app: Router = Router()
+
+        def _sum(req: Request, res: Response, ctx: Context) -> None {
+            const body: Any = req.json()
+            const m: dict[str, Any] = body
+            const items: list[Any] = m["items"]
+            total: int = 0
+            for it in items {
+                const n: int = it
+                total = total + n
+            }
+            res.text("sum:" + str(total))
+        }
+        app.POST("/sum", _sum)
+        const mr: MemoryReader = MemoryReader([_post("/sum", "{\"items\": [1, 2, 3, 4]}").encode("utf-8")])
+        app.serve_connection(mr)
+        self.assertIn("sum:10", mr.sent)
+    }
+}
+
+
+main([RequestReaderTests(), KeepAliveLoopTests(), ChunkedResponseTests(), CedeSeamTests(),
+      ChunkedDechunkPerfTests(), ChunkedCorrectnessGuardTests(), HandlerRaisesTests(),
+      GzipGateTests(), JsonBodyTests()])

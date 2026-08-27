@@ -1,0 +1,448 @@
+from unittest import TestCase, main
+import hashlib
+
+
+def make_adder(n: int) -> Callable[[int], int] {
+    def adder(x: int) -> int { return x + n }
+    return adder
+}
+
+def make_scaler(a: int, b: int) -> Callable[[int], int] {
+    def f(x: int) -> int { return x * a + b }
+    return f
+}
+
+def inc(x: int) -> int { return x + 1 }
+def dec(x: int) -> int { return x - 1 }
+def dbl(x: int) -> int { return x * 2 }
+
+def mk(n: int) -> Callable[[int], int] {
+    def adder(x: int) -> int { return x + n }
+    return adder
+}
+
+
+class Op {
+    name: str
+    fn: Callable[[int], int]
+    def(name: str, fn: Callable[[int], int]) {
+        self.name = name
+        self.fn = fn
+    }
+    def call(x: int) -> int { return self.fn(x) }
+}
+
+
+def run_op(o: Op, v: int) -> int { return o.fn(v) }
+
+
+# list[Callable] append used the non-refcounting i64 path, so an appended fn was freed by the
+# caller's post-call decref (UAF -> SIGSEGV); bare fn literals now wrap into DragonClosure(fn, null).
+
+log: list[str] = []
+
+def emit_x() -> None { log.append("x") }
+def emit_y() -> None { log.append("y") }
+
+def register(fns: list[Callable[[], None]], f: Callable[[], None]) -> None {
+    fns.append(f)
+}
+
+
+class Field {
+    name: str
+    tag: int
+
+    def(name: str, tag: int) {
+        self.name = name
+        self.tag = tag
+    }
+}
+
+
+class Nest {
+    one: Field
+
+    def(f: Field) {
+        self.one = f
+    }
+}
+
+
+class SoleOwner {
+    own one: Field
+    by_id: dict[int, Field]
+
+    def(nm: str) {
+        self.one = Field(nm, 0)
+        self.by_id = {}
+        self.by_id[0] = Field(nm, 0)
+    }
+}
+
+
+class Holder {
+    by_id: dict[int, Field]
+    by_name: dict[str, Field]
+    by_ix: list[Field]
+
+    def(items: list[Field], by_id: dict[int, Field], by_name: dict[str, Field]) {
+        self.by_ix = items
+        self.by_id = by_id
+        self.by_name = by_name
+    }
+}
+
+
+def _build() -> Holder {
+    items: list[Field] = []
+    ids: dict[int, Field] = {}
+    names: dict[str, Field] = {}
+    i: int = 0
+    while i < 16 {
+        const nm: str = "field_" + str(i)
+        const f: Field = Field(nm, i)
+        items.append(f)
+        ids[i] = f
+        names[nm] = f
+        i = i + 1
+    }
+    return Holder(items, ids, names)
+}
+
+
+def via_int_dict(b: Holder, fid: int) -> str {
+    return b.by_id[fid].name
+}
+
+
+def via_str_dict(b: Holder, key: str) -> str {
+    return b.by_name[key].name
+}
+
+
+def via_list(b: Holder, ix: int) -> str {
+    return b.by_ix[ix].name
+}
+
+
+def via_nested_member(n: Nest) -> str {
+    return n.one.name
+}
+
+
+def via_int_member(b: Holder, fid: int) -> int {
+    return b.by_id[fid].tag
+}
+
+
+def via_bound_local(b: Holder, fid: int) -> str {
+    const f: Field = b.by_id[fid]
+    const nm: str = f.name
+    return nm
+}
+
+
+def from_own_param_member(own s: SoleOwner) -> str {
+    return s.one.name
+}
+
+
+def from_own_param_dict(own s: SoleOwner) -> str {
+    return s.by_id[0].name
+}
+
+
+def after_del_of_receiver(tag: int) -> str {
+    h: SoleOwner = SoleOwner("deleted_" + str(tag))
+    const nm: str = h.one.name
+    del h
+    return nm
+}
+
+
+class ChainedCallTests(TestCase) {
+    def test_immediate_chained_call() {
+        self.assertEqual(make_adder(5)(10), 15)
+    }
+
+    def test_immediate_chained_multi_param() {
+        self.assertEqual(make_scaler(2, 3)(10), 23)
+    }
+
+    def test_chained_equals_stored() {
+        g: Callable[[int], int] = make_adder(7)
+        self.assertEqual(make_adder(7)(3), g(3))
+    }
+
+    def test_nested_chained_call() {
+        self.assertEqual(make_adder(make_adder(1)(2))(10), 13)
+    }
+
+    def test_call_closure_from_list() {
+        fs: list[Callable[[int], int]] = [make_adder(10), make_adder(20)]
+        self.assertEqual(fs[0](5), 15)
+        self.assertEqual(fs[1](5), 25)
+    }
+
+    def test_call_bare_fn_from_list() {
+        fs: list[Callable[[int], int]] = [inc, dec]
+        self.assertEqual(fs[0](10), 11)
+        self.assertEqual(fs[1](10), 9)
+    }
+}
+
+
+class CallableFieldShareTests(TestCase) {
+    def test_bare_fn_field_shared_to_fire() {
+        const o: Op = Op("inc", inc)
+        t: Task[int] = fire run_op(o, 41)
+        const r: int = await t
+        self.assertEqual(r, 42)
+        self.assertEqual(o.fn(7), 8)
+        self.assertEqual(o.name, "inc")
+    }
+
+    def test_closure_field_shared_to_fire() {
+        const o: Op = Op("add5", mk(5))
+        t: Task[int] = fire run_op(o, 10)
+        const r: int = await t
+        self.assertEqual(r, 15)
+        self.assertEqual(o.fn(100), 105)
+    }
+
+    def test_many_bare_fn_ops_shared() {
+        const a: Op = Op("inc", inc)
+        const b: Op = Op("dbl", dbl)
+        t1: Task[int] = fire run_op(a, 10)
+        t2: Task[int] = fire run_op(b, 10)
+        const r1: int = await t1
+        const r2: int = await t2
+        self.assertEqual(r1, 11)
+        self.assertEqual(r2, 20)
+    }
+}
+
+
+class CallableListTests(TestCase) {
+    def test_bare_fn_literal_then_index_call() {
+        fns: list[Callable[[], None]] = []
+        fns.append(emit_x)
+        fns[0]()
+        self.assertEqual(log[len(log) - 1], "x")
+    }
+
+    def test_fn_through_param_then_index_call() {
+        fns: list[Callable[[], None]] = []
+        register(fns, emit_y)
+        fns[0]()
+        self.assertEqual(log[len(log) - 1], "y")
+    }
+
+    def test_capturing_closure_in_list() {
+        fns: list[Callable[[], None]] = []
+        tag: str = "z"
+        fns.append(lambda () -> None { log.append(tag) })
+        fns[0]()
+        self.assertEqual(log[len(log) - 1], "z")
+    }
+
+    def test_repeated_index_calls_stable() {
+        fns: list[Callable[[], None]] = []
+        register(fns, emit_x)
+        i: int = 0
+        while i < 5 {
+            fns[0]()
+            i = i + 1
+        }
+        self.assertEqual(log[len(log) - 1], "x")
+        self.assertEqual(log[len(log) - 3], "x")
+    }
+}
+
+
+class QualifiedChainTests(TestCase) {
+    """Module-qualified call chaining.
+
+    `mod.func(args).method()` where the module function's declared return type is a
+    class must carry that return type so the chained method dispatches. Exercised
+    through a real stdlib module: hashlib.sha256(bytes) returns a Hash, and the
+    chained .hexdigest() / .digest_size() must resolve. Regression for the bug where
+    the qualified call's return type was dropped and the chain returned 0.
+    """
+
+    def test_qualified_chain_to_str_method() {
+        self.assertEqual(hashlib.sha256(b"abc").hexdigest(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
+    def test_qualified_chain_to_int_method() {
+        self.assertEqual(hashlib.sha256(b"abc").digest_size(), 32)
+    }
+}
+
+
+class ChainedIntDictReturnTest(TestCase) {
+    def test_int_keyed_dict_chain_survives_repeated_returns() -> None {
+        const b: Holder = _build()
+        r: int = 0
+        while r < 4 {
+            i: int = 0
+            while i < 16 {
+                const got: str = via_int_dict(b, i)
+                self.assertEqual(got, "field_" + str(i))
+                i = i + 1
+            }
+            r = r + 1
+        }
+
+        seen: dict[str, int] = {}
+        j: int = 0
+        while j < 16 {
+            const key: str = via_int_dict(b, j)
+            seen[key] = j
+            j = j + 1
+        }
+        self.assertEqual(len(seen), 16)
+
+        m: int = 0
+        while m < 16 {
+            const want: str = "field_" + str(m)
+            self.assertTrue(want in seen)
+            m = m + 1
+        }
+    }
+}
+
+
+class ChainedStrDictReturnTest(TestCase) {
+    def test_str_keyed_dict_chain_survives_repeated_returns() -> None {
+        const b: Holder = _build()
+        seen: dict[str, int] = {}
+        r: int = 0
+        while r < 4 {
+            i: int = 0
+            while i < 16 {
+                const want: str = "field_" + str(i)
+                const got: str = via_str_dict(b, want)
+                self.assertEqual(got, want)
+                seen[got] = i
+                i = i + 1
+            }
+            r = r + 1
+        }
+        self.assertEqual(len(seen), 16)
+    }
+}
+
+
+class ChainedListReturnTest(TestCase) {
+    def test_list_chain_survives_repeated_returns() -> None {
+        const b: Holder = _build()
+        seen: dict[str, int] = {}
+        r: int = 0
+        while r < 4 {
+            i: int = 0
+            while i < 16 {
+                const got: str = via_list(b, i)
+                self.assertEqual(got, "field_" + str(i))
+                seen[got] = i
+                i = i + 1
+            }
+            r = r + 1
+        }
+        self.assertEqual(len(seen), 16)
+    }
+}
+
+
+class NestedMemberReturnTest(TestCase) {
+    def test_nested_member_chain_survives_repeated_returns() -> None {
+        const n: Nest = Nest(Field("only_" + str(1), 1))
+        seen: dict[str, int] = {}
+        i: int = 0
+        while i < 32 {
+            const got: str = via_nested_member(n)
+            self.assertEqual(got, "only_1")
+            seen[got] = i
+            i = i + 1
+        }
+        self.assertEqual(len(seen), 1)
+        self.assertTrue("only_1" in seen)
+    }
+}
+
+
+class ChainedControlsTest(TestCase) {
+    def test_int_chain_and_bound_local_stay_correct() -> None {
+        const b: Holder = _build()
+        i: int = 0
+        while i < 16 {
+            self.assertEqual(via_int_member(b, i), i)
+            i = i + 1
+        }
+
+        seen: dict[str, int] = {}
+        r: int = 0
+        while r < 4 {
+            j: int = 0
+            while j < 16 {
+                const got: str = via_bound_local(b, j)
+                self.assertEqual(got, "field_" + str(j))
+                seen[got] = j
+                j = j + 1
+            }
+            r = r + 1
+        }
+        self.assertEqual(len(seen), 16)
+    }
+}
+
+
+class OwnedReceiverReturnTest(TestCase) {
+    def test_own_param_member_chain_outlives_the_destroyed_receiver() -> None {
+        seen: dict[str, int] = {}
+        i: int = 0
+        while i < 8 {
+            a: SoleOwner = SoleOwner("owned_" + str(i))
+            const got: str = from_own_param_member(own a)
+            self.assertEqual(got, "owned_" + str(i))
+            seen[got] = i
+            i = i + 1
+        }
+        self.assertEqual(len(seen), 8)
+        self.assertTrue("owned_3" in seen)
+    }
+
+    def test_own_param_dict_chain_outlives_the_destroyed_receiver() -> None {
+        seen: dict[str, int] = {}
+        i: int = 0
+        while i < 8 {
+            b: SoleOwner = SoleOwner("downed_" + str(i))
+            const got: str = from_own_param_dict(own b)
+            self.assertEqual(got, "downed_" + str(i))
+            seen[got] = i
+            i = i + 1
+        }
+        self.assertEqual(len(seen), 8)
+        self.assertTrue("downed_5" in seen)
+    }
+
+    def test_a_deleted_receiver_leaves_the_returned_name_intact() -> None {
+        seen: dict[str, int] = {}
+        i: int = 0
+        while i < 8 {
+            const got: str = after_del_of_receiver(i)
+            self.assertEqual(got, "deleted_" + str(i))
+            seen[got] = i
+            i = i + 1
+        }
+        self.assertEqual(len(seen), 8)
+    }
+}
+
+
+main([ChainedCallTests(), CallableFieldShareTests(), CallableListTests(),
+      QualifiedChainTests(), ChainedIntDictReturnTest(), ChainedStrDictReturnTest(),
+      ChainedListReturnTest(), NestedMemberReturnTest(),
+      ChainedControlsTest(), OwnedReceiverReturnTest()])

@@ -1,0 +1,338 @@
+from unittest import TestCase, main
+from http import get, post, delete, Client, Response, HTTPStatusError
+from http.client import HTTPConnection, HTTPResponse
+from socket import TcpListener, TcpStream
+
+
+def _serve_once(lis: TcpListener, status_line: str, extra_headers: str, body: str) -> str {
+    conn: TcpStream = lis.accept()
+    got: str = ""
+    while got.find("\r\n\r\n") < 0 {
+        const chunk: str = conn.recv(4096)
+        if len(chunk) == 0 {
+            break
+        }
+        got = got + chunk
+    }
+    content_len: int = _content_length_of(got)
+    while len(got) < got.find("\r\n\r\n") + 4 + content_len {
+        const more: str = conn.recv(4096)
+        if len(more) == 0 {
+            break
+        }
+        got = got + more
+    }
+    reply: str = status_line + "\r\nContent-Type: application/json\r\n" + extra_headers + "Connection: close\r\n\r\n" + body
+    conn.send(reply)
+    conn.close()
+    return got
+}
+
+
+def _content_length_of(head: str) -> int {
+    marker: str = "Content-Length: "
+    at: int = head.find(marker)
+    if at < 0 {
+        return 0
+    }
+    end: int = head.find("\r\n", at)
+    return int(head[at + len(marker):end])
+}
+
+
+def _serve_one(lis: TcpListener) -> str {
+    conn: TcpStream = lis.accept()
+    got: str = ""
+    while got.find("\r\n\r\nhello body") < 0 {
+        const chunk: str = conn.recv(2048)
+        if len(chunk) == 0 { break }
+        got = got + chunk
+    }
+    conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Tag: t1\r\n\r\n")
+    conn.send("part-one:")
+    conn.send("part-two")
+    conn.close()
+    return got
+}
+
+
+def _serve_chunked(lis: TcpListener) -> str {
+    conn: TcpStream = lis.accept()
+    got: str = ""
+    while got.find("\r\n\r\n") < 0 {
+        const chunk: str = conn.recv(2048)
+        if len(chunk) == 0 { break }
+        got = got + chunk
+    }
+    conn.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+    conn.send("15;chunk-ext=1\r\n{\"mfa_required\":true}\r\n")
+    conn.send("b\r\nhello ")
+    conn.send("world\r\n")
+    conn.send("0\r\nX-Trailer: yes\r\n\r\n")
+    conn.close()
+    return got
+}
+
+
+def _serve_bad_chunked(lis: TcpListener) -> str {
+    conn: TcpStream = lis.accept()
+    got: str = ""
+    while got.find("\r\n\r\n") < 0 {
+        const chunk: str = conn.recv(2048)
+        if len(chunk) == 0 { break }
+        got = got + chunk
+    }
+    conn.send("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    conn.send("zz\r\nnot a chunk\r\n0\r\n\r\n")
+    conn.close()
+    return got
+}
+
+
+class RequestApiTests(TestCase) {
+    """The requests-style http package root (get/post/Client/Response) end to end
+    over real loopback sockets: request assembly (params, headers, json/form
+    bodies), Response accessors (text, json(), header(), ok()), raise_for_status,
+    Client base_url + header merging, and async fan-out of two in-flight verbs."""
+
+    def test_get_assembles_params_and_headers() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19180)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "X-Tag: t9\r\n", "{\"who\": \"dragon\"}")
+        h: dict[str, str] = {"X-Client": "drtest"}
+        p: dict[str, str] = {"page": "2", "q": "fire"}
+        r: Response = await get("http://127.0.0.1:19180/users", headers=h, params=p)
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(r.ok())
+        self.assertEqual(r.header("x-tag"), "t9")
+        self.assertEqual(r.header("content-type"), "application/json")
+        self.assertEqual(r.text, "{\"who\": \"dragon\"}")
+        self.assertTrue(captured.startswith("GET /users?page=2&q=fire HTTP/1.1\r\n"))
+        self.assertTrue(captured.find("X-Client: drtest\r\n") >= 0)
+    }
+
+    def test_response_json_is_boxed_tier() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19181)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "{\"n\": 7, \"tag\": \"ok\"}")
+        r: Response = await get("http://127.0.0.1:19181/j")
+        await srv
+        lis.close()
+        decoded: dict[str, Any] = r.json()
+        self.assertEqual(decoded["tag"], "ok")
+        self.assertEqual(decoded["n"], 7)
+    }
+
+    def test_post_json_body_and_content_type() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19182)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 201 Created", "", "{}")
+        payload: dict[str, Any] = {"name": "Ada", "admin": True}
+        r: Response = await post("http://127.0.0.1:19182/users", json=payload)
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 201)
+        self.assertTrue(captured.startswith("POST /users HTTP/1.1\r\n"))
+        self.assertTrue(captured.find("Content-Type: application/json\r\n") >= 0)
+        self.assertTrue(captured.find("\"name\": \"Ada\"") >= 0)
+    }
+
+    def test_post_form_body() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19183)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "{}")
+        form: dict[str, str] = {"user": "ada lovelace", "role": "eng"}
+        r: Response = await post("http://127.0.0.1:19183/login", data=form)
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(captured.find("Content-Type: application/x-www-form-urlencoded\r\n") >= 0)
+        self.assertTrue(captured.find("user=ada+lovelace&role=eng") >= 0)
+    }
+
+    def test_raise_for_status_on_404() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19184)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 404 Not Found", "", "{\"error\": \"nope\"}")
+        r: Response = await get("http://127.0.0.1:19184/missing")
+        await srv
+        lis.close()
+        self.assertFalse(r.ok())
+        caught_status: int = 0
+        try {
+            r.raise_for_status()
+        } except HTTPStatusError as e {
+            caught_status = e.status
+        }
+        self.assertEqual(caught_status, 404)
+    }
+
+    def test_raise_for_status_passes_success_through() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19185)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "fine")
+        r: Response = (await get("http://127.0.0.1:19185/ok")).raise_for_status()
+        await srv
+        lis.close()
+        self.assertEqual(r.text, "fine")
+    }
+
+    def test_client_base_url_and_header_merge() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19186)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "[]")
+        base_headers: dict[str, str] = {"Authorization": "Bearer tok", "X-Base": "b"}
+        with Client("http://127.0.0.1:19186", headers=base_headers) as api {
+            call_headers: dict[str, str] = {"X-Base": "override"}
+            r: Response = await api.get("/v1/items", headers=call_headers)
+            self.assertEqual(r.status, 200)
+        }
+        captured: str = await srv
+        lis.close()
+        self.assertTrue(captured.startswith("GET /v1/items HTTP/1.1\r\n"))
+        self.assertTrue(captured.find("Authorization: Bearer tok\r\n") >= 0)
+        self.assertTrue(captured.find("X-Base: override\r\n") >= 0)
+        self.assertEqual(captured.find("X-Base: b\r\n"), -1)
+    }
+
+    def test_two_requests_in_flight() {
+        lis_a: TcpListener = TcpListener("127.0.0.1", 19187)
+        lis_a.bind()
+        lis_a.listen(1)
+        lis_b: TcpListener = TcpListener("127.0.0.1", 19188)
+        lis_b.bind()
+        lis_b.listen(1)
+        srv_a: Task[str] = fire _serve_once(lis_a, "HTTP/1.1 200 OK", "", "alpha")
+        srv_b: Task[str] = fire _serve_once(lis_b, "HTTP/1.1 200 OK", "", "beta")
+        ta: Task[Response] = get("http://127.0.0.1:19187/a")
+        tb: Task[Response] = get("http://127.0.0.1:19188/b")
+        ra: Response = await ta
+        rb: Response = await tb
+        await srv_a
+        await srv_b
+        lis_a.close()
+        lis_b.close()
+        self.assertEqual(ra.text, "alpha")
+        self.assertEqual(rb.text, "beta")
+    }
+
+    def test_delete_verb_line() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19189)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 204 No Content", "", "")
+        r: Response = await delete("http://127.0.0.1:19189/users/9")
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 204)
+        self.assertTrue(captured.startswith("DELETE /users/9 HTTP/1.1\r\n"))
+    }
+}
+
+
+class ClientRoundTripTests(TestCase) {
+    """http.client round-trip over a real loopback socket.
+
+    The request-head builder and response-head parser used to be triplicated
+    across HTTPConnection/HTTPSConnection/the bytes path, and getresponse()
+    re-copied the whole buffer per received chunk. This exercises the shared
+    helpers end to end through the public API: the served request bytes pin the
+    request shape, and a multi-send response body pins the chunk-joining read.
+
+    Also pins Transfer-Encoding: chunked decoding (ChunkedResponseFramingTests).
+    Before the fix, getresponse() split on the first CRLFCRLF and returned
+    everything after it as the literal body, so the wire framing leaked into read():
+
+        resp.read()   # '15\r\n{"mfa_required":true}\r\n0\r\n\r\n'  before
+        resp.read()   # '{"mfa_required":true}'                     after
+
+    The chunked server here splits a chunk across sends (reassembly), uses a
+    chunk extension and a trailer field (both must be tolerated), and a second
+    malformed server pins the loud ValueError on garbage framing.
+    """
+
+    def test_request_and_response() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19190)
+        lis.bind()
+        lis.listen(2)
+        t: Task[str] = fire _serve_one(lis)
+
+        conn: HTTPConnection = HTTPConnection("127.0.0.1", 19190)
+        headers: dict[str, str] = {}
+        headers["X-Client"] = "dr-test"
+        conn.request("POST", "/echo", "hello body", headers)
+        const resp: HTTPResponse = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.reason, "OK")
+        self.assertEqual(resp.getheader("x-tag"), "t1")
+        self.assertEqual(resp.read(), "part-one:part-two")
+        conn.close()
+
+        const req: str = t.join()
+        self.assertIn("POST /echo HTTP/1.1\r\n", req)
+        self.assertIn("Host: 127.0.0.1:19190\r\n", req)
+        self.assertIn("Connection: close\r\n", req)
+        self.assertIn("Content-Length: 10\r\n", req)
+        self.assertIn("X-Client: dr-test\r\n", req)
+        self.assertIn("\r\n\r\nhello body", req)
+        lis.close()
+    }
+}
+
+
+class ChunkedResponseFramingTests(TestCase) {
+    def test_chunked_body_decoded() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19191)
+        lis.bind()
+        lis.listen(2)
+        t: Task[str] = fire _serve_chunked(lis)
+
+        conn: HTTPConnection = HTTPConnection("127.0.0.1", 19191)
+        headers: dict[str, str] = {}
+        conn.request("GET", "/login", "", headers)
+        const resp: HTTPResponse = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("transfer-encoding"), "chunked")
+        self.assertEqual(resp.read(), "{\"mfa_required\":true}hello world")
+        conn.close()
+
+        const req: str = t.join()
+        self.assertIn("GET /login HTTP/1.1\r\n", req)
+        lis.close()
+    }
+
+    def test_malformed_chunk_size_raises() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19192)
+        lis.bind()
+        lis.listen(2)
+        t: Task[str] = fire _serve_bad_chunked(lis)
+
+        conn: HTTPConnection = HTTPConnection("127.0.0.1", 19192)
+        headers: dict[str, str] = {}
+        conn.request("GET", "/", "", headers)
+        raised: bool = False
+        try {
+            const resp: HTTPResponse = conn.getresponse()
+            print(resp.status)
+        } except ValueError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        conn.close()
+        const req: str = t.join()
+        self.assertIn("GET / HTTP/1.1\r\n", req)
+        lis.close()
+    }
+}
+
+
+main([RequestApiTests(), ClientRoundTripTests(), ChunkedResponseFramingTests()])

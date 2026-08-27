@@ -1,0 +1,156 @@
+from unittest import TestCase, main
+
+const TWO_POW_61: int = 2305843009213693952
+const TWO_POW_62: int = 4611686018427387904
+const TWO_POW_60_PLUS_2: int = 1152921504606846978
+const MIB_128: int = 134217728
+const ONE_MI: int = 1048576
+
+
+def wrapping_count() -> int {
+    base: int = TWO_POW_61
+    return base + 2
+}
+
+
+class StrAllocBounds(TestCase) {
+    def test_join_alloc_failure_raises() {
+        big: str = "x" * MIB_128
+        parts: list[str] = [big] * ONE_MI
+        caught: bool = False
+        try {
+            j: str = "".join(parts)
+            print(len(j))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_join_unchanged() {
+        self.assertEqual("-".join(["a", "b", "c"]), "a-b-c")
+        self.assertEqual("".join(["ab", "cd"]), "abcd")
+        e: list[str] = []
+        self.assertEqual("".join(e), "")
+        self.assertEqual(",".join(["café", "naïve"]), "café,naïve")
+    }
+}
+
+
+class BytesAllocBounds(TestCase) {
+    def test_repeat_alloc_failure_raises() {
+        caught: bool = False
+        try {
+            big: bytes = b"a" * TWO_POW_62
+            print(len(big))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_repeat_size_overflow_raises() {
+        caught: bool = False
+        try {
+            big: bytes = b"ab" * TWO_POW_62
+            print(len(big))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_repeat_concat_unchanged() {
+        r: bytes = b"ab" * 3
+        self.assertEqual(r.hex(), "616261626162")
+        self.assertEqual(len(b"" * 5), 0)
+        self.assertEqual(len(b"ab" * 0), 0)
+        c: bytes = b"ab" + b"cd"
+        self.assertEqual(c.hex(), "61626364")
+        self.assertEqual(len(b"" + b""), 0)
+    }
+    def test_replace_alloc_failure_raises() {
+        a: bytes = b"a" * ONE_MI
+        big: bytes = b"x" * MIB_128
+        caught: bool = False
+        try {
+            r: bytes = a.replace(b"a", big)
+            print(len(r))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_join_alloc_failure_raises() {
+        big: bytes = b"x" * MIB_128
+        parts: list[bytes] = [big] * ONE_MI
+        caught: bool = False
+        try {
+            r: bytes = b"".join(parts)
+            print(len(r))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_replace_join_unchanged() {
+        r: bytes = b"abcabc".replace(b"b", b"xx")
+        self.assertEqual(r.hex(), "6178786361787863")
+        s: bytes = b"abc".replace(b"b", b"")
+        self.assertEqual(s.hex(), "6163")
+        j: bytes = b"-".join([b"ab", b"cd"])
+        self.assertEqual(j.hex(), "61622d6364")
+    }
+}
+
+
+class ListAllocOverflowTests(TestCase) {
+    def test_repeat_wrapping_count_raises() {
+        def run() -> None {
+            xs: list[int] = [1] * wrapping_count()
+        }
+        self.assertRaises(MemoryError, run)
+    }
+
+    def test_repeat_box_wrapping_count_raises() {
+        def run() -> None {
+            src: list[Any] = [1]
+            xs: list[Any] = src * TWO_POW_60_PLUS_2
+        }
+        self.assertRaises(MemoryError, run)
+    }
+
+    def test_normal_repeat_still_works() {
+        xs: list[int] = [1, 2] * 3
+        self.assertEqual(len(xs), 6)
+        self.assertEqual(xs[0], 1)
+        self.assertEqual(xs[5], 2)
+    }
+
+    def test_zero_and_negative_repeat_still_empty() {
+        self.assertEqual(len([1, 2] * 0), 0)
+        self.assertEqual(len([1, 2] * -3), 0)
+    }
+
+    def test_bool_repeat_still_works() {
+        flags: list[bool] = [True] * 5
+        self.assertEqual(len(flags), 5)
+        self.assertTrue(flags[4])
+    }
+
+    def test_str_element_repeat_still_increfs() {
+        xs: list[str] = ["ab"] * 3
+        self.assertEqual(len(xs), 3)
+        self.assertEqual(xs[2], "ab")
+    }
+
+    def test_process_survives_trapped_repeat() {
+        def run() -> None {
+            xs: list[int] = [1] * wrapping_count()
+        }
+        self.assertRaises(MemoryError, run)
+        after: list[int] = [7] * 4
+        self.assertEqual(len(after), 4)
+        self.assertEqual(after[3], 7)
+    }
+}
+
+
+main([StrAllocBounds(), BytesAllocBounds(), ListAllocOverflowTests()])

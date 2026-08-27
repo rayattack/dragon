@@ -1,0 +1,468 @@
+from unittest import TestCase, main
+
+
+def _min_empty_int() {
+    xs: list[int] = []
+    min(xs)
+}
+
+
+def _max_empty_float() {
+    xs: list[float] = []
+    max(xs)
+}
+
+
+def _min_empty_str() {
+    xs: list[str] = []
+    min(xs)
+}
+
+
+class Point(TypedDict) {
+    id: int
+    name: str
+    score: float
+}
+
+
+class ListComparisonTests(TestCase) {
+    def test_basic_ordering() {
+        a: list[int] = [1, 2]
+        b: list[int] = [1, 3]
+        self.assertTrue(a < b)
+        self.assertFalse(b < a)
+        self.assertTrue(b > a)
+        self.assertTrue(a <= b)
+        self.assertFalse(a >= b)
+    }
+
+    def test_equal_lists() {
+        a: list[int] = [1, 2, 3]
+        b: list[int] = [1, 2, 3]
+        self.assertTrue(a <= b)
+        self.assertTrue(a >= b)
+        self.assertFalse(a < b)
+        self.assertFalse(a > b)
+    }
+
+    def test_prefix_is_less() {
+        a: list[int] = [1, 2]
+        b: list[int] = [1, 2, 3]
+        self.assertTrue(a < b)
+        self.assertTrue(b > a)
+    }
+
+    def test_first_differing_element_decides() {
+        a: list[int] = [5]
+        b: list[int] = [1, 9]
+        self.assertFalse(a < b)
+        self.assertTrue(a > b)
+    }
+
+    def test_str_lists() {
+        a: list[str] = ["a", "b"]
+        b: list[str] = ["a", "c"]
+        self.assertTrue(a < b)
+    }
+
+    def test_float_lists() {
+        a: list[float] = [1.5, 2.0]
+        b: list[float] = [1.5, 2.5]
+        self.assertTrue(a < b)
+    }
+
+    def test_nested_lists() {
+        a: list[list[int]] = [[1, 2], [3]]
+        b: list[list[int]] = [[1, 2], [4]]
+        self.assertTrue(a < b)
+    }
+
+    def test_chained_ordering() {
+        a: list[int] = [1]
+        b: list[int] = [2]
+        c: list[int] = [3]
+        self.assertTrue(a < b < c)
+        x: list[int] = [5]
+        self.assertFalse(x < b < c)
+    }
+
+    def test_any_boxed_lists() {
+        x: Any = [1, 2]
+        y: Any = [1, 3]
+        self.assertTrue(x < y)
+        self.assertFalse(y < x)
+    }
+
+    def test_incomparable_elements_raise() {
+        a: list[Any] = [1]
+        b: list[Any] = ["a"]
+        raised: bool = False
+        try {
+            print(a < b)
+        } except TypeError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class ListConcatSortExtendTests(TestCase) {
+    """List concatenation, augmented concatenation, reverse-aware sorting, and
+    extend() across element types.
+
+    #4 `sorted(xs, reverse=True)` / `xs.sort(reverse=True)` silently ignored the
+       flag and returned ascending order. Now a reverse-aware runtime sort
+       (dragon_list_sort_ex / dragon_sorted_ex) honors it - and because the sort is
+       stable in either direction, a runtime `reverse=<bool>` works too.
+    #5 `xs.extend(ys)` failed type-check: extend was registered taking the element
+       type T instead of list[T]. Now it takes list[T].
+    #6 `list + list` errored ("unsupported operand types") and `list += list`
+       crashed the LLVM verifier ("add ptr"). Now `+` builds a fresh list via
+       dragon_list_concat (copy + extend) and `+=` does Python's in-place extend.
+
+    All three are exercised across int / str / float (the three monomorphic list
+    variants - DragonList / DragonListPtr / DragonListF64) and homogeneous
+    list[Any] (the box variant), since each variant has a distinct runtime layout.
+    """
+
+    def test_sorted_reverse_int() {
+        self.assertEqual(sorted([3, 1, 2], reverse=True), [3, 2, 1])
+        self.assertEqual(sorted([3, 1, 2], reverse=False), [1, 2, 3])
+        self.assertEqual(sorted([3, 1, 2]), [1, 2, 3])
+    }
+
+    def test_sorted_reverse_str() {
+        self.assertEqual(sorted(["b", "a", "c"], reverse=True), ["c", "b", "a"])
+    }
+
+    def test_sorted_reverse_float() {
+        self.assertEqual(sorted([3.5, 1.5, 2.5], reverse=True), [3.5, 2.5, 1.5])
+    }
+
+    def test_sorted_reverse_dynamic_flag() {
+        flag: bool = True
+        self.assertEqual(sorted([3, 1, 2], reverse=flag), [3, 2, 1])
+        flag = False
+        self.assertEqual(sorted([3, 1, 2], reverse=flag), [1, 2, 3])
+    }
+
+    def test_sorted_does_not_mutate_input() {
+        xs: list[int] = [3, 1, 2]
+        sorted(xs, reverse=True)
+        self.assertEqual(xs, [3, 1, 2])
+    }
+
+    def test_list_sort_reverse_inplace() {
+        nums: list[int] = [5, 2, 8, 1]
+        nums.sort(reverse=True)
+        self.assertEqual(nums, [8, 5, 2, 1])
+        nums.sort()
+        self.assertEqual(nums, [1, 2, 5, 8])
+    }
+
+    def test_extend_int() {
+        xs: list[int] = [1, 2]
+        xs.extend([3, 4])
+        self.assertEqual(xs, [1, 2, 3, 4])
+    }
+
+    def test_extend_str() {
+        ss: list[str] = ["a"]
+        ss.extend(["b", "c"])
+        self.assertEqual(ss, ["a", "b", "c"])
+    }
+
+    def test_extend_float() {
+        fs: list[float] = [1.0]
+        fs.extend([2.0, 3.0])
+        self.assertEqual(fs, [1.0, 2.0, 3.0])
+    }
+
+    def test_extend_variable() {
+        xs: list[int] = [1]
+        ys: list[int] = [2, 3]
+        xs.extend(ys)
+        self.assertEqual(xs, [1, 2, 3])
+    }
+
+    def test_concat_int() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        self.assertEqual(a + b, [1, 2, 3, 4])
+    }
+
+    def test_concat_str() {
+        self.assertEqual(["x"] + ["y", "z"], ["x", "y", "z"])
+    }
+
+    def test_concat_float() {
+        self.assertEqual([1.0] + [2.0], [1.0, 2.0])
+    }
+
+    def test_concat_chained() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        self.assertEqual(a + b + [5], [1, 2, 3, 4, 5])
+    }
+
+    def test_concat_empty_adoption() {
+        self.assertEqual([] + [7], [7])
+        self.assertEqual([8] + [], [8])
+    }
+
+    def test_concat_does_not_mutate_operands() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        c: list[int] = a + b
+        self.assertEqual(a, [1, 2])
+        self.assertEqual(b, [3, 4])
+        self.assertEqual(c, [1, 2, 3, 4])
+    }
+
+    def test_augconcat_variable() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        a += b
+        self.assertEqual(a, [1, 2, 3, 4])
+    }
+
+    def test_augconcat_literal() {
+        a: list[int] = [1, 2]
+        a += [9]
+        self.assertEqual(a, [1, 2, 9])
+    }
+
+    def test_augconcat_str() {
+        ss: list[str] = ["a"]
+        ss += ["b", "c"]
+        self.assertEqual(ss, ["a", "b", "c"])
+    }
+
+    def test_any_concat() {
+        a: list[Any] = [1, "two", 3.0]
+        b: list[Any] = [True, "four"]
+        c: list[Any] = a + b
+        self.assertEqual(len(c), 5)
+    }
+
+    def test_any_augconcat_and_extend() {
+        a: list[Any] = [1, "two"]
+        x: list[Any] = [100, "x"]
+        a.extend(x)
+        a += [99]
+        self.assertEqual(len(a), 5)
+    }
+}
+
+
+class MinMaxSumTypedTests(TestCase) {
+    def test_sum_float() {
+        self.assertAlmostEqual(sum([1.5, 2.5]), 4.0)
+        self.assertAlmostEqual(sum([0.5, 0.25, -0.75]), 0.0)
+    }
+
+    def test_min_max_float() {
+        self.assertAlmostEqual(min([3.0, 1.5, 2.0]), 1.5)
+        self.assertAlmostEqual(max([-1.5, -2.5]), -1.5)
+        self.assertAlmostEqual(min([-0.5, 0.25]), -0.5)
+    }
+
+    def test_min_max_str() {
+        self.assertEqual(min(["banana", "apple", "cherry"]), "apple")
+        self.assertEqual(max(["banana", "apple", "cherry"]), "cherry")
+        self.assertEqual(min(["b", "a", "c"]) + max(["b", "a", "c"]), "ac")
+    }
+
+    def test_int_paths_unchanged() {
+        self.assertEqual(sum([1, 2, 3]), 6)
+        self.assertEqual(min([3, 1, 2]), 1)
+        self.assertEqual(max([3, 1, 2]), 3)
+        xs: list[int] = []
+        self.assertEqual(sum(xs), 0)
+    }
+
+    def test_empty_raises() {
+        self.assertRaises(ValueError, _min_empty_int)
+        self.assertRaises(ValueError, _max_empty_float)
+        self.assertRaises(ValueError, _min_empty_str)
+    }
+}
+
+
+class SortedLargeTests(TestCase) {
+    def test_sorted_large_int() {
+        xs: list[int] = []
+        i: int = 0
+        while i < 5000 {
+            xs.append((i * 7919) % 1000)
+            i = i + 1
+        }
+        const ys: list[int] = sorted(xs)
+        self.assertEqual(len(ys), 5000)
+        self.assertEqual(ys[0], 0)
+        self.assertEqual(ys[4999], 999)
+        j: int = 1
+        ordered: bool = true
+        while j < 5000 {
+            if ys[j - 1] > ys[j] { ordered = false }
+            j = j + 1
+        }
+        self.assertTrue(ordered)
+    }
+
+    def test_sorted_float_and_str() {
+        const fs: list[float] = sorted([2.5, -1.5, 0.0, -1.5])
+        self.assertAlmostEqual(fs[0], -1.5)
+        self.assertAlmostEqual(fs[1], -1.5)
+        self.assertAlmostEqual(fs[3], 2.5)
+        const ss: list[str] = sorted(["b", "a", "c"])
+        self.assertEqual(ss[0], "a")
+        self.assertEqual(ss[2], "c")
+    }
+
+    def test_sort_reverse_large() {
+        xs: list[int] = []
+        i: int = 0
+        while i < 3000 {
+            xs.append((i * 31) % 500)
+            i = i + 1
+        }
+        xs.sort(reverse=true)
+        j: int = 1
+        ordered: bool = true
+        while j < 3000 {
+            if xs[j - 1] < xs[j] { ordered = false }
+            j = j + 1
+        }
+        self.assertTrue(ordered)
+    }
+}
+
+
+class TupleBuiltinType(TestCase) {
+    """tuple([...]) from a list literal is typed as a concrete tuple, not Any.
+
+    Regression: the tuple() builtin call fell through the checker's builtin
+    return-type block to Unknown, so `print(tuple([1, 2]))` rendered blank (print
+    dispatches on the static type and Unknown is not Tuple kind) and a wrong-arity
+    binding silently type-checked. The checker now infers exact arity from a list
+    literal, and bare `tuple` still accepts any tuple.
+    """
+
+    def test_exact_arity_binding() {
+        const t: tuple[int, int] = tuple([1, 2])
+        self.assertEqual(t[0], 1)
+        self.assertEqual(t[1], 2)
+    }
+
+    def test_str_of_tuple_builtin() {
+        self.assertEqual(str(tuple([1, 2])), "(1, 2)")
+    }
+
+    def test_bare_tuple_accepts_any_arity() {
+        const a: tuple = tuple([1, 2, 3])
+        const b: tuple = tuple(["x", "y"])
+        self.assertEqual(len(a), 3)
+        self.assertEqual(len(b), 2)
+    }
+}
+
+
+class CollectionAccessTests(TestCase) {
+    """Dot-access on a list-subscript result.
+
+    `lst[i].key` where lst is a list[dict[...]] or list[TypedDict] must route to a
+    dict get (Dragon dicts and TypedDicts both support `d.key` dot-access), not the
+    string path. Regression for the bug where the element's dict/TypedDict type was
+    not tracked through `list[T][i]`, so `lst[0].id` emitted dragon_str_index and
+    mis-read the element as a string.
+    """
+
+    def test_list_typeddict_subscript_dot() {
+        lst: list[Point] = [
+            Point({id: 1, name: "a", score: 2.5}),
+            Point({id: 2, name: "b", score: 9.0}),
+        ]
+        self.assertEqual(lst[0].id, 1)
+        self.assertEqual(lst[0].name, "a")
+        self.assertAlmostEqual(lst[0].score, 2.5)
+        self.assertEqual(lst[1].id, 2)
+        self.assertEqual(lst[1].name, "b")
+    }
+
+    def test_list_dict_subscript_dot() {
+        ds: list[dict[str, int]] = [{"x": 10}, {"x": 20}]
+        self.assertEqual(ds[0].x, 10)
+        self.assertEqual(ds[1].x, 20)
+    }
+}
+
+
+class ContainerRepr(TestCase) {
+    """Regression tests for container display and dict comprehensions.
+
+    Covers the fixes for:
+      - f-string / str() of a container rendered empty (it was fed to str_concat as
+        if the container pointer were a string).
+      - dict comprehension used the loop variable's NAME as a literal key
+        (`{k: v for k in xs}` produced `{'k': v}`); int-keyed comprehensions also
+        failed to compile.
+    """
+
+    def test_list_repr() {
+        const xs: list[int] = [1, 2, 3]
+        self.assertEqual(str(xs), "[1, 2, 3]")
+        self.assertEqual(f"{xs}", "[1, 2, 3]")
+    }
+
+    def test_str_list_quotes_elements() {
+        const ss: list[str] = ["a", "b"]
+        self.assertEqual(str(ss), "['a', 'b']")
+    }
+
+    def test_dict_repr() {
+        const d: dict[str, int] = {"x": 1, "y": 2}
+        self.assertEqual(f"{d}", "{'x': 1, 'y': 2}")
+    }
+
+    def test_tuple_repr_uses_tags() {
+        const t: tuple[int, str] = (5, "hi")
+        self.assertEqual(f"{t}", "(5, 'hi')")
+    }
+
+    def test_nested_list_repr() {
+        const n: list[list[int]] = [[1, 2], [3]]
+        self.assertEqual(str(n), "[[1, 2], [3]]")
+    }
+}
+
+
+class DictComprehension(TestCase) {
+    def test_str_key_uses_value_not_name() {
+        const d: dict[str, int] = {k: len(k) for k in ["a", "bb", "ccc"]}
+        self.assertEqual(len(d), 3)
+        self.assertEqual(d["a"], 1)
+        self.assertEqual(d["bb"], 2)
+        self.assertEqual(d["ccc"], 3)
+    }
+
+    def test_int_keys() {
+        const c: dict[int, int] = {n: n * n for n in [1, 2, 3]}
+        self.assertEqual(len(c), 3)
+        self.assertEqual(c[2], 4)
+        self.assertEqual(c[3], 9)
+    }
+
+    def test_expression_key() {
+        const d: dict[str, int] = {k + "!": 1 for k in ["p", "q"]}
+        self.assertEqual(d["p!"], 1)
+        self.assertEqual(d["q!"], 1)
+    }
+}
+
+
+main([ListComparisonTests(), ListConcatSortExtendTests(), MinMaxSumTypedTests(),
+      SortedLargeTests(), TupleBuiltinType(), CollectionAccessTests(),
+      ContainerRepr(), DictComprehension()])

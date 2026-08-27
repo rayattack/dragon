@@ -27,11 +27,14 @@ class DequeFullTests(TestCase) {
         self.assertEqual(len(d), 3)
         self.assertEqual(d.popleft(), 0)
         self.assertEqual(d.pop(), 2)
+        self.assertEqual(len(d), 1)
     }
 
     def test_repr_int() {
         d: deque[int] = deque([1, 2, 3])
         self.assertEqual(str(d), "deque([1, 2, 3])")
+        self.assertEqual(d.popleft(), 1)
+        self.assertEqual(d.pop(), 3)
     }
 
     def test_repr_str_and_fstring() {

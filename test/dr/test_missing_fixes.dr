@@ -139,14 +139,6 @@ class Isinstance(TestCase) {
         const a: Animal = Animal()
         self.assertFalse(isinstance(a, Dog))
     }
-    def test_else_narrow() {
-        const v: int | str = "hi"
-        if isinstance(v, int) {
-            self.assertTrue(False)
-        } else {
-            self.assertEqual(v.upper(), "HI")
-        }
-    }
     def test_is_none_narrow() {
         const r: int | None = 5
         if r is None {
@@ -241,35 +233,6 @@ class UnionAlias(TestCase) {
 }
 
 
-class CatchableBuiltinErrors(TestCase) {
-    """builtin runtime errors are catchable (route through setjmp, not exit)."""
-    def test_zero_division() {
-        const ran: list[str] = []
-        try { const x: int = 10 // 0 } except ZeroDivisionError { ran.append("div") }
-        try { const y: int = 5 % 0 } except ZeroDivisionError { ran.append("mod") }
-        self.assertEqual(ran, ["div", "mod"])
-    }
-    def test_index_error() {
-        const xs: list[int] = [1, 2, 3]
-        const ran: list[str] = []
-        try { const x: int = xs[99] } except IndexError { ran.append("idx") }
-        self.assertEqual(ran, ["idx"])
-    }
-    def test_key_error() {
-        const d: dict[str, int] = {"a": 1}
-        const ran: list[str] = []
-        try { const x: int = d["missing"] } except KeyError { ran.append("key") }
-        self.assertEqual(ran, ["key"])
-    }
-    def test_base_class_catch() {
-        const d: dict[str, int] = {"a": 1}
-        const ran: list[str] = []
-        try { const x: int = d["nope"] } except Exception { ran.append("base") }
-        self.assertEqual(ran, ["base"])
-    }
-}
-
-
 class GlobalUnion(TestCase) {
     def test_global_reassign() {
         global g
@@ -286,4 +249,4 @@ class GlobalUnion(TestCase) {
 
 main([FloatRepr(), FormatSpecs(), FStringEscapes(), StringMethods(), Builtins(),
       Isinstance(), ListConversions(), DictAndEnumerate(), Exceptions(),
-      UnionAlias(), CatchableBuiltinErrors(), GlobalUnion()])
+      UnionAlias(), GlobalUnion()])

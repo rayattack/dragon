@@ -1,0 +1,406 @@
+from unittest import TestCase, main
+
+
+const HOST: str, PORT: int = ("h" + str(1), 8080)
+const LO: int, HI: int = (10, 99)
+
+
+def read_host() -> str {
+    return HOST
+}
+
+
+def read_span() -> int {
+    return HI - LO
+}
+
+
+class StrBuf {
+    def() {
+        self.s: str = ""
+    }
+    def add(x: str) {
+        self.s += x
+    }
+}
+
+class ByteBuf {
+    def() {
+        self.data: bytes = bytes()
+    }
+    def update(more: bytes) {
+        self.data += more
+    }
+}
+
+class IntKeyedDictAug(TestCase) {
+    """Augmented assignment to subscript and attribute targets.
+
+    Regression for the silent-no-op bug: `visit(AugAssignStmt)` only fully handled
+    NameExpr targets and a slice of dict/list element targets, so the rest of
+    `d[k] OP= v`, `lst[i] OP= v`, and `obj.field OP= v` silently did nothing (a
+    wrong-answer bug - no error, value unchanged). Also covers the float `//`/`%`
+    base operators, which previously crashed the compiler (ICmp on f64 operands).
+
+    Cases here were each reproduced as no-ops before the fix; the working controls
+    (str-keyed int dict, list[int], instance int field) guard against regressions.
+    """
+
+    def test_int_key_int_value_all_ops() {
+        d: dict[int, int] = {5: 100}
+        d[5] += 10
+        self.assertEqual(d[5], 110)
+        d[5] -= 30
+        self.assertEqual(d[5], 80)
+        d[5] *= 2
+        self.assertEqual(d[5], 160)
+        d[5] //= 3
+        self.assertEqual(d[5], 53)
+        d[5] %= 10
+        self.assertEqual(d[5], 3)
+        d[5] <<= 4
+        self.assertEqual(d[5], 48)
+    }
+
+    def test_int_key_float_value() {
+        d: dict[int, float] = {1: 1.5}
+        d[1] += 2.0
+        self.assertAlmostEqual(d[1], 3.5)
+        d[1] /= 2.0
+        self.assertAlmostEqual(d[1], 1.75)
+    }
+
+    def test_int_key_str_value_concat() {
+        d: dict[int, str] = {1: "a"}
+        d[1] += "bc"
+        self.assertEqual(d[1], "abc")
+    }
+}
+
+class StrKeyedDictAug(TestCase) {
+    def test_str_key_int_control() {
+        d: dict[str, int] = {"a": 10}
+        d["a"] += 5
+        self.assertEqual(d["a"], 15)
+    }
+
+    def test_str_key_str_concat() {
+        d: dict[str, str] = {"k": "x"}
+        d["k"] += "y"
+        d["k"] += "z"
+        self.assertEqual(d["k"], "xyz")
+    }
+
+    def test_str_key_bytes_concat() {
+        d: dict[str, bytes] = {"k": bytes([1])}
+        d["k"] += bytes([2, 3])
+        self.assertEqual(len(d["k"]), 3)
+    }
+
+    def test_str_key_float_floor_mod() {
+        d: dict[str, float] = {"a": 7.0}
+        d["a"] //= 2.0
+        self.assertAlmostEqual(d["a"], 3.0)
+        d["a"] = 7.0
+        d["a"] %= 2.0
+        self.assertAlmostEqual(d["a"], 1.0)
+    }
+}
+
+class ListElementAug(TestCase) {
+    def test_int_control_and_floordiv_mod() {
+        l: list[int] = [100]
+        l[0] += 5
+        self.assertEqual(l[0], 105)
+        l[0] //= 4
+        self.assertEqual(l[0], 26)
+        l[0] %= 5
+        self.assertEqual(l[0], 1)
+    }
+
+    def test_float_floor_mod() {
+        l: list[float] = [7.5]
+        l[0] //= 2.0
+        self.assertAlmostEqual(l[0], 3.0)
+    }
+
+    def test_str_concat() {
+        l: list[str] = ["x"]
+        l[0] += "y"
+        self.assertEqual(l[0], "xy")
+    }
+
+    def test_bytes_concat() {
+        l: list[bytes] = [bytes([1])]
+        l[0] += bytes([2, 3])
+        self.assertEqual(len(l[0]), 3)
+    }
+}
+
+class CounterStatic {
+    static total: int = 0
+    static sum: float = 0.0
+}
+
+class FieldAug(TestCase) {
+    def test_static_int_field() {
+        CounterStatic.total += 3
+        CounterStatic.total += 4
+        self.assertEqual(CounterStatic.total, 7)
+    }
+
+    def test_static_float_field() {
+        CounterStatic.sum += 2.5
+        CounterStatic.sum *= 4.0
+        self.assertAlmostEqual(CounterStatic.sum, 10.0)
+    }
+
+    def test_instance_str_field_concat() {
+        b: StrBuf = StrBuf()
+        b.add("ab")
+        b.add("cd")
+        self.assertEqual(b.s, "abcd")
+    }
+
+    def test_instance_bytes_field_concat() {
+        h: ByteBuf = ByteBuf()
+        h.update(bytes([1, 2]))
+        h.update(bytes([3]))
+        self.assertEqual(len(h.data), 3)
+    }
+
+    def test_str_field_accumulate_loop() {
+        b: StrBuf = StrBuf()
+        i: int = 0
+        while i < 500 {
+            b.add("xy")
+            i = i + 1
+        }
+        self.assertEqual(len(b.s), 1000)
+    }
+}
+
+
+class Engine {
+    name: str
+    def(name: str) {
+        self.name = name
+    }
+    def label() -> str {
+        return self.name
+    }
+}
+
+
+class Car {
+    wheels: int
+    engine: Engine
+    def(wheels: int) {
+        self.wheels = wheels
+    }
+    def install() {
+        self.engine = Engine("v8")
+    }
+    def sound() -> str {
+        return self.engine.label()
+    }
+}
+
+
+class Locals(TestCase) {
+    """Definite-assignment: the patterns the analysis ACCEPTS must still compile and
+    run with correct values.
+
+    The pass rejects reading a no-initializer local before it is assigned on every
+    path, and a constructor that leaves an own-declared non-defaulted field unset.
+    Those rejection cases are compile errors, so they live in the GoogleTest suite
+    (DefiniteAssignmentTest); this file is the positive side - every valid shape the
+    pass must let through, exercised at runtime so a future over-eager change that
+    starts rejecting them is caught here too.
+    """
+
+    def test_assigned_in_both_branches() {
+        x: int
+        if self.flag() {
+            x = 1
+        } else {
+            x = 2
+        }
+        self.assertEqual(x, 1)
+    }
+
+    def flag() -> bool {
+        return True
+    }
+
+    def test_else_returns_guard() {
+        self.assertEqual(self.guarded(True), 7)
+    }
+
+    def guarded(c: bool) -> int {
+        x: int
+        if c {
+            x = 7
+        } else {
+            return 0
+        }
+        return x
+    }
+
+    def test_while_true_break_assigns() {
+        n: int
+        i: int = 0
+        while True {
+            n = 99
+            i += 1
+            if i >= 1 {
+                break
+            }
+        }
+        self.assertEqual(n, 99)
+    }
+
+    def test_assigned_then_read() {
+        s: str
+        s = "hello"
+        self.assertEqual(s, "hello")
+    }
+}
+
+
+class Fields(TestCase) {
+    def test_all_fields_assigned() {
+        e: Engine = Engine("rotary")
+        self.assertEqual(e.label(), "rotary")
+    }
+
+    def test_deferred_init_field() {
+        c: Car = Car(4)
+        c.install()
+        self.assertEqual(c.sound(), "v8")
+        self.assertEqual(c.wheels, 4)
+    }
+}
+
+
+class ConstUnpackTests(TestCase) {
+    """const multi-target tuple unpack.
+
+    `const q: int, r: int = divmod(7, 2)` used to fail to parse ("const
+    declaration must have an initializer" on the comma) while the plain
+    `q, r = divmod(7, 2)` form worked - the const keyword changed whether
+    unpacking was available at all.
+
+    The parser now accepts one or more `name: type` pairs after `const` and
+    lowers the multi-target form onto the existing tuple-unpack AssignStmt path
+    with a synthesized tuple[...] annotation: Sema declares each name const
+    (fresh declaration, redeclaration is an error), the TypeChecker binds each
+    name at its annotated element type and checks the RHS tuple against the
+    annotation, and CodeGen reuses the one unpack implementation unchanged.
+    """
+
+    def test_divmod_unpack() {
+        const q: int, r: int = divmod(7, 2)
+        self.assertEqual(q, 3)
+        self.assertEqual(r, 1)
+    }
+
+    def test_mixed_types() {
+        const name: str, val: float = ("pi", 3.14)
+        self.assertEqual(name, "pi")
+        self.assertEqual(val, 3.14)
+    }
+
+    def test_three_targets() {
+        const a: int, b: str, c: bool = (42, "x", true)
+        self.assertEqual(a, 42)
+        self.assertEqual(b, "x")
+        self.assertTrue(c)
+    }
+
+    def test_function_return() {
+        const lo: int, hi: int = self._range_pair()
+        self.assertEqual(hi - lo, 90)
+    }
+
+    def _range_pair() -> tuple[int, int] {
+        return (10, 100)
+    }
+
+    def test_const_values_usable_in_expressions() {
+        const w: int, h: int = (3, 4)
+        area: int = w * h
+        self.assertEqual(area, 12)
+    }
+}
+
+
+class ConstUnpackGlobalTests(TestCase) {
+    """Module-level const unpack targets are real module globals.
+
+    Given the code below:
+
+        const HOST: str, PORT: int = ("h" + str(1), 8080)
+
+        def reader() -> str {
+            return HOST                     # was: "Undefined variable: HOST"
+        }
+
+    The type checker registered HOST/PORT in module scope and accepted the
+    cross-function reference, but codegen lowered the unpack targets as
+    main-frame LOCALS - so the very programs the checker passed failed to
+    compile. A checker/codegen disagreement: the program was either legal or
+    not, and the two halves voted differently.
+
+    BEFORE: any function referencing a module-level unpack target failed
+    codegen. AFTER: module-level unpack targets lower as GlobalVariables
+    (same as annotated declarations), with the D018 marking applied - const
+    str targets promoted immortal, containers/instances SHARED-marked - and
+    the forward-declaration pre-pass registers them from the checker-resolved
+    element types, so CLASS METHODS (whose bodies compile before the module
+    body) resolve them too - this suite's methods below are that regression
+
+    One line: what the checker admits, codegen now lowers
+    """
+
+    def test_unpack_targets_visible_at_module_level() {
+        self.assertEqual(HOST, "h1")
+        self.assertEqual(PORT, 8080)
+        self.assertEqual(LO, 10)
+        self.assertEqual(HI, 99)
+    }
+
+    def test_unpack_targets_readable_from_functions() {
+        self.assertEqual(read_host(), "h1")
+        self.assertEqual(read_span(), 89)
+    }
+
+    def test_repeated_reads_of_unpacked_str_global() {
+        i: int = 0
+        while i < 2000 {
+            const v: str = HOST
+            self.assertEqual(len(v), 2)
+            i = i + 1
+        }
+    }
+}
+
+
+class ExceptAsScopeTests(TestCase) {
+    def test_handler_shadow_preserves_outer() {
+        e: str = "outer"
+        caught: bool = false
+        try {
+            raise ValueError("boom")
+        } except ValueError as e {
+            caught = true
+        }
+        self.assertTrue(caught)
+        self.assertEqual(e, "outer")
+    }
+}
+
+
+main([IntKeyedDictAug(), StrKeyedDictAug(), ListElementAug(), FieldAug(),
+      Locals(), Fields(), ConstUnpackTests(), ConstUnpackGlobalTests(),
+      ExceptAsScopeTests()])

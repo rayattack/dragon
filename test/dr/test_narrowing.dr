@@ -1,0 +1,512 @@
+from unittest import TestCase, main
+
+
+class Pen {
+    def stroke(width: int) -> str {
+        return "pen:" + str(width)
+    }
+}
+
+
+class Brush {
+    def stroke() -> str {
+        return "brush"
+    }
+}
+
+
+def paint(tool: Pen | str) -> str {
+    if isinstance(tool, Pen) {
+        return tool.stroke(3)
+    }
+    return "str:" + tool
+}
+
+
+def brush_mark() -> str {
+    b: Brush = Brush()
+    return b.stroke()
+}
+
+
+class Thing {
+    x: int
+
+    def() {
+        self.x = 41
+    }
+
+    def bump() -> int {
+        self.x = self.x + 1
+        return self.x
+    }
+}
+
+class SubThing(Thing) {}
+
+class Holder {
+    t: Optional[Thing]
+
+    def() {
+        self.t = None
+    }
+}
+
+
+class W {
+    def(id: int, label: str | None) {
+        self.id = id
+        self.label = label
+    }
+}
+
+
+class Pod {
+    def(n: int) {
+        self.n = n
+    }
+}
+
+
+class H {
+    def(inner: Pod | None) {
+        self.inner = inner
+    }
+}
+
+
+def pick(flag: bool) -> str | None {
+    if flag {
+        return "yes"
+    }
+    return None
+}
+
+
+def check_param(v: str | None) -> bool {
+    return isinstance(v, str)
+}
+
+
+def check_box_param(v: int | None) -> bool {
+    return isinstance(v, int)
+}
+
+
+class Tag {
+    def(name: str) {
+        self.name = name
+    }
+    def render() -> str {
+        return "<" + self.name + ">"
+    }
+}
+
+
+def describe_tag(x: Tag | str) -> str {
+    if isinstance(x, Tag) {
+        return "tag:" + x.render()
+    }
+    return "str:" + x
+}
+
+
+class Sink {
+    def() {
+        self.out = ""
+    }
+    def put(x: Tag | str) -> None {
+        if isinstance(x, Tag) {
+            self.out = x.render()
+        } else {
+            self.out = x
+        }
+    }
+}
+
+
+class Ovl {
+    def() {
+        self.n = 0
+    }
+    def f(a: str) -> str {
+        return "s:" + a
+    }
+    def f(a: Tag) -> str {
+        return "t:" + a.render()
+    }
+    def g(a: int) -> int {
+        return a + 1
+    }
+    def g(a: int, b: int) -> int {
+        return a + b
+    }
+}
+
+
+def describe(x: int | str) -> str {
+    if isinstance(x, int) {
+        return f"doubled: {x * 2}"
+    }
+    return f"upper: {x.upper()}"
+}
+
+
+def describe3(x: int | str | bool) -> str {
+    if isinstance(x, int) {
+        return f"int: {x}"
+    }
+    return "other"
+}
+
+
+def take[T](xs: list[T], n: int) -> list[T] {
+    out: list[T] = []
+    i: int = 0
+    while i < n {
+        out.append(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+def empty_list() -> list[int] {
+    return []
+}
+
+def empty_dict() -> dict[str, int] {
+    return {}
+}
+
+def pick_list(c: bool) -> list[int] {
+    return [1] if c else []
+}
+
+def or_list(xs: list[int]) -> list[int] {
+    return xs or []
+}
+
+
+def is_t_scalar[T](x: T) -> bool {
+    return isinstance(x, T)
+}
+
+def which_of_union[T](x: T) -> str {
+    if isinstance(x, str) {
+        return "str"
+    }
+    return "not-str"
+}
+
+def which_nested[T](x: T | None) -> str {
+    if x is None {
+        return "none"
+    }
+    if isinstance(x, str) {
+        return "str"
+    }
+    return "other"
+}
+
+def matches_param[T](a: T, b: int | str) -> bool {
+    return isinstance(b, T)
+}
+
+
+class NarrowDispatchTests(TestCase) {
+    """isinstance class-arm narrowing dispatches to the narrowed class's method.
+
+    You write ordinary, correct-looking Dragon:
+
+        def paint(tool: Pen | str) -> str {
+            if isinstance(tool, Pen) {
+                return tool.stroke(3)     # tool is a Pen here
+            }
+            return "str:" + tool
+        }
+
+    Inside the `if isinstance(tool, Pen)` arm, `tool` is a Pen. But codegen used to
+    record only the narrowed *kind* (a class instance), not the narrowed class
+    *name*. So `tool.stroke(3)` fell to the "class unknown" vtable path, which
+    guessed the callee by scanning every class for a method named `stroke` (in
+    hash-table order) and using the first one's signature. With an unrelated
+    `Brush.stroke()` of a DIFFERENT arity compiled in, it could pick the wrong
+    signature and emit a malformed indirect call (LLVM "Incorrect number of
+    arguments") or dispatch to the wrong class.
+
+    Now the narrowed class name is recorded for the branch, so the call dispatches
+    DIRECTLY to Pen.stroke - correct regardless of what other classes exist. This
+    asserts on VALUES: the narrowed call returns Pen's result, not Brush's.
+    """
+
+    def test_narrow_class_arm_dispatches_to_narrowed_class() {
+        self.assertEqual(paint(Pen()), "pen:3")
+    }
+
+    def test_narrow_str_arm() {
+        self.assertEqual(paint("hi"), "str:hi")
+    }
+
+    def test_conflicting_same_name_method_unaffected() {
+        self.assertEqual(brush_mark(), "brush")
+    }
+}
+
+
+class IsinstanceNoneTest(TestCase) {
+    def test_none_is_not_instance() -> None {
+        h: Holder = Holder()
+        v: Optional[Thing] = h.t
+        self.assertFalse(isinstance(v, Thing))
+    }
+
+    def test_present_is_instance() -> None {
+        h: Holder = Holder()
+        h.t = Thing()
+        v: Optional[Thing] = h.t
+        self.assertTrue(isinstance(v, Thing))
+    }
+
+    def test_guarded_call() -> None {
+        h: Holder = Holder()
+        total: int = 0
+        v: Optional[Thing] = h.t
+        if isinstance(v, Thing) {
+            total = total + v.bump()
+        }
+        self.assertEqual(total, 0)
+
+        h.t = Thing()
+        v2: Optional[Thing] = h.t
+        if isinstance(v2, Thing) {
+            total = total + v2.bump()
+        }
+        self.assertEqual(total, 42)
+    }
+
+    def test_subclass_chain() -> None {
+        h: Holder = Holder()
+        h.t = SubThing()
+        v: Optional[Thing] = h.t
+        self.assertTrue(isinstance(v, Thing))
+        h2: Holder = Holder()
+        v2: Optional[Thing] = h2.t
+        self.assertFalse(isinstance(v2, SubThing))
+    }
+}
+
+
+class IsinstanceUnionTests(TestCase) {
+    """isinstance on a union value must answer from the RUNTIME state, never the
+    static type (caught folding statically during the D052 audit)"""
+
+    def test_local_from_field_none() {
+        const w: W = W(1, None)
+        _l: str | None = w.label
+        self.assertFalse(isinstance(_l, str))
+    }
+
+    def test_local_from_field_present() {
+        const w: W = W(2, "hi")
+        _l: str | None = w.label
+        self.assertTrue(isinstance(_l, str))
+    }
+
+    def test_field_direct() {
+        const w: W = W(3, None)
+        self.assertFalse(isinstance(w.label, str))
+        const p: W = W(4, "yo")
+        self.assertTrue(isinstance(p.label, str))
+    }
+
+    def test_param_expression_position() {
+        self.assertFalse(check_param(None))
+        self.assertTrue(check_param("s"))
+    }
+
+    def test_local_from_call() {
+        _a: str | None = pick(false)
+        self.assertFalse(isinstance(_a, str))
+        _b: str | None = pick(true)
+        self.assertTrue(isinstance(_b, str))
+    }
+
+    def test_class_member_union() {
+        const h: H = H(None)
+        _i: Pod | None = h.inner
+        self.assertFalse(isinstance(_i, Pod))
+        const h2: H = H(Pod(9))
+        _j: Pod | None = h2.inner
+        self.assertTrue(isinstance(_j, Pod))
+    }
+
+    def test_box_union_param_expression() {
+        self.assertFalse(check_box_param(None))
+        self.assertTrue(check_box_param(7))
+    }
+
+    def test_box_union_local() {
+        v: int | str = "s"
+        self.assertTrue(isinstance(v, str))
+        self.assertFalse(isinstance(v, int))
+    }
+
+    def test_if_condition_narrowing_still_works() {
+        const w: W = W(5, "abc")
+        _l: str | None = w.label
+        n: int = 0
+        if isinstance(_l, str) {
+            n = len(_l)
+        }
+        self.assertEqual(n, 3)
+    }
+}
+
+
+class MethodOverloadAndNarrowingTests(TestCase) {
+    def test_class_arm_narrow_to_class() {
+        self.assertEqual(describe_tag(Tag("b")), "tag:<b>")
+    }
+    def test_class_arm_narrow_to_str() {
+        self.assertEqual(describe_tag("hi"), "str:hi")
+    }
+    def test_method_union_param_str_arm() {
+        s: Sink = Sink()
+        s.put("plain")
+        self.assertEqual(s.out, "plain")
+    }
+    def test_method_union_param_class_arm() {
+        s: Sink = Sink()
+        s.put(Tag("i"))
+        self.assertEqual(s.out, "<i>")
+    }
+    def test_method_union_param_both_calls() {
+        s: Sink = Sink()
+        s.put("a")
+        self.assertEqual(s.out, "a")
+        s.put(Tag("x"))
+        self.assertEqual(s.out, "<x>")
+    }
+    def test_overload_by_type_str() {
+        o: Ovl = Ovl()
+        self.assertEqual(o.f("hi"), "s:hi")
+    }
+    def test_overload_by_type_class() {
+        o: Ovl = Ovl()
+        self.assertEqual(o.f(Tag("p")), "t:<p>")
+    }
+    def test_overload_by_arity() {
+        o: Ovl = Ovl()
+        self.assertEqual(o.g(10), 11)
+        self.assertEqual(o.g(10, 20), 30)
+    }
+}
+
+
+class NarrowingGenericsTests(TestCase) {
+    def test_fallthrough_narrow_int() {
+        self.assertEqual(describe(21), "doubled: 42")
+    }
+    def test_fallthrough_narrow_str() {
+        self.assertEqual(describe("hi"), "upper: HI")
+    }
+    def test_three_member_union_fallthrough() {
+        self.assertEqual(describe3(7), "int: 7")
+        self.assertEqual(describe3("x"), "other")
+    }
+
+    def test_generic_call_result_typed_int() {
+        first_two: list[int] = take([10, 20, 30, 40], 2)
+        self.assertEqual(first_two, [10, 20])
+    }
+    def test_generic_call_result_typed_str() {
+        r: list[str] = take(["a", "b", "c"], 2)
+        self.assertEqual(r, ["a", "b"])
+    }
+    def test_generic_call_inline_subscript() {
+        self.assertEqual(take([5, 6, 7], 2)[1], 6)
+    }
+}
+
+
+class BranchTypeJoinTests(TestCase) {
+    def test_bare_empty_list_return() {
+        self.assertEqual(len(empty_list()), 0)
+    }
+
+    def test_bare_empty_dict_return() {
+        self.assertEqual(len(empty_dict()), 0)
+    }
+
+    def test_ternary_unifies_empty_arm() {
+        c: bool = True
+        xs: list[int] = [1] if c else []
+        self.assertEqual(len(xs), 1)
+        ys: list[int] = [] if c else [1, 2]
+        self.assertEqual(len(ys), 0)
+    }
+
+    def test_ternary_return_unifies_empty_arm() {
+        self.assertEqual(len(pick_list(True)), 1)
+        self.assertEqual(len(pick_list(False)), 0)
+    }
+
+    def test_or_return_unifies_empty_arm() {
+        self.assertEqual(len(or_list([1, 2])), 2)
+        self.assertEqual(len(or_list([])), 0)
+    }
+
+    def test_ternary_promotes_int_and_float() {
+        c: bool = False
+        v: float = 0 if c else 2.5
+        self.assertEqual(v, 2.5)
+        kept: float = 3 if not c else 2.5
+        self.assertEqual(kept, 3.0)
+    }
+
+    def test_ternary_keeps_same_type() {
+        c: bool = False
+        s: str = "a" if c else "b"
+        self.assertEqual(s, "b")
+        n: int = 1 if c else 2
+        self.assertEqual(n, 2)
+    }
+
+    def test_ternary_empty_dict_arm() {
+        c: bool = False
+        d: dict[str, int] = {"a": 1} if c else {}
+        self.assertEqual(len(d), 0)
+    }
+}
+
+
+class GenericIsinstanceTests(TestCase) {
+    def test_scalar_type_param() {
+        self.assertTrue(is_t_scalar(5))
+        self.assertTrue(is_t_scalar("a"))
+    }
+
+    def test_union_bound_type_param_narrows() {
+        u: int | str = "hey"
+        self.assertEqual(which_of_union(u), "str")
+        v: int | str = 5
+        self.assertEqual(which_of_union(v), "not-str")
+    }
+
+    def test_nested_union_explicit_instantiation() {
+        u: int | str = 5
+        self.assertEqual(which_nested[int | str](u), "other")
+        w: int | str = "hi"
+        self.assertEqual(which_nested[int | str](w), "str")
+    }
+
+    def test_isinstance_against_type_param_on_union_value() {
+        self.assertFalse(matches_param("x", 5))
+        self.assertTrue(matches_param("x", "y"))
+        self.assertTrue(matches_param(3, 7))
+    }
+}
+
+
+main([NarrowDispatchTests(), IsinstanceNoneTest(), IsinstanceUnionTests(), MethodOverloadAndNarrowingTests(), NarrowingGenericsTests(), BranchTypeJoinTests(), GenericIsinstanceTests()])

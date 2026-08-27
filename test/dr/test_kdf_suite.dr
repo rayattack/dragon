@@ -1,0 +1,197 @@
+from unittest import TestCase, main
+from hmac import new, HMAC
+from hashlib import pbkdf2_hmac, scrypt
+from argon2id import hash_raw, verify_raw, hash, verify
+
+const _V1: str = "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+const _R8: str = "e2b1883717d879f495cb7d86aa1eb8697e724978e8fc819881b007fbba2cf86bfb90a4f560643a55df2464cfc75ddd4fa6e88c3a669a3bfd1078e647adfb56ae"
+const _R4P2: str = "ddfe4e8aa715322b6cf3d55a6df6fa3e3dcec0d30ac069a998d23d7a33dd8aff9806061829977a418f3216b66852fc4847cddf4cb0ae10abbbaac8fc82220796"
+
+const RFC_TAG: str = "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+
+class HmacSha256Tests(TestCase) {
+    def test_rfc4231_tc1() {
+        key: bytes = bytes([0x0b] * 20)
+        self.assertEqual(new(key, b"Hi There", "sha256").hexdigest(),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+    }
+
+    def test_rfc4231_tc2() {
+        self.assertEqual(
+            new(b"Jefe", b"what do ya want for nothing?", "sha256").hexdigest(),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+    }
+
+    def test_rfc4231_tc3() {
+        key: bytes = bytes([0xaa] * 20)
+        data: bytes = bytes([0xdd] * 50)
+        self.assertEqual(new(key, data, "sha256").hexdigest(),
+            "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe")
+    }
+
+    def test_rfc4231_tc6_large_key() {
+        key: bytes = bytes([0xaa] * 131)
+        self.assertEqual(
+            new(key, b"Test Using Larger Than Block-Size Key - Hash Key First", "sha256").hexdigest(),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+    }
+
+    def test_rfc4231_tc7_large_key_and_data() {
+        key: bytes = bytes([0xaa] * 131)
+        data: bytes = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."
+        self.assertEqual(new(key, data, "sha256").hexdigest(),
+            "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2")
+    }
+
+    def test_incremental_equiv() {
+        h: HMAC = new(b"key", b"", "sha256")
+        h.update(b"The quick brown fox ")
+        h.update(b"jumps over the lazy dog")
+        one_shot: str = new(b"key",
+            b"The quick brown fox jumps over the lazy dog", "sha256").hexdigest()
+        self.assertEqual(h.hexdigest(), one_shot)
+    }
+}
+
+class HmacSha1Tests(TestCase) {
+    def test_rfc2202_tc1() {
+        key: bytes = bytes([0x0b] * 20)
+        self.assertEqual(new(key, b"Hi There", "sha1").hexdigest(),
+            "b617318655057264e28bc0b6fb378c8ef146be00")
+    }
+
+    def test_rfc2202_tc2() {
+        self.assertEqual(
+            new(b"Jefe", b"what do ya want for nothing?", "sha1").hexdigest(),
+            "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79")
+    }
+}
+
+class Pbkdf2Sha256Tests(TestCase) {
+    def test_c1() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"password", b"salt", 1).hex(),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    }
+
+    def test_c2() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"password", b"salt", 2).hex(),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43")
+    }
+
+    def test_c4096() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"password", b"salt", 4096).hex(),
+            "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a")
+    }
+
+    def test_dklen_64_multiblock() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"passwd", b"salt", 1, 64).hex(),
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783")
+    }
+
+    def test_default_dklen_is_digest_size() {
+        dk: bytes = pbkdf2_hmac("sha256", b"password", b"salt", 1, 0)
+        self.assertEqual(len(dk), 32)
+        self.assertEqual(dk.hex(),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    }
+
+    def test_zero_iterations_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            pbkdf2_hmac("sha256", b"p", b"s", 0)
+        })
+    }
+}
+
+class ScryptTests(TestCase) {
+    def test_rfc7914_vector1() {
+        const dk: bytes = scrypt(b"", b"", 16, 1, 1, 0, 64)
+        self.assertEqual(dk.hex(), _V1)
+    }
+
+    def test_r8_blockmix_reorder() {
+        const dk: bytes = scrypt(b"", b"", 16, 8, 1, 0, 64)
+        self.assertEqual(dk.hex(), _R8)
+    }
+
+    def test_r4_p2_parallel() {
+        const dk: bytes = scrypt(b"pw", b"salt", 16, 4, 2, 0, 64)
+        self.assertEqual(dk.hex(), _R4P2)
+    }
+
+    def test_dklen_short() {
+        const dk: bytes = scrypt(b"", b"", 16, 1, 1, 0, 16)
+        self.assertEqual(len(dk), 16)
+        self.assertEqual(dk.hex(), _V1[0:32])
+    }
+
+    def test_rejects_non_power_of_two_n() {
+        raised: bool = false
+        try {
+            const dk: bytes = scrypt(b"x", b"y", 1000, 1, 1, 0, 32)
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+class Argon2idTests(TestCase) {
+    def test_rfc9106_vector() {
+        const password: bytes = bytes([0x01] * 32)
+        const salt: bytes = bytes([0x02] * 16)
+        const secret: bytes = bytes([0x03] * 8)
+        const ad: bytes = bytes([0x04] * 12)
+        const tag: bytes = hash_raw(password, salt, 3, 32, 4, 32, secret, ad)
+        self.assertEqual(tag.hex(), RFC_TAG)
+    }
+
+    def test_verify_raw_roundtrip() {
+        const password: bytes = b"correct horse battery staple"
+        const salt: bytes = bytes([0x10] * 16)
+        const tag: bytes = hash_raw(password, salt, 2, 64, 1, 32)
+        self.assertTrue(verify_raw(tag, password, salt, 2, 64, 1, 32))
+    }
+
+    def test_one_bit_password_change_fails() {
+        const salt: bytes = bytes([0x10] * 16)
+        const tag: bytes = hash_raw(b"correct horse battery staple", salt, 2, 64, 1, 32)
+        self.assertFalse(verify_raw(tag, b"correct horse battery stapld", salt, 2, 64, 1, 32))
+    }
+
+    def test_verify_raw_wrong_salt_fails() {
+        const password: bytes = b"hunter2"
+        const tag: bytes = hash_raw(password, bytes([0x20] * 16), 2, 64, 1, 32)
+        self.assertFalse(verify_raw(tag, password, bytes([0x21] * 16), 2, 64, 1, 32))
+    }
+
+    def test_hash_len_honoured() {
+        const tag: bytes = hash_raw(b"pw", bytes([0x02] * 16), 1, 32, 1, 64)
+        self.assertEqual(len(tag), 64)
+    }
+
+    def test_phc_encoded_roundtrip() {
+        const password: bytes = b"s3cr3t-passphrase"
+        const salt: bytes = bytes([0x33] * 16)
+        const encoded: str = hash(password, salt, 2, 64, 1, 32)
+        self.assertTrue(encoded.startswith("$argon2id$v=19$m=64,t=2,p=1$"))
+        self.assertTrue(verify(encoded, password))
+        self.assertFalse(verify(encoded, b"wrong-passphrase"))
+    }
+
+    def test_phc_malformed_returns_false() {
+        self.assertFalse(verify("not-a-phc-string", b"pw"))
+        self.assertFalse(verify("$argon2i$v=19$m=64,t=2,p=1$AAAA$BBBB", b"pw"))
+    }
+
+    def test_rejects_low_memory() {
+        raised: bool = false
+        try {
+            const tag: bytes = hash_raw(b"pw", bytes([0x02] * 16), 1, 4, 2, 32)
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+main([HmacSha256Tests(), HmacSha1Tests(), Pbkdf2Sha256Tests(), ScryptTests(), Argon2idTests()])
