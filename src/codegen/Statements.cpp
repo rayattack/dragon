@@ -11,6 +11,8 @@ void CodeGen::visit(StarredExpr& node) {
 }
 
 void CodeGen::visit(ExprStmt& node) {
+    if (emitReplEcho(node)) return;
+
     node.expr->accept(*this);
 
     if (impl_->lastValue && impl_->options.gcMode == GCMode::RC &&

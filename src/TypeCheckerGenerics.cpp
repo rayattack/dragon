@@ -1039,6 +1039,7 @@ void TypeChecker::runMonomorphization() {
             cf->name = isMethodReq ? mangleInstantiation(req.genericName, req.args) : req.key;
             cf->typeParams.clear();
             cf->genericHomeModule = homeModule;
+            cf->isInstantiation = true;
         }
 
         std::vector<std::pair<std::string, std::shared_ptr<Type>>> savedTypeNames;

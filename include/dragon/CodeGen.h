@@ -67,6 +67,18 @@ struct CodeGenOptions {
     std::string assetsDir;
 
     std::vector<std::string> includePaths;
+
+    bool jitTarget = false;
+
+    bool replMode = false;
+
+    int replTurnIndex = 0;
+
+    size_t replResidentStmtCount = 0;
+
+    std::vector<std::string> replResidentModules;
+
+    bool replTeardown = false;
 };
 
 class CodeGen : public ASTVisitor {
@@ -80,6 +92,8 @@ public:
                   const std::vector<dragon::Module*>& depModules);
 
     llvm::Module* getLLVMModule();
+    std::unique_ptr<llvm::Module> takeModule();
+    std::unique_ptr<llvm::LLVMContext> takeContext();
     bool writeIR(const std::string& filename);
     bool writeBitcode(const std::string& filename);
     bool compileToObject(const std::string& filename);
@@ -171,6 +185,7 @@ public:
                         std::vector<llvm::Value*> prefixArgs,
                         const std::string& dispName);
     void emitPrintArgRaw(Expr* argExpr);
+    bool emitReplEcho(ExprStmt& node);
     void emitCallableValueCall(llvm::Value* fnPtrVal,
                                llvm::FunctionType* userFnType,
                                const std::vector<llvm::Value*>& args,

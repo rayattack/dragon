@@ -1,0 +1,387 @@
+"""cell - the multi-line edit buffer behind the Dragon prompt.
+
+A cell is the unit of input. Enter inserts a newline; it never executes. That
+means nothing here has to guess whether input is complete, which is the whole
+reason the cell model exists: a line-oriented prompt has to decide after every
+Enter, and it guesses wrong exactly where it hurts most, editing a multi-line
+definition.
+
+Columns are codepoint indices, not byte offsets. Dragon strings are indexed by
+codepoint, so `line[0:col]` is already the text left of the cursor with no
+UTF-8 arithmetic anywhere in this file.
+"""
+
+const INDENT: str = "    "
+const INDENT_WIDTH: int = 4
+
+const _QUOTE: str = "\""
+const _APOSTROPHE: str = "'"
+const _BACKSLASH: str = "\\"
+const _COMMENT: str = "#"
+const _OPENERS: str = "([{"
+const _CLOSERS: str = ")]}"
+const _CLOSE_BRACE: str = "}"
+
+
+def leading_space(line: str) -> str {
+    """The run of spaces and tabs that starts `line`."""
+    i: int = 0
+    const n: int = len(line)
+    while i < n and (line[i] == " " or line[i] == "\t") {
+        i = i + 1
+    }
+    return line[0:i]
+}
+
+
+def is_blank(line: str) -> bool {
+    return len(line.strip()) == 0
+}
+
+
+def net_open(text: str) -> int {
+    """Brackets opened minus closed in `text`, ignoring strings and comments.
+
+    Ignoring quoted text is not a nicety. Without it `print("{")` would indent
+    every following line, and the reader would have to fight the editor.
+    """
+    depth: int = 0
+    quote: str = ""
+    escaped: bool = False
+    i: int = 0
+    const n: int = len(text)
+
+    while i < n {
+        const c: str = text[i]
+        if quote != "" {
+            if escaped {
+                escaped = False
+            } else if c == _BACKSLASH {
+                escaped = True
+            } else if c == quote {
+                quote = ""
+            }
+        } else if c == _QUOTE or c == _APOSTROPHE {
+            quote = c
+        } else if c == _COMMENT {
+            return depth
+        } else if c in _OPENERS {
+            depth = depth + 1
+        } else if c in _CLOSERS {
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    return depth
+}
+
+
+class Cell {
+    """The edit buffer: lines, a cursor, and the edits the loop drives it with."""
+
+    lines: list[str]
+    row: int
+    col: int
+    goal_col: int
+
+    def() {
+        self.lines = [""]
+        self.row = 0
+        self.col = 0
+        self.goal_col = 0
+    }
+
+    def text() -> str {
+        return "\n".join(self.lines)
+    }
+
+    def set_text(s: str) -> None {
+        self.lines = s.split("\n")
+        if len(self.lines) == 0 {
+            self.lines = [""]
+        }
+        self.row = len(self.lines) - 1
+        self.col = len(self.lines[self.row])
+        self.goal_col = self.col
+    }
+
+    def clear() -> None {
+        self.lines = [""]
+        self.row = 0
+        self.col = 0
+        self.goal_col = 0
+    }
+
+    def row_count() -> int {
+        return len(self.lines)
+    }
+
+    def line(index: int) -> str {
+        return self.lines[index]
+    }
+
+    def current() -> str {
+        return self.lines[self.row]
+    }
+
+    def is_empty() -> bool {
+        return len(self.lines) == 1 and len(self.lines[0]) == 0
+    }
+
+    def is_blank() -> bool {
+        return len(self.text().strip()) == 0
+    }
+
+    def is_command() -> bool {
+        """True when this cell is a single line opening with `:`.
+
+        Restricting it to one line is what makes the rule predictable: a cell
+        that starts as a command can never grow into a program.
+        """
+        if len(self.lines) != 1 {
+            return False
+        }
+        const s: str = self.lines[0].strip()
+        return len(s) > 0 and s[0] == ":"
+    }
+
+    def command_name() -> str {
+        const s: str = self.lines[0].strip()
+        const rest: str = s[1:len(s)]
+        const space: int = rest.find(" ")
+        if space < 0 {
+            return rest
+        }
+        return rest[0:space]
+    }
+
+    def command_arg() -> str {
+        const s: str = self.lines[0].strip()
+        const rest: str = s[1:len(s)]
+        const space: int = rest.find(" ")
+        if space < 0 {
+            return ""
+        }
+        return rest[space + 1:len(rest)].strip()
+    }
+
+    def _replace(index: int, value: str) -> None {
+        const head: list[str] = self.lines[0:index]
+        const tail: list[str] = self.lines[index + 1:len(self.lines)]
+        out: list[str] = []
+        for l in head { out.append(l) }
+        out.append(value)
+        for l in tail { out.append(l) }
+        self.lines = out
+    }
+
+    def _insert_line(index: int, value: str) -> None {
+        const head: list[str] = self.lines[0:index]
+        const tail: list[str] = self.lines[index:len(self.lines)]
+        out: list[str] = []
+        for l in head { out.append(l) }
+        out.append(value)
+        for l in tail { out.append(l) }
+        self.lines = out
+    }
+
+    def _remove_line(index: int) -> None {
+        const head: list[str] = self.lines[0:index]
+        const tail: list[str] = self.lines[index + 1:len(self.lines)]
+        out: list[str] = []
+        for l in head { out.append(l) }
+        for l in tail { out.append(l) }
+        self.lines = out
+    }
+
+    def insert_text(cp: int) -> None {
+        const ch: str = chr(cp)
+        const line: str = self.current()
+
+        if ch == _CLOSE_BRACE and is_blank(line[0:self.col]) {
+            const dedented: str = self._dedent_leading(line)
+            self._replace(self.row, dedented)
+            self.col = len(dedented) - (len(line) - self.col)
+            if self.col < 0 {
+                self.col = 0
+            }
+        }
+
+        const cur: str = self.current()
+        self._replace(self.row, cur[0:self.col] + ch + cur[self.col:len(cur)])
+        self.col = self.col + 1
+        self.goal_col = self.col
+    }
+
+    def _dedent_leading(line: str) -> str {
+        const lead: str = leading_space(line)
+        if len(lead) >= INDENT_WIDTH {
+            return line[INDENT_WIDTH:len(line)]
+        }
+        if len(lead) > 0 {
+            return line[len(lead):len(line)]
+        }
+        return line
+    }
+
+    def insert_newline() -> None {
+        """Split at the cursor, carrying indentation to the new line.
+
+        The guess is cosmetic. Braces carry structure in Dragon, so a wrong
+        indent costs one keystroke and can never change what the code means.
+        """
+        const line: str = self.current()
+        const head: str = line[0:self.col]
+        const tail: str = line[self.col:len(line)]
+
+        indent: str = leading_space(head)
+        if net_open(head) > 0 {
+            indent = indent + INDENT
+        }
+
+        self._replace(self.row, head)
+        self._insert_line(self.row + 1, indent + tail)
+        self.row = self.row + 1
+        self.col = len(indent)
+        self.goal_col = self.col
+    }
+
+    def insert_indent() -> None {
+        const line: str = self.current()
+        const width: int = INDENT_WIDTH - (self.col % INDENT_WIDTH)
+        pad: str = ""
+        i: int = 0
+        while i < width {
+            pad = pad + " "
+            i = i + 1
+        }
+        self._replace(self.row, line[0:self.col] + pad + line[self.col:len(line)])
+        self.col = self.col + width
+        self.goal_col = self.col
+    }
+
+    def dedent_line() -> None {
+        const line: str = self.current()
+        const dedented: str = self._dedent_leading(line)
+        const removed: int = len(line) - len(dedented)
+        if removed == 0 {
+            return
+        }
+        self._replace(self.row, dedented)
+        self.col = self.col - removed
+        if self.col < 0 {
+            self.col = 0
+        }
+        self.goal_col = self.col
+    }
+
+    def backspace() -> None {
+        if self.col > 0 {
+            const line: str = self.current()
+            const lead: str = leading_space(line)
+            if self.col <= len(lead) and self.col >= INDENT_WIDTH {
+                const cut: int = self.col - INDENT_WIDTH
+                self._replace(self.row, line[0:cut] + line[self.col:len(line)])
+                self.col = cut
+                self.goal_col = self.col
+                return
+            }
+            self._replace(self.row,
+                          line[0:self.col - 1] + line[self.col:len(line)])
+            self.col = self.col - 1
+            self.goal_col = self.col
+            return
+        }
+        if self.row == 0 {
+            return
+        }
+        const previous: str = self.lines[self.row - 1]
+        const merged: str = previous + self.current()
+        self._replace(self.row - 1, merged)
+        self._remove_line(self.row)
+        self.row = self.row - 1
+        self.col = len(previous)
+        self.goal_col = self.col
+    }
+
+    def delete_forward() -> None {
+        const line: str = self.current()
+        if self.col < len(line) {
+            self._replace(self.row,
+                          line[0:self.col] + line[self.col + 1:len(line)])
+            return
+        }
+        if self.row + 1 >= len(self.lines) {
+            return
+        }
+        self._replace(self.row, line + self.lines[self.row + 1])
+        self._remove_line(self.row + 1)
+    }
+
+    def kill_to_end() -> None {
+        const line: str = self.current()
+        self._replace(self.row, line[0:self.col])
+    }
+
+    def kill_to_start() -> None {
+        const line: str = self.current()
+        self._replace(self.row, line[self.col:len(line)])
+        self.col = 0
+        self.goal_col = 0
+    }
+
+    def move_left() -> None {
+        if self.col > 0 {
+            self.col = self.col - 1
+        } else if self.row > 0 {
+            self.row = self.row - 1
+            self.col = len(self.current())
+        }
+        self.goal_col = self.col
+    }
+
+    def move_right() -> None {
+        if self.col < len(self.current()) {
+            self.col = self.col + 1
+        } else if self.row + 1 < len(self.lines) {
+            self.row = self.row + 1
+            self.col = 0
+        }
+        self.goal_col = self.col
+    }
+
+    def move_up() -> bool {
+        """Move up a row. False when already on the first, so the loop can
+        turn that into a history recall."""
+        if self.row == 0 {
+            return False
+        }
+        self.row = self.row - 1
+        self._clamp_to_goal()
+        return True
+    }
+
+    def move_down() -> bool {
+        if self.row + 1 >= len(self.lines) {
+            return False
+        }
+        self.row = self.row + 1
+        self._clamp_to_goal()
+        return True
+    }
+
+    def _clamp_to_goal() -> None {
+        const width: int = len(self.current())
+        self.col = self.goal_col if self.goal_col <= width else width
+    }
+
+    def move_home() -> None {
+        self.col = 0
+        self.goal_col = 0
+    }
+
+    def move_end() -> None {
+        self.col = len(self.current())
+        self.goal_col = self.col
+    }
+}

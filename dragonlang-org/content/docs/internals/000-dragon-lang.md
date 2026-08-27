@@ -590,7 +590,7 @@ cp build/dragon /usr/local/bin/
 ### What's Missing / In Progress
 
 - Full Unicode coverage across every string method (the model handles UTF-8, but some method edge cases remain)
-- Interactive REPL (`dragon shell`, the design spec - proposed)
+- Interactive REPL (`dragon repl`, the design spec - in progress)
 - Wider Python-stdlib coverage (the design spec tracks the remaining modules)
 - Arbitrary-precision `int` (the design spec - planned, default `int` is 64-bit)
 

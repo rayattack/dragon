@@ -1,5 +1,7 @@
 #include "dragon.h"
 #include "dragon/Driver.h"
+#include "dragon/Repl.h"
+#include "repl/ReplBridge.h"
 #include "FfiSync.h"
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
@@ -124,6 +126,24 @@ std::string resolveRuntimeLib() {
 #else
     return {};
 #endif
+}
+
+std::string resolveReplSrc() {
+    namespace fs = std::filesystem;
+    if (const char* env = std::getenv("DRAGON_REPL_SRC")) {
+        if (env[0] != '\0') return std::string(env);
+    }
+    std::error_code ec;
+    auto prefix = platform::getInstallPrefix();
+    if (!prefix.empty()) {
+        fs::path installed = fs::path(prefix) / "share" / "dragon" / "repl" / "repl.dr";
+        if (fs::is_regular_file(installed, ec)) return installed.string();
+    }
+#ifdef DRAGON_REPL_SRC
+    if (fs::is_regular_file(std::string(DRAGON_REPL_SRC), ec))
+        return std::string(DRAGON_REPL_SRC);
+#endif
+    return {};
 }
 
 std::string resolveEggBin() {
@@ -443,6 +463,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         impl_->options.action = DriverOptions::Action::Check;
     } else if (command == "migrate") {
         impl_->options.action = DriverOptions::Action::Migrate;
+    } else if (command == "repl") {
+        impl_->options.action = DriverOptions::Action::Repl;
     } else if (command == "--version" || command == "-v") {
         printVersion();
         std::exit(0);
@@ -543,6 +565,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         }
     }
 
+    if (impl_->options.action == DriverOptions::Action::Repl) return true;
+
     return !impl_->options.inputFiles.empty();
 }
 
@@ -551,6 +575,8 @@ int Driver::run() {
 }
 
 int Driver::run(const DriverOptions& options) {
+    if (options.action == DriverOptions::Action::Repl) return replSession();
+
     for (const auto& filename : options.inputFiles) {
         int result = 0;
 
@@ -589,6 +615,7 @@ Commands:
   run <file|dir>    Compile and run Dragon/Python file (a dir resolves dragon.drs `entry`)
   build <file|dir>  Compile to executable
   check <file>      Type check without compiling
+  repl              Start an interactive session (JIT, no linker); -f for the Python surface
   migrate <file.py> Emit a typed .dr draft next to the input
   ffi sync <file>   Regenerate foreign stubs for process externs (--check: verify only)
 
@@ -623,6 +650,7 @@ Examples:
   dragon check main.py                # Type check a Python file
   dragon build app.dr -I lib/         # Build with extra module path
   dragon run app.dr --site-packages   # Run with pip package access
+  dragon repl                         # Start an interactive session
 )";
 }
 
@@ -926,6 +954,52 @@ int Driver::buildFile(const std::string& filename) {
         std::cout << "Built: " << outputFile << "\n";
     }
     return 0;
+}
+
+int Driver::replSession() {
+    const std::string editorSrc = resolveReplSrc();
+    if (editorSrc.empty()) {
+        std::cerr << "dragon repl: the shell source (repl.dr) was not found; "
+                     "set DRAGON_REPL_SRC to a checkout's tools/repl/repl.dr\n";
+        return 1;
+    }
+
+    ReplOptions replOpts;
+    replOpts.pythonSurface = impl_->options.forcePython;
+    replOpts.optimizationLevel = impl_->options.optimizationLevel;
+    replOpts.searchPaths = impl_->options.searchPaths;
+    {
+        auto stdlib = resolveStdlibDir();
+        if (!stdlib.empty()) replOpts.searchPaths.push_back(stdlib);
+
+        auto prefix = platform::getInstallPrefix();
+#ifdef DRAGON_PCRE2_LIB
+        replOpts.pcre2LibPath = findBundledLib(prefix, "libpcre2-8.a", DRAGON_PCRE2_LIB);
+#endif
+#ifdef DRAGON_SQLITE3_LIB
+        replOpts.sqlite3LibPath =
+            findBundledLib(prefix, "libdragon_sqlite3.a", DRAGON_SQLITE3_LIB);
+#endif
+    }
+
+    ReplSession session(replOpts);
+    std::string error;
+    if (!session.bringUp(error)) {
+        std::cerr << "dragon repl: could not start the session: " << error << "\n";
+        return 1;
+    }
+
+    replBridgeBind(&session, &impl_->formatter);
+
+    int exitCode = 0;
+    if (!session.runEditor(editorSrc, exitCode, error)) {
+        std::cerr << "dragon repl: could not start the shell: " << error << "\n";
+        replBridgeBind(nullptr, nullptr);
+        return 1;
+    }
+
+    replBridgeBind(nullptr, nullptr);
+    return exitCode;
 }
 
 int Driver::migrateFile(const std::string& filename) {

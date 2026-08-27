@@ -112,6 +112,33 @@ target_compile_definitions(dragon_codegen_tests PRIVATE
 target_link_libraries(dragon_codegen_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME CodeGenTests COMMAND dragon_codegen_tests)
 
+add_executable(dragon_repl_tests
+    ReplJitTest.cpp
+    ReplOwnershipTest.cpp
+    ReplEchoTest.cpp
+    ReplImportTest.cpp
+)
+target_compile_definitions(dragon_repl_tests PRIVATE
+    CMAKE_BINARY_DIR="${CMAKE_BINARY_DIR}"
+    DRAGON_RUNTIME_LIB="$<TARGET_FILE:dragon_runtime>"
+    DRAGON_SQLITE3_LIB="$<TARGET_FILE:dragon_sqlite3>"
+    DRAGON_PCRE2_LIB="$<TARGET_FILE:pcre2-8-static>"
+    DRAGON_LLHTTP_LIB="$<TARGET_FILE:dragon_llhttp>"
+    DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib")
+if(DRAGON_ASAN)
+    target_link_libraries(dragon_repl_tests PRIVATE
+        dragon_lib dragon_runtime_asan dragon_sqlite3 gtest_main)
+    target_link_options(dragon_repl_tests PRIVATE
+        "LINKER:--whole-archive,$<TARGET_FILE:dragon_runtime_asan>,--no-whole-archive"
+        ${DRAGON_EXPORT_DYNAMIC} -fsanitize=address)
+else()
+    target_link_libraries(dragon_repl_tests PRIVATE
+        dragon_lib dragon_runtime dragon_sqlite3 gtest_main)
+    target_link_options(dragon_repl_tests PRIVATE
+        ${DRAGON_RUNTIME_WHOLE} ${DRAGON_EXPORT_DYNAMIC})
+endif()
+add_test(NAME ReplTests COMMAND dragon_repl_tests)
+
 file(GLOB DR_TEST_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dr/test_*.dr)
 foreach(_dr ${DR_TEST_FILES})
     get_filename_component(_name ${_dr} NAME_WE)

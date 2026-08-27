@@ -85,6 +85,12 @@ set(DRAGON_SOURCES
     src/Driver.cpp
     src/FfiSync.cpp
     src/Platform.cpp
+    src/codegen/Repl.cpp
+    src/repl/ReplJit.cpp
+    src/repl/ReplBridge.cpp
+    src/repl/ReplFrontend.cpp
+    src/repl/ReplTurn.cpp
+    src/repl/ReplSession.cpp
     src/dragon.cpp
 )
 
@@ -103,9 +109,16 @@ llvm_map_components_to_libnames(LLVM_LIBS
     passes
     target
     native
+    orcjit
+    jitlink
+    orcshared
+    orctargetprocess
+    executionengine
+    runtimedyld
 )
 
 target_link_libraries(dragon_lib PUBLIC ${LLVM_LIBS})
+target_link_libraries(dragon_lib PUBLIC dragon_runtime)
 
 add_library(dragon_llhttp STATIC
     lib/llhttp/llhttp.c
@@ -216,6 +229,7 @@ target_compile_options(dragon_mbedtls PRIVATE -w)
 
 set(DRAGON_EGG_OUT ${CMAKE_BINARY_DIR}/dragon-egg${CMAKE_EXECUTABLE_SUFFIX})
 set(DRAGON_EGG_SRC_FILE ${CMAKE_SOURCE_DIR}/tools/egg/egg.dr)
+set(DRAGON_REPL_SRC_FILE ${CMAKE_SOURCE_DIR}/tools/repl/repl.dr)
 
 # Baked on every platform: bare -lzstd misses /usr/local/lib on the BSDs, so
 # compiled programs link zstd by the discovered absolute path.
@@ -231,11 +245,24 @@ target_compile_definitions(dragon_lib PRIVATE
     DRAGON_PLATFORM_DIR="${CMAKE_SOURCE_DIR}/platform"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
+    DRAGON_REPL_SRC="${DRAGON_REPL_SRC_FILE}"
     $<$<BOOL:${DRAGON_ASAN}>:DRAGON_ASAN_BUILD=1>)
 
 add_executable(dragon tools/dragon/main.cpp)
 target_compile_options(dragon PRIVATE ${DRAGON_WARNINGS})
-target_link_libraries(dragon PRIVATE dragon_lib dragon_runtime)
+
+if(APPLE)
+    set(DRAGON_RUNTIME_WHOLE
+        "LINKER:-force_load,$<TARGET_FILE:dragon_runtime>")
+    set(DRAGON_EXPORT_DYNAMIC "LINKER:-export_dynamic")
+else()
+    set(DRAGON_RUNTIME_WHOLE
+        "LINKER:--whole-archive,$<TARGET_FILE:dragon_runtime>,--no-whole-archive")
+    set(DRAGON_EXPORT_DYNAMIC "-rdynamic")
+endif()
+
+target_link_libraries(dragon PRIVATE dragon_lib dragon_runtime dragon_sqlite3)
+target_link_options(dragon PRIVATE ${DRAGON_RUNTIME_WHOLE} ${DRAGON_EXPORT_DYNAMIC})
 if(APPLE)
     target_link_options(dragon PRIVATE LINKER:-dead_strip_dylibs)
 endif()
@@ -251,6 +278,7 @@ target_compile_definitions(dragon PRIVATE
     DRAGON_PLATFORM_DIR="${CMAKE_SOURCE_DIR}/platform"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
+    DRAGON_REPL_SRC="${DRAGON_REPL_SRC_FILE}"
     $<$<BOOL:${DRAGON_ASAN}>:DRAGON_ASAN_BUILD=1>)
 
 add_custom_command(

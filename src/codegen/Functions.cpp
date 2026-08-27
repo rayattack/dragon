@@ -840,6 +840,9 @@ void CodeGen::visit(FunctionDecl& node) {
 
     if (!func->empty()) return;
 
+    if (impl_->options.replMode && node.isInstantiation)
+        func->setLinkage(llvm::GlobalValue::LinkOnceODRLinkage);
+
     const std::string _savedModForGeneric = impl_->currentModuleName;
     struct RestoreModuleName {
         std::string* slot; std::string saved; bool active;

@@ -1,0 +1,395 @@
+"""The Dragon prompt.
+
+This file is the shell, and it is the first program the session's JIT runs. If
+it comes up, the JIT works.
+
+Enter adds a line. Alt+Enter, or Esc then Enter, runs the cell. Alt+Enter is
+one binding that every terminal and multiplexer delivers, because it arrives as
+an escape-prefixed Enter, which makes Esc-then-Enter the identical input for
+free. That equivalence is the escape hatch for the two real snags: macOS
+terminals where Option is not Meta, and desktops that grab Alt+Enter for
+fullscreen before the shell sees it. Ctrl+Enter is accepted as well wherever the
+terminal reports it.
+"""
+
+from term import RawMode, KeyDecoder, is_terminal, is_text, width
+from term import KEY_RUN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_SHIFT_TAB
+from term import KEY_BACKSPACE, KEY_DELETE, KEY_UP, KEY_DOWN, KEY_LEFT
+from term import KEY_RIGHT, KEY_HOME, KEY_END, KEY_RESIZED, KEY_EOF
+from term import KEY_TIMEOUT, KEY_ERROR
+from term import KEY_CTRL_A, KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_E
+from term import KEY_CTRL_K, KEY_CTRL_L, KEY_CTRL_U
+from term import clear_screen
+from cell import Cell
+from render import paint, paint_line, rows_used, fits_on_one_row
+from history import History
+
+extern "C" def dragon_repl_eval(cell: str) -> intc
+extern "C" def dragon_repl_command(name: str, arg: str) -> intc
+extern "C" def dragon_repl_version() -> str
+extern "C" def dragon_repl_turn_count() -> intc
+
+extern "C" def dragon_file_readline(handle: ptr) -> str
+extern "C" def fopen(path: str, mode: str) -> ptr
+
+enum Status {
+    OK = 0
+    FAILED = 1
+    QUIT = 2
+    UNKNOWN_COMMAND = 3
+    REFUSED = 4
+}
+
+const ESC_HINT: str = "(esc) Enter runs the cell, any other key cancels"
+
+const HELP: list[str] = [
+    "Enter          add a line to the cell",
+    "Alt+Enter      run the cell (Esc then Enter is the same key)",
+    "Up / Down      move within the cell; at the edges, walk history",
+    "Ctrl+C         discard the cell",
+    "Ctrl+D         exit on an empty cell, delete forward otherwise",
+    "",
+    ":help          this text",
+    ":reset         forget every binding and start a fresh session",
+    ":quit  :q      leave",
+]
+
+
+def print_banner(kitty: bool) -> None {
+    print("Dragon " + dragon_repl_version() + " - The Snake That Became a Dragon")
+    if kitty {
+        print("Enter adds a line. Alt+Enter, Ctrl+Enter, or Esc then Enter runs the cell. :help for commands.")
+    } else {
+        print("Enter adds a line. Alt+Enter (or Esc, Enter) runs the cell. :help for commands.")
+    }
+}
+
+
+def print_help(kitty: bool) -> None {
+    for line in HELP {
+        print(line)
+    }
+    if kitty {
+        print("")
+        print("Ctrl+Enter runs the cell (kitty keyboard protocol detected).")
+    } else {
+        print("")
+        print("Ctrl+Enter is not available: this terminal does not report it.")
+        print("Alt+Enter and Esc-then-Enter always work.")
+    }
+}
+
+
+def run_cell(source: str) -> int {
+    if len(source.strip()) == 0 {
+        return Status.OK
+    }
+    return int(dragon_repl_eval(source))
+}
+
+
+class Prompt {
+    """The read-edit-run loop over one reusable cell buffer."""
+
+    tty: RawMode
+    keys: KeyDecoder
+    cell: Cell
+    past: History
+    painted_rows: int
+    esc_armed: bool
+    done: bool
+
+    def(tty: RawMode) {
+        self.tty = tty
+        self.keys = tty.keys()
+        self.cell = Cell()
+        self.past = History()
+        self.painted_rows = 0
+        self.esc_armed = False
+        self.done = False
+    }
+
+    def _repaint() -> None {
+        const hint: str = ESC_HINT if self.esc_armed else ""
+        const frame: str = paint(self.cell, width(), self.painted_rows, hint)
+        self.tty.write(frame)
+        self.painted_rows = rows_used(self.cell, width())
+        if self.esc_armed {
+            self.painted_rows = self.painted_rows + 1
+        }
+    }
+
+    def _repaint_line() -> None {
+        if self.esc_armed or not fits_on_one_row(self.cell, width()) {
+            self._repaint()
+            return
+        }
+        self.tty.write(paint_line(self.cell, width()))
+    }
+
+    def _fresh_cell() -> None {
+        self.cell = Cell()
+        self.past.reset_cursor()
+        self.painted_rows = 0
+    }
+
+    def _submit() -> None {
+        const source: str = self.cell.text()
+        self.tty.write("\r\n")
+        self.past.record(source)
+
+        if self.cell.is_command() {
+            self._dispatch(self.cell.command_name(), self.cell.command_arg())
+        } else {
+            with self.tty.suspend() {
+                run_cell(source)
+            }
+        }
+        self._fresh_cell()
+        self._repaint()
+    }
+
+    def _dispatch(name: str, arg: str) -> None {
+        if name == "quit" or name == "q" {
+            self.done = True
+            return
+        }
+        if name == "help" {
+            with self.tty.suspend() {
+                print_help(self.tty.kitty)
+            }
+            return
+        }
+
+        code: int = 0
+        with self.tty.suspend() {
+            code = int(dragon_repl_command(name, arg))
+        }
+        if code == Status.UNKNOWN_COMMAND {
+            with self.tty.suspend() {
+                print("unknown command ':" + name + "'. :help lists them.")
+            }
+        }
+    }
+
+    def _discard() -> None {
+        self.tty.write("\r\n")
+        if self.cell.is_empty() {
+            with self.tty.suspend() {
+                print("(Ctrl+D to exit)")
+            }
+        }
+        self._fresh_cell()
+        self._repaint()
+    }
+
+    def _handle_up() -> None {
+        if self.cell.move_up() {
+            self._repaint()
+            return
+        }
+        self.cell.set_text(self.past.previous(self.cell.text()))
+        self._repaint()
+    }
+
+    def _handle_down() -> None {
+        if self.cell.move_down() {
+            self._repaint()
+            return
+        }
+        if self.past.at_end() {
+            self._repaint()
+            return
+        }
+        self.cell.set_text(self.past.next())
+        self._repaint()
+    }
+
+    def _handle_enter() -> None {
+        if self.esc_armed {
+            self.esc_armed = False
+            self._submit()
+            return
+        }
+        if self.cell.is_command() {
+            self._submit()
+            return
+        }
+        self.cell.insert_newline()
+        self._repaint()
+    }
+
+    def _handle_ctrl_d() -> None {
+        if self.cell.is_empty() {
+            self.tty.write("\r\n")
+            self.done = True
+            return
+        }
+        self.cell.delete_forward()
+        self._repaint_line()
+    }
+
+    def _handle(key: int) -> None {
+        const was_armed: bool = self.esc_armed
+        if key == KEY_ESC {
+            self.esc_armed = True
+            self._repaint()
+            return
+        }
+        if was_armed and key != KEY_ENTER {
+            self.esc_armed = False
+        }
+
+        if key == KEY_RUN {
+            self._submit()
+            return
+        }
+        if key == KEY_ENTER {
+            self._handle_enter()
+            return
+        }
+        if key == KEY_CTRL_C {
+            self.esc_armed = False
+            self._discard()
+            return
+        }
+        if key == KEY_CTRL_D {
+            self._handle_ctrl_d()
+            return
+        }
+        if key == KEY_BACKSPACE {
+            self.cell.backspace()
+            self._repaint()
+            return
+        }
+        if key == KEY_DELETE {
+            self.cell.delete_forward()
+            self._repaint_line()
+            return
+        }
+        if key == KEY_LEFT {
+            self.cell.move_left()
+            self._repaint()
+            return
+        }
+        if key == KEY_RIGHT {
+            self.cell.move_right()
+            self._repaint()
+            return
+        }
+        if key == KEY_UP {
+            self._handle_up()
+            return
+        }
+        if key == KEY_DOWN {
+            self._handle_down()
+            return
+        }
+        if key == KEY_HOME or key == KEY_CTRL_A {
+            self.cell.move_home()
+            self._repaint_line()
+            return
+        }
+        if key == KEY_END or key == KEY_CTRL_E {
+            self.cell.move_end()
+            self._repaint_line()
+            return
+        }
+        if key == KEY_CTRL_K {
+            self.cell.kill_to_end()
+            self._repaint()
+            return
+        }
+        if key == KEY_CTRL_U {
+            self.cell.kill_to_start()
+            self._repaint()
+            return
+        }
+        if key == KEY_CTRL_L {
+            self.tty.write(clear_screen())
+            self.painted_rows = 0
+            self._repaint()
+            return
+        }
+        if key == KEY_TAB {
+            self.cell.insert_indent()
+            self._repaint()
+            return
+        }
+        if key == KEY_SHIFT_TAB {
+            self.cell.dedent_line()
+            self._repaint()
+            return
+        }
+        if key == KEY_RESIZED {
+            self.painted_rows = 0
+            self._repaint()
+            return
+        }
+        if is_text(key) {
+            self.cell.insert_text(key)
+            self._repaint_line()
+            return
+        }
+    }
+
+    def loop() -> None {
+        self._repaint()
+        while not self.done {
+            const key: int = self.keys.next()
+            if key == KEY_EOF {
+                self.tty.write("\r\n")
+                return
+            }
+            if key == KEY_ERROR or key == KEY_TIMEOUT {
+                continue
+            }
+            self._handle(key)
+        }
+    }
+}
+
+
+def run_interactive() -> int {
+    with RawMode() as tty {
+        const prompt: Prompt = Prompt(tty)
+        tty.enable_kitty(prompt.keys)
+        with tty.suspend() {
+            print_banner(tty.kitty)
+        }
+        prompt.loop()
+    }
+    return 0
+}
+
+
+def run_piped() -> int {
+    """Standard input is not a terminal: read one cell, run it, exit.
+
+    One cell rather than many, because without a run keystroke there is nothing
+    to delimit cells with, and blank lines are legal inside a cell by design.
+    Splitting on them would reinvent the completeness guessing the cell model
+    exists to delete.
+    """
+    const handle: ptr = fopen("/dev/stdin", "r")
+    parts: list[str] = []
+    while True {
+        const line: str = dragon_file_readline(handle)
+        if len(line) == 0 {
+            break
+        }
+        parts.append(line)
+    }
+    const source: str = "".join(parts)
+    if len(source.strip()) == 0 {
+        return 0
+    }
+    return 1 if run_cell(source) != Status.OK else 0
+}
+
+
+if is_terminal() {
+    run_interactive()
+} else {
+    run_piped()
+}

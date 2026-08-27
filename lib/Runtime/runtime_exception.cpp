@@ -19,6 +19,10 @@ void dragon_assert_no_msg(int64_t condition) {
 #define EXC_VT (__dragon_exc_vt ? __dragon_exc_vt : __current_vthread)
 
 
+int32_t dragon_exc_active_frames() {
+    return (int32_t)__dragon_active_frames;
+}
+
 void* dragon_exc_push_frame() {
     __dragon_active_frames++;
     if (EXC_VT) {
@@ -267,7 +271,7 @@ void dragon_exc_cleanup_unwind(void) {
                                dragon_cleanup_active_saved()[sp_exc]);
 }
 
-static const char* dragon_exc_name_for_code(int code) {
+const char* dragon_exc_name_for_code(int code) {
     switch (code) {
         case 0:   return "BaseException";
         case 1:   return "SystemExit";

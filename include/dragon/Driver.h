@@ -14,7 +14,8 @@ struct DriverOptions {
         Check,
         Emit,
         FfiSync,
-        Migrate
+        Migrate,
+        Repl
     };
 
     Action action = Action::Build;
@@ -54,6 +55,7 @@ private:
     int buildFile(const std::string& filename);
     int checkFile(const std::string& filename);
     int migrateFile(const std::string& filename);
+    int replSession();
 
     std::string readFile(const std::string& filename);
     bool isDragonFile(const std::string& filename);

@@ -1,0 +1,75 @@
+"""history - whole cells, recalled intact.
+
+Storing whole cells rather than lines is the biggest practical win over a
+line-oriented prompt: up-arrow brings back an entire function definition ready
+to edit and re-run, instead of its last line.
+"""
+
+class History {
+    entries: list[str]
+    cursor: int
+    draft: str
+
+    def() {
+        self.entries = []
+        self.cursor = 0
+        self.draft = ""
+    }
+
+    def count() -> int {
+        return len(self.entries)
+    }
+
+    def record(cell: str) -> None {
+        if len(cell.strip()) == 0 {
+            self.cursor = len(self.entries)
+            return
+        }
+        const n: int = len(self.entries)
+        if n > 0 and self.entries[n - 1] == cell {
+            self.cursor = n
+            return
+        }
+        self.entries.append(cell)
+        self.cursor = len(self.entries)
+    }
+
+    def at_end() -> bool {
+        return self.cursor >= len(self.entries)
+    }
+
+    def previous(current: str) -> str {
+        """The earlier entry, stashing `current` on the first step back.
+
+        Stashing matters: walking back down has to return the half-written cell
+        the user abandoned, not an empty prompt.
+        """
+        if len(self.entries) == 0 {
+            return current
+        }
+        if self.at_end() {
+            self.draft = current
+        }
+        if self.cursor == 0 {
+            return self.entries[0]
+        }
+        self.cursor = self.cursor - 1
+        return self.entries[self.cursor]
+    }
+
+    def next() -> str {
+        if self.at_end() {
+            return self.draft
+        }
+        self.cursor = self.cursor + 1
+        if self.at_end() {
+            return self.draft
+        }
+        return self.entries[self.cursor]
+    }
+
+    def reset_cursor() -> None {
+        self.cursor = len(self.entries)
+        self.draft = ""
+    }
+}

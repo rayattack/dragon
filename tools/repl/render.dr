@@ -1,0 +1,145 @@
+"""render - paints a cell into a terminal frame.
+
+`paint` is a pure function: it returns the exact bytes to write and never
+touches the terminal. That is the single most useful property in this file,
+because it makes every rendering question a value assertion in a test with no
+tty, no pipe and no timing.
+
+Long lines are soft-wrapped here rather than left to the terminal. Terminals
+disagree about whether the cursor sticks in the last column, and cursor
+arithmetic that guesses wrong only breaks on somebody else's terminal. Wrapping
+explicitly makes the row count exact everywhere. The cost is that copying a
+wrapped line out of the scrollback keeps the break.
+"""
+
+from term import erase_line, erase_below, hide_cursor, show_cursor
+from term import cursor_up, cursor_right, dim
+from cell import Cell
+
+const PROMPT_FIRST: str = ">>> "
+const PROMPT_CONT: str = "... "
+const PROMPT_WIDTH: int = 4
+const PROMPT_WRAP: str = "    "
+
+const MIN_TEXT_WIDTH: int = 8
+
+
+def text_width(term_width: int) -> int {
+    const usable: int = term_width - PROMPT_WIDTH
+    return usable if usable >= MIN_TEXT_WIDTH else MIN_TEXT_WIDTH
+}
+
+
+def wrap_count(line_len: int, width: int) -> int {
+    """How many terminal rows one logical line occupies."""
+    if line_len == 0 {
+        return 1
+    }
+    const whole: int = line_len // width
+    const remainder: int = line_len % width
+    return whole + 1 if remainder > 0 else whole
+}
+
+
+def chunks(line: str, width: int) -> list[str] {
+    if len(line) == 0 {
+        return [""]
+    }
+    out: list[str] = []
+    start: int = 0
+    const n: int = len(line)
+    while start < n {
+        const stop: int = start + width
+        out.append(line[start:stop if stop < n else n])
+        start = stop
+    }
+    return out
+}
+
+
+def rows_used(cell: Cell, term_width: int) -> int {
+    """Terminal rows the whole cell occupies, wrapping included."""
+    const width: int = text_width(term_width)
+    total: int = 0
+    for i in range(cell.row_count()) {
+        total = total + wrap_count(len(cell.line(i)), width)
+    }
+    return total
+}
+
+
+def cursor_offset(cell: Cell, term_width: int) -> list[int] {
+    """The cursor as [row, column] in terminal space, wrapping included."""
+    const width: int = text_width(term_width)
+    row: int = 0
+    for i in range(cell.row) {
+        row = row + wrap_count(len(cell.line(i)), width)
+    }
+    row = row + cell.col // width
+    const column: int = PROMPT_WIDTH + (cell.col % width)
+    return [row, column]
+}
+
+
+def prompt_for(row: int) -> str {
+    return PROMPT_FIRST if row == 0 else PROMPT_CONT
+}
+
+
+def paint(cell: Cell, term_width: int, previous_rows: int, hint: str) -> str {
+    """The frame for `cell`, assuming `previous_rows` rows are already drawn."""
+    const width: int = text_width(term_width)
+    parts: list[str] = [hide_cursor(), "\r"]
+
+    if previous_rows > 1 {
+        parts.append(cursor_up(previous_rows - 1))
+    }
+
+    for i in range(cell.row_count()) {
+        const pieces: list[str] = chunks(cell.line(i), width)
+        for j in range(len(pieces)) {
+            parts.append(erase_line())
+            parts.append(prompt_for(i) if j == 0 else PROMPT_WRAP)
+            parts.append(pieces[j])
+            parts.append("\r\n")
+        }
+    }
+
+    parts.append(erase_below())
+
+    painted: int = rows_used(cell, term_width)
+    if len(hint) > 0 {
+        parts.append(erase_line())
+        parts.append(dim(hint))
+        parts.append("\r\n")
+        painted = painted + 1
+    }
+
+    const at: list[int] = cursor_offset(cell, term_width)
+    parts.append(cursor_up(painted - at[0]))
+    parts.append("\r")
+    parts.append(cursor_right(at[1]))
+    parts.append(show_cursor())
+
+    return "".join(parts)
+}
+
+
+def paint_line(cell: Cell, term_width: int) -> str {
+    """Repaint only the cursor's logical line.
+
+    The fast path for ordinary typing: a full repaint of a forty-line cell is
+    kilobytes per keystroke, and the hot path is sacred.
+    """
+    const width: int = text_width(term_width)
+    const line: str = cell.current()
+    parts: list[str] = ["\r", erase_line(),
+                        prompt_for(cell.row), line[0:width], "\r"]
+    parts.append(cursor_right(PROMPT_WIDTH + cell.col))
+    return "".join(parts)
+}
+
+
+def fits_on_one_row(cell: Cell, term_width: int) -> bool {
+    return wrap_count(len(cell.current()), text_width(term_width)) == 1
+}

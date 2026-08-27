@@ -90,6 +90,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
+        const bool residentDep = impl_->replModuleIsResident(dep->moduleName);
         for (auto& stmt : dep->body) {
             auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get());
             if (!ann || !ann->target) continue;
@@ -115,8 +116,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
             auto* gv = new llvm::GlobalVariable(
                 *impl_->module, gvType, false,
-                llvm::GlobalValue::InternalLinkage,
-                llvm::Constant::getNullValue(gvType),
+                impl_->entryGlobalLinkage(),
+                residentDep ? nullptr : llvm::Constant::getNullValue(gvType),
                 gvName);
             impl_->moduleGlobals[gKey] = gv;
             impl_->moduleGlobalKinds[gKey] = vk;
@@ -126,7 +127,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
     }
     impl_->currentModuleName = "";
 
-    for (auto& stmt : entryModule.body) {
+    for (size_t stmtIndex = 0; stmtIndex < entryModule.body.size(); ++stmtIndex) {
+        auto& stmt = entryModule.body[stmtIndex];
+        const bool resident = impl_->replStmtIsResident(stmtIndex);
         if (auto* as = dynamic_cast<AssignStmt*>(stmt.get())) {
             if (as->targets.size() == 1) {
                 if (auto* tup = dynamic_cast<TupleExpr*>(as->targets[0].get())) {
@@ -175,11 +178,12 @@ bool CodeGen::generate(dragon::Module& entryModule,
                         }
                         auto* ugv = new llvm::GlobalVariable(
                             *impl_->module, ugvType, false,
-                            llvm::GlobalValue::InternalLinkage,
-                            llvm::Constant::getNullValue(ugvType), ugvName);
+                            impl_->entryGlobalLinkage(),
+                            resident ? nullptr : llvm::Constant::getNullValue(ugvType),
+                            ugvName);
                         impl_->moduleGlobals[ugKey] = ugv;
                         impl_->moduleGlobalKinds[ugKey] = uvk;
-                        impl_->entryGlobalsAwaitingInit.insert(ugKey);
+                        if (!resident) impl_->entryGlobalsAwaitingInit.insert(ugKey);
                     }
                 }
             }
@@ -212,12 +216,12 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
         auto* gv = new llvm::GlobalVariable(
             *impl_->module, gvType, false,
-            llvm::GlobalValue::InternalLinkage,
-            llvm::Constant::getNullValue(gvType),
+            impl_->entryGlobalLinkage(),
+            resident ? nullptr : llvm::Constant::getNullValue(gvType),
             gvName);
         impl_->moduleGlobals[gKey] = gv;
         impl_->moduleGlobalKinds[gKey] = vk;
-        impl_->entryGlobalsAwaitingInit.insert(gKey);
+        if (!resident) impl_->entryGlobalsAwaitingInit.insert(gKey);
 
         impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
     }
@@ -226,7 +230,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
+        const bool residentDep = impl_->replModuleIsResident(dep->moduleName);
         for (auto& stmt : dep->body) {
+            if (residentDep && dynamic_cast<FunctionDecl*>(stmt.get())) continue;
             if (dynamic_cast<FunctionDecl*>(stmt.get()) ||
                 dynamic_cast<ClassDecl*>(stmt.get()) ||
                 dynamic_cast<ImportStmt*>(stmt.get()) ||
@@ -252,15 +258,25 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
     auto* i32Ty = llvm::Type::getInt32Ty(*impl_->context);
     auto* charPtrPtrTy = llvm::PointerType::getUnqual(*impl_->context);
-    auto* mainType = llvm::FunctionType::get(
-        i32Ty, {i32Ty, charPtrPtrTy}, false);
-    auto* mainFunc = llvm::Function::Create(
-        mainType, llvm::Function::ExternalLinkage, "main", impl_->module.get());
+    const bool replMode = impl_->options.replMode;
+
+    llvm::Function* mainFunc = nullptr;
+    if (replMode) {
+        auto* turnType = llvm::FunctionType::get(impl_->voidType, {}, false);
+        mainFunc = llvm::Function::Create(
+            turnType, llvm::Function::ExternalLinkage,
+            impl_->replTurnEntryName(), impl_->module.get());
+    } else {
+        auto* mainType = llvm::FunctionType::get(
+            i32Ty, {i32Ty, charPtrPtrTy}, false);
+        mainFunc = llvm::Function::Create(
+            mainType, llvm::Function::ExternalLinkage, "main", impl_->module.get());
+    }
     auto* mainEntry = llvm::BasicBlock::Create(*impl_->context, "entry", mainFunc);
     impl_->builder->SetInsertPoint(mainEntry);
     impl_->currentFunction = mainFunc;
     impl_->mainFunction = mainFunc;
-    {
+    if (!replMode) {
         auto argIt = mainFunc->arg_begin();
         llvm::Value* argcArg = &*argIt++;
         llvm::Value* argvArg = &*argIt;
@@ -606,6 +622,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
     impl_->moduleBodyScopeDepth = impl_->scopes.size();
 
     for (auto* dep : depModules) {
+        if (impl_->replModuleIsResident(dep->moduleName)) continue;
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
             if (dynamic_cast<AnnAssignStmt*>(stmt.get())) {
@@ -615,7 +632,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
     }
     impl_->currentModuleName = "";
 
-    for (auto& stmt : entryModule.body) {
+    for (size_t stmtIndex = 0; stmtIndex < entryModule.body.size(); ++stmtIndex) {
+        auto& stmt = entryModule.body[stmtIndex];
+        if (impl_->replStmtIsResident(stmtIndex)) continue;
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
             if (impl_->decoratedClassesBySym.count(impl_->classSym(cd->name))) {
                 auto dgIt = impl_->classDescriptorGlobalsBySym.find(impl_->classSym(cd->name));
@@ -681,9 +700,15 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->builder->SetInsertPoint(savedBB);
     }
 
+    if (impl_->options.replTeardown) impl_->emitReplTeardown();
+
     if (!impl_->builder->GetInsertBlock()->getTerminator()) {
-        impl_->builder->CreateRet(
-            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0));
+        if (replMode) {
+            impl_->builder->CreateRetVoid();
+        } else {
+            impl_->builder->CreateRet(
+                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0));
+        }
     }
 
     // One module = every Dragon symbol goes internal (main + the ui asset table stay external):
@@ -691,13 +716,15 @@ bool CodeGen::generate(dragon::Module& entryModule,
         return n == "main" || n == "dragon_ui_assets" || n == "dragon_ui_asset_count" ||
                n.starts_with("llvm.");
     };
-    for (auto& fn : *impl_->module) {
-        if (fn.isDeclaration() || keepExternal(fn.getName())) continue;
-        fn.setLinkage(llvm::GlobalValue::InternalLinkage);
-    }
-    for (auto& gv : impl_->module->globals()) {
-        if (gv.isDeclaration() || keepExternal(gv.getName())) continue;
-        gv.setLinkage(llvm::GlobalValue::InternalLinkage);
+    if (!replMode) {
+        for (auto& fn : *impl_->module) {
+            if (fn.isDeclaration() || keepExternal(fn.getName())) continue;
+            fn.setLinkage(llvm::GlobalValue::InternalLinkage);
+        }
+        for (auto& gv : impl_->module->globals()) {
+            if (gv.isDeclaration() || keepExternal(gv.getName())) continue;
+            gv.setLinkage(llvm::GlobalValue::InternalLinkage);
+        }
     }
 
     std::string verifyErr;
@@ -712,6 +739,15 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
 llvm::Module* CodeGen::getLLVMModule() {
     return impl_->module.get();
+}
+
+std::unique_ptr<llvm::Module> CodeGen::takeModule() {
+    impl_->builder.reset();
+    return std::move(impl_->module);
+}
+
+std::unique_ptr<llvm::LLVMContext> CodeGen::takeContext() {
+    return std::move(impl_->context);
 }
 
 bool CodeGen::writeIR(const std::string& filename) {

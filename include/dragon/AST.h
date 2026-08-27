@@ -603,6 +603,7 @@ public:
     std::vector<std::string> mutatedCapturedVars;
     std::optional<std::string> docstring;
     std::string genericHomeModule;
+    bool isInstantiation = false;
     void accept(ASTVisitor& visitor) override;
 };
 

@@ -385,11 +385,18 @@ static void vthread_release(DragonVThread* vt) {
     free(vt);
 }
 
+static int64_t __dragon_vthread_live = 0;
+
+int64_t dragon_vthread_live_count(void) {
+    return __atomic_load_n(&__dragon_vthread_live, __ATOMIC_ACQUIRE);
+}
+
 static void vthread_mark_done_and_release(DragonVThread* vt) {
     int8_t expected = 0;
     if (!__atomic_compare_exchange_n(&vt->done, &expected, (int8_t)1, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
+    __atomic_fetch_sub(&__dragon_vthread_live, 1, __ATOMIC_ACQ_REL);
     pthread_mutex_lock(&vt->join_lock);
     pthread_cond_broadcast(&vt->join_cond);
     pthread_mutex_unlock(&vt->join_lock);
@@ -509,6 +516,7 @@ DragonVThread* dragon_vthread_spawn_typed(
         return NULL;
     }
 
+    __atomic_fetch_add(&__dragon_vthread_live, 1, __ATOMIC_ACQ_REL);
     scheduler_enqueue(vt);
     return vt;
 }

@@ -510,6 +510,36 @@ struct CodeGen::Impl {
     std::unordered_set<std::string> entryGlobalsAwaitingInit;
     llvm::Function* mainFunction = nullptr;
     size_t moduleBodyScopeDepth = 0;
+
+    std::string replTurnEntryName() const {
+        return std::string(options.replTeardown ? "repl.teardown." : "repl.turn.")
+             + std::to_string(options.replTurnIndex);
+    }
+
+    void emitReplTeardown() {
+        for (auto& [key, gv] : moduleGlobals) {
+            auto kindIt = moduleGlobalKinds.find(key);
+            if (kindIt == moduleGlobalKinds.end()) continue;
+            if (!isHeapKind(kindIt->second)) continue;
+            auto* valueType = gv->getValueType();
+            auto* current = builder->CreateLoad(valueType, gv, "teardown.held");
+            emitDecrefByKind(current, kindIt->second);
+            builder->CreateStore(llvm::Constant::getNullValue(valueType), gv);
+        }
+    }
+    bool replStmtIsResident(size_t index) const {
+        return options.replMode && index < options.replResidentStmtCount;
+    }
+    bool replModuleIsResident(const std::string& moduleName) const {
+        if (!options.replMode || moduleName.empty()) return false;
+        for (const auto& name : options.replResidentModules)
+            if (name == moduleName) return true;
+        return false;
+    }
+    llvm::GlobalValue::LinkageTypes entryGlobalLinkage() const {
+        return options.replMode ? llvm::GlobalValue::ExternalLinkage
+                                : llvm::GlobalValue::InternalLinkage;
+    }
     bool isDragonFile = false;
     std::vector<dragon::Module*> depModulePtrs;
     dragon::Module* entryModulePtr = nullptr;
@@ -857,7 +887,15 @@ struct CodeGen::Impl {
 
     llvm::Value* emitActiveFramesNonZero() {
         auto* i32Ty = llvm::Type::getInt32Ty(*context);
-        auto* af = builder->CreateLoad(i32Ty, getActiveFramesGlobal(), "active.frames");
+        llvm::Value* af = nullptr;
+        if (options.jitTarget) {
+            auto* fn = getOrDeclareRuntime(
+                "dragon_exc_active_frames",
+                llvm::FunctionType::get(i32Ty, {}, false));
+            af = builder->CreateCall(fn, {}, "active.frames");
+        } else {
+            af = builder->CreateLoad(i32Ty, getActiveFramesGlobal(), "active.frames");
+        }
         return builder->CreateICmpNE(af, llvm::ConstantInt::get(i32Ty, 0), "frame.live");
     }
 
