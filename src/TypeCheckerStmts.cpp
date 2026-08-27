@@ -601,6 +601,10 @@ void TypeChecker::visit(ForStmt& node) {
         } else if (iterType->kind() == Type::Kind::Dict) {
             auto keyT = static_cast<DictType&>(*iterType).keyType;
             impl_->define(name->name, keyT ? keyT : impl_->unknownType);
+        } else if (iterType->kind() == Type::Kind::Bytes) {
+            impl_->define(name->name, impl_->intType);
+        } else if (iterType->kind() == Type::Kind::Str) {
+            impl_->define(name->name, impl_->strType);
         } else if (iterType->kind() == Type::Kind::Instance) {
             auto methodReturn = [&](const ClassType* cls, const std::string& m)
                 -> std::shared_ptr<Type> {

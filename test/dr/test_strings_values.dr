@@ -483,6 +483,83 @@ class TypeBuiltinTests(TestCase) {
 }
 
 
+class ByteHolder {
+    data: bytes
+
+    def(data: bytes) {
+        self.data = data
+    }
+}
+
+
+class BytesIterationTests(TestCase) {
+    """A for loop over bytes yields each byte as an int (DRG-84).
+    Pre-fix: a bytes iterable took the list lane, so dragon_list_len walked a
+    DragonBytes as a DragonList and the compiled program segfaulted."""
+
+    def test_for_over_encoded_temp() {
+        total: int = 0
+        for b in "abc".encode("utf-8") {
+            total = total + b
+        }
+        self.assertEqual(total, ord("a") + ord("b") + ord("c"))
+    }
+
+    def test_for_over_bytes_local() {
+        data: bytes = "é".encode("utf-8")
+        out: list[int] = []
+        for b in data {
+            out.append(b)
+        }
+        self.assertEqual(out, [data[0], data[1]])
+    }
+
+    def test_for_over_bytes_literal() {
+        count: int = 0
+        for b in b"xyz" {
+            count = count + 1
+        }
+        self.assertEqual(count, 3)
+    }
+
+    def test_loop_var_is_an_int() {
+        shifted: list[int] = []
+        for b in b"AB" {
+            shifted.append(b + 1)
+        }
+        self.assertEqual(shifted, [ord("B"), ord("C")])
+    }
+
+    def test_empty_bytes_skips_the_body() {
+        ran: bool = False
+        for b in "".encode("utf-8") {
+            ran = True
+        }
+        self.assertFalse(ran)
+    }
+
+    def test_bytes_field_iterates() {
+        h: ByteHolder = ByteHolder(b"hi")
+        seen: list[int] = []
+        for b in h.data {
+            seen.append(b)
+        }
+        self.assertEqual(seen, [ord("h"), ord("i")])
+    }
+
+    def test_encoded_temp_iterated_repeatedly() {
+        grand: int = 0
+        for i in range(2000) {
+            for b in "leak probe".encode("utf-8") {
+                grand = grand + b
+            }
+        }
+        per_pass: int = ord("l") + ord("e") + ord("a") + ord("k") + ord(" ") + ord("p") + ord("r") + ord("o") + ord("b") + ord("e")
+        self.assertEqual(grand, 2000 * per_pass)
+    }
+}
+
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
-      ConversionTests(), TypeBuiltinTests()])
+      ConversionTests(), TypeBuiltinTests(), BytesIterationTests()])

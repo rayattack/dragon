@@ -614,6 +614,7 @@ void CodeGen::visit(ForStmt& node) {
     }
 
     bool isStrIterable = false;
+    bool isBytesIterable = false;
     bool isListIterable = false;
     bool isDictItemsIterable = false;
     bool isDictKeysIterable = false;
@@ -656,6 +657,15 @@ void CodeGen::visit(ForStmt& node) {
         }
     }
     if (!isDictItemsIterable && !isDictKeysIterable && !isListIterable) {
+        if (node.iterable->type &&
+            node.iterable->type->kind() == Type::Kind::Bytes) {
+            isBytesIterable = true;
+        } else if (auto* lit = dynamic_cast<StringLiteral*>(node.iterable.get())) {
+            if (lit->isBytes) isBytesIterable = true;
+        }
+    }
+    if (!isDictItemsIterable && !isDictKeysIterable && !isListIterable &&
+        !isBytesIterable) {
         if (auto* iterName = dynamic_cast<NameExpr*>(node.iterable.get())) {
             auto kind = impl_->lookupVarKind(iterName->name);
             if (kind == Impl::VarKind::Str || kind == Impl::VarKind::StrLiteral) isStrIterable = true;
@@ -734,7 +744,8 @@ void CodeGen::visit(ForStmt& node) {
         node.iterable->type &&
         (node.iterable->type->kind() == Type::Kind::List ||
          node.iterable->type->kind() == Type::Kind::Set ||
-         node.iterable->type->kind() == Type::Kind::Tuple);
+         node.iterable->type->kind() == Type::Kind::Tuple ||
+         node.iterable->type->kind() == Type::Kind::Bytes);
     if (isDictKeysIterable || isDictItemsIterable || ownedContainerIter) {
         impl_->setVar(iterName, iterAlloca, Impl::VarKind::List);
     }
@@ -760,6 +771,9 @@ void CodeGen::visit(ForStmt& node) {
     if (isStrIterable) {
         lenVal = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_len"], {iterLoaded}, "len");
+    } else if (isBytesIterable) {
+        lenVal = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_bytes_len"], {iterLoaded}, "len");
     } else {
         lenVal = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_list_len"], {iterLoaded}, "len");
@@ -954,6 +968,12 @@ void CodeGen::visit(ForStmt& node) {
             impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Str);
             impl_->scopes.back().borrowed.insert(targetName->name);
         }
+    } else if (isBytesIterable) {
+        llvm::Value* elem = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_bytes_get"], {iterLoaded, currentIdx}, "byte");
+        auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->i64Type);
+        impl_->builder->CreateStore(elem, targetAlloca);
+        impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Int);
     } else if (isStrIterable) {
         llvm::Value* elem = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_index"], {iterLoaded, currentIdx}, "ch");
