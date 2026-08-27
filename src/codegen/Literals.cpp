@@ -596,10 +596,11 @@ void CodeGen::visit(TemplateExpr& node) {
         }
     }
 
+    llvm::Value* result;
     if (parts.empty()) {
-        impl_->lastValue = impl_->builder->CreateGlobalString("");
+        result = impl_->emitStringLiteralBytes("");
     } else {
-        llvm::Value* result = parts[0];
+        result = parts[0];
         for (size_t k = 1; k < parts.size(); k++) {
             llvm::Value* prev = result;
             result = impl_->builder->CreateCall(
@@ -619,29 +620,29 @@ void CodeGen::visit(TemplateExpr& node) {
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_decref_str"], {parts[0]});
         }
-        if (!node.contentType.empty() && !node.isContentAlias) {
-            std::string symPrefix = impl_->classSymPrefix(node.contentType);
+    }
+    if (!node.contentType.empty() && !node.isContentAlias) {
+        std::string symPrefix = impl_->classSymPrefix(node.contentType);
 
-            std::string validateFn = symPrefix + "_validate";
-            auto* valFunc = impl_->module->getFunction(validateFn);
-            if (valFunc) {
-                impl_->builder->CreateCall(valFunc, {result});
-            }
+        std::string validateFn = symPrefix + "_validate";
+        auto* valFunc = impl_->module->getFunction(validateFn);
+        if (valFunc) {
+            impl_->builder->CreateCall(valFunc, {result});
+        }
 
-            std::string newFn = symPrefix + "_new";
-            auto* ctorFunc = impl_->module->getFunction(newFn);
-            if (ctorFunc) {
-                llvm::Value* innerStr = result;
-                result = impl_->builder->CreateCall(ctorFunc, {innerStr}, "tpl_inst");
-                if (impl_->options.gcMode == GCMode::RC &&
-                    impl_->isOwnedStrResult(innerStr)) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_decref_str"], {innerStr});
-                }
+        std::string newFn = symPrefix + "_new";
+        auto* ctorFunc = impl_->module->getFunction(newFn);
+        if (ctorFunc) {
+            llvm::Value* innerStr = result;
+            result = impl_->builder->CreateCall(ctorFunc, {innerStr}, "tpl_inst");
+            if (impl_->options.gcMode == GCMode::RC &&
+                impl_->isOwnedStrResult(innerStr)) {
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_decref_str"], {innerStr});
             }
         }
-        impl_->lastValue = result;
     }
+    impl_->lastValue = result;
 
     if (!impl_->templateContextStack.empty()) {
         impl_->templateContextStack.pop_back();

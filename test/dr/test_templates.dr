@@ -24,6 +24,11 @@ def tmpl_block(pairs: list[tuple[str, str]]) -> str {
 }
 
 
+def render_nothing() -> HTML {
+    return template[HTML] {}
+}
+
+
 class TemplateFileBangTests(TestCase) {
     """A file template containing `!!` must embed, not hang the compiler.
 
@@ -121,4 +126,60 @@ class TemplateTupleInterpTests(TestCase) {
 }
 
 
-main([TemplateFileBangTests(), TemplateTupleInterpTests()])
+class EmptyTypedTemplateTests(TestCase) {
+    """An empty typed template literal must be a real instance, not a segfault.
+
+    You write ordinary, correct-looking Dragon - the idiomatic "render
+    nothing" fragment a page helper returns when there is no error to show:
+
+        def error_banner(msg: str) -> HTML {
+            if msg == "" { return template[HTML] {} }
+            return template[HTML] {<p class="err">!{msg}</p>}
+        }
+
+    You did nothing wrong: `template[HTML] { }` with one space works, and
+    `template {}` untyped works, but the typed empty literal killed the whole
+    process with SIGSEGV the moment anything touched the value - before any
+    exception handler could run, so a server just vanished mid-request.
+
+    An empty body lowers zero parts, and the zero-parts path returned a bare
+    headerless byte pointer AND skipped the content-type constructor, so a
+    value typed `HTML` was never an HTML instance. `to_str()` then read an
+    object field out of string bytes. Now the empty result is a real Dragon
+    string and flows through the same constructor wrap as every other body.
+
+    Before: `error_banner("")` crashed the process. After: it returns an HTML
+    instance whose `to_str()` is `""`, and it embeds into a page as nothing.
+    """
+
+    def test_empty_typed_literal_is_a_real_instance() {
+        const e: HTML = template[HTML] {}
+        self.assertEqual(e.to_str(), "")
+        self.assertEqual(len(e.to_str()), 0)
+    }
+
+    def test_empty_fragment_returned_from_helper() {
+        const banner: HTML = render_nothing()
+        self.assertEqual(banner.to_str(), "")
+    }
+
+    def test_empty_fragment_embeds_into_page() {
+        const page: HTML = template[HTML] {<div>!{render_nothing()}</div>}
+        self.assertEqual(page.to_str(), "<div></div>")
+    }
+
+    def test_single_space_body_still_wraps() {
+        const s: HTML = template[HTML] { }
+        self.assertEqual(s.to_str(), " ")
+    }
+
+    def test_untyped_empty_is_empty_str() {
+        const s: str = template {}
+        self.assertEqual(s, "")
+        self.assertEqual(len(s), 0)
+    }
+}
+
+
+main([TemplateFileBangTests(), TemplateTupleInterpTests(),
+      EmptyTypedTemplateTests()])
