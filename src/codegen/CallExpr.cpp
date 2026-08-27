@@ -2,25 +2,62 @@
 
 namespace dragon {
 
-static int ctorOverloadForArity(
+static int ctorOverloadForCall(
     const std::unordered_map<std::string, std::vector<Expr*>>& paramDefaults,
+    const std::unordered_map<std::string, std::vector<std::string>>& paramNames,
     const std::string& ctorPrefix,
     const std::vector<std::pair<size_t, int>>& arityVec,
-    size_t callArity) {
+    size_t nPos,
+    const std::vector<std::string>& kwNames) {
+    int best = -1;
+    size_t bestDefaults = 0;
+    bool tie = false;
     for (auto& [arity, idx] : arityVec) {
-        if (arity == callArity) return idx;
+        if (nPos > arity) continue;
+        const std::string sym = ctorPrefix + "_new_" + std::to_string(idx);
+        std::vector<bool> filled(arity, false);
+        for (size_t i = 0; i < nPos; ++i) filled[i] = true;
+        bool binds = true;
+        if (!kwNames.empty()) {
+            auto nIt = paramNames.find(sym);
+            if (nIt == paramNames.end()) continue;
+            for (auto& kw : kwNames) {
+                auto pit = std::find(nIt->second.begin(), nIt->second.end(), kw);
+                if (pit == nIt->second.end()) { binds = false; break; }
+                size_t pIdx = (size_t)std::distance(nIt->second.begin(), pit);
+                if (pIdx >= arity || filled[pIdx]) { binds = false; break; }
+                filled[pIdx] = true;
+            }
+            if (!binds) continue;
+        }
+        size_t defaultsUsed = 0;
+        auto dIt = paramDefaults.find(sym);
+        for (size_t i = 0; i < arity; ++i) {
+            if (filled[i]) continue;
+            if (dIt == paramDefaults.end() || i >= dIt->second.size() ||
+                !dIt->second[i]) {
+                binds = false;
+                break;
+            }
+            ++defaultsUsed;
+        }
+        if (!binds) continue;
+        if (best < 0 || defaultsUsed < bestDefaults) {
+            best = idx;
+            bestDefaults = defaultsUsed;
+            tie = false;
+        } else if (defaultsUsed == bestDefaults) {
+            tie = true;
+        }
     }
-    for (auto& [arity, idx] : arityVec) {
-        if (callArity >= arity) continue;
-        auto dIt = paramDefaults.find(ctorPrefix + "_new_" + std::to_string(idx));
-        if (dIt == paramDefaults.end()) continue;
-        size_t trailingDefaults = 0;
-        for (auto rit = dIt->second.rbegin();
-             rit != dIt->second.rend() && *rit; ++rit)
-            ++trailingDefaults;
-        if (callArity >= arity - trailingDefaults) return idx;
-    }
-    return -1;
+    return tie ? -2 : best;
+}
+
+static std::vector<std::string> namedKwArgs(const CallExpr& node) {
+    std::vector<std::string> names;
+    for (auto& kw : node.kwArgs)
+        if (!kw.first.empty()) names.push_back(kw.first);
+    return names;
 }
 
 void CodeGen::visit(CallExpr& node) {
@@ -326,17 +363,20 @@ void CodeGen::visit(CallExpr& node) {
             std::string ctorName;
             auto ctorCountIt = impl_->classCtorCountBySym.find(impl_->classSym(name));
             if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
-                size_t callArity = node.args.size();
                 auto& arityVec = impl_->classCtorAritiesBySym[impl_->classSym(name)];
-                int matchedIdx = ctorOverloadForArity(
-                    impl_->funcParamDefaults, ctorPrefix, arityVec, callArity);
+                int matchedIdx = ctorOverloadForCall(
+                    impl_->funcParamDefaults, impl_->funcParamNames, ctorPrefix,
+                    arityVec, node.args.size(), namedKwArgs(node));
                 if (matchedIdx >= 0) {
                     ctorName = ctorPrefix + "_new_" + std::to_string(matchedIdx);
                 } else {
                     impl_->addError(
-                        "internal error: no constructor overload of '" + name +
-                        "' matches arity " + std::to_string(callArity) +
-                        "; the type checker should have rejected this call",
+                        "internal error: the call matches " +
+                        std::string(matchedIdx == -2 ? "multiple constructor "
+                                                       "overloads"
+                                                     : "no constructor overload") +
+                        " of '" + name +
+                        "'; the type checker should have rejected this call",
                         node.location());
                     ctorName = ctorPrefix + "_new_" + std::to_string(arityVec[0].second);
                 }
@@ -934,16 +974,19 @@ void CodeGen::visit(CallExpr& node) {
                 std::string ctorName;
                 auto ctorCountIt = impl_->classCtorCountBySym.find(ctorPrefix);
                 if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
-                    size_t callArity = node.args.size();
                     auto& arityVec = impl_->classCtorAritiesBySym[ctorPrefix];
-                    int matchedIdx = ctorOverloadForArity(
-                        impl_->funcParamDefaults, ctorPrefix, arityVec, callArity);
+                    int matchedIdx = ctorOverloadForCall(
+                        impl_->funcParamDefaults, impl_->funcParamNames,
+                        ctorPrefix, arityVec, node.args.size(),
+                        namedKwArgs(node));
                     if (matchedIdx < 0) {
                         impl_->addError(
-                            "internal error: no constructor overload of '" +
-                            attr->attribute + "' matches arity " +
-                            std::to_string(callArity) +
-                            "; the type checker should have rejected this call",
+                            "internal error: the call matches " +
+                            std::string(matchedIdx == -2
+                                            ? "multiple constructor overloads"
+                                            : "no constructor overload") +
+                            " of '" + attr->attribute +
+                            "'; the type checker should have rejected this call",
                             node.location());
                         matchedIdx = arityVec.empty() ? 0 : arityVec[0].second;
                     }
@@ -963,6 +1006,53 @@ void CodeGen::visit(CallExpr& node) {
                         if (i < ctorFuncType->getNumParams())
                             arg = impl_->coerceArg(arg, ctorFuncType->getParamType(i));
                         args.push_back(arg);
+                    }
+                    if (!node.kwArgs.empty()) {
+                        auto pnIt = impl_->funcParamNames.find(ctorName);
+                        if (pnIt != impl_->funcParamNames.end()) {
+                            const auto& pNames = pnIt->second;
+                            size_t numParams = ctorFuncType->getNumParams();
+                            if (args.size() < numParams)
+                                args.resize(numParams, nullptr);
+                            for (auto& [kwName, kwVal] : node.kwArgs) {
+                                auto nameIt = std::find(pNames.begin(),
+                                                        pNames.end(), kwName);
+                                if (nameIt == pNames.end()) {
+                                    impl_->addError(
+                                        "class '" + attr->attribute +
+                                        "' constructor got an unexpected "
+                                        "keyword argument '" + kwName + "'",
+                                        node.location());
+                                    return;
+                                }
+                                size_t idx = (size_t)std::distance(
+                                    pNames.begin(), nameIt);
+                                if (idx >= numParams) {
+                                    impl_->addError(
+                                        "keyword argument '" + kwName +
+                                        "' out of range for ctor '" +
+                                        attr->attribute + "'",
+                                        node.location());
+                                    return;
+                                }
+                                if (args[idx] != nullptr) {
+                                    impl_->addError(
+                                        "class '" + attr->attribute +
+                                        "' constructor got multiple values "
+                                        "for argument '" + kwName + "'",
+                                        node.location());
+                                    return;
+                                }
+                                kwVal->accept(*this);
+                                llvm::Value* arg = impl_->lastValue;
+                                impl_->collectArgTemp(ctorName, kwVal.get(),
+                                                      arg, (unsigned)idx,
+                                                      argTemps);
+                                args[idx] = impl_->coerceArg(
+                                    arg, ctorFuncType->getParamType(
+                                             (unsigned)idx));
+                            }
+                        }
                     }
                     impl_->fillDefaultArgs(ctorName, ctorFunc, args, *this, &argTemps);
                     auto argTempBases = impl_->pushArgTempCleanups(argTemps);

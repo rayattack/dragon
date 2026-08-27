@@ -9,3 +9,14 @@ class Pair {
         self.v = a + b + c
     }
 }
+
+
+class Single {
+    x: int = 0
+    y: int = 0
+
+    def(x: int, y: int = 7) {
+        self.x = x
+        self.y = y
+    }
+}

@@ -52,4 +52,45 @@ class CtorOverloadDispatchTests(TestCase) {
 }
 
 
-main([CtorOverloadDispatchTests()])
+class CtorKwargsDispatchTests(TestCase) {
+    """Keyword arguments on constructor overloads bind by name: the overload
+    that fits with the fewest defaults filled wins, and a call fitting no
+    overload (or, were it possible, more than one equally well) is a compile
+    error, never a guess. Also pins the module-qualified single-constructor
+    kwargs path, which used to drop the kwargs and emit a null operand."""
+
+    def test_kwargs_pick_the_right_overload() {
+        self.assertEqual(Local(a=9).v, 9)
+        self.assertEqual(Local(a=1, b=2, c=3).v, 6)
+    }
+
+    def test_mixed_positional_and_kwargs() {
+        self.assertEqual(Local(1, b=2).v, 103)
+        self.assertEqual(Local(1, 2, c=3).v, 6)
+    }
+
+    def test_module_qualified_kwargs() {
+        self.assertEqual(ctorovl_mod.Pair(a=9).v, 9)
+        self.assertEqual(ctorovl_mod.Pair(1, b=2).v, 103)
+    }
+
+    def test_module_qualified_single_ctor_kwargs() {
+        const s: ctorovl_mod.Single = ctorovl_mod.Single(y=2, x=1)
+        self.assertEqual(s.x, 1)
+        self.assertEqual(s.y, 2)
+        const d: ctorovl_mod.Single = ctorovl_mod.Single(x=4)
+        self.assertEqual(d.y, 7)
+    }
+
+    def test_kwargs_dispatch_loop_no_leak() {
+        i: int = 0
+        while i < 5000 {
+            const p: ctorovl_mod.Pair = ctorovl_mod.Pair(a=i, b=1)
+            self.assertEqual(p.v, i + 101)
+            i = i + 1
+        }
+    }
+}
+
+
+main([CtorOverloadDispatchTests(), CtorKwargsDispatchTests()])

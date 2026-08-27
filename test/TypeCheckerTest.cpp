@@ -1818,3 +1818,9 @@ TEST(TypeCheckerTest, OverlappingConstructorDefaultsAreRejected) {
     EXPECT_TRUE(checkHasErrors(code("ctor_overlapping_defaults_rejected")));
     EXPECT_TRUE(checkOk(code("ctor_exact_shadow_of_defaults_ok")));
 }
+
+TEST(TypeCheckerTest, ConstructorOverloadKwargsBindByName) {
+    EXPECT_TRUE(checkOk(code("ctor_overload_kwargs_ok")));
+    EXPECT_TRUE(checkHasErrors(code("ctor_overload_kwargs_unknown_name_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("ctor_overload_kwargs_missing_required_rejected")));
+}

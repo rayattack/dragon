@@ -731,36 +731,56 @@ void TypeChecker::visit(CallExpr& node) {
                       "not inherited. Define 'def (...)' on '" + ct.name +
                       "' and delegate with 'super(...)'");
             }
-        } else if (!ct.constructorOverloads.empty() && node.kwArgs.empty()) {
+        } else if (!ct.constructorOverloads.empty() &&
+                   std::none_of(node.kwArgs.begin(), node.kwArgs.end(),
+                                [](const auto& kw) { return kw.first.empty(); })) {
             const size_t nArgs = node.args.size();
             FunctionType* matched = nullptr;
+            size_t matchedDefaults = 0;
+            bool ambiguous = false;
             for (auto& ov : ct.constructorOverloads) {
                 if (!ov || ov->kind() != Type::Kind::Function) continue;
                 auto& oft = static_cast<FunctionType&>(*ov);
-                if (!oft.hasVarArg && oft.paramTypes.size() == nArgs) {
+                if (!oft.hasArgMeta) continue;
+                const size_t nParams = oft.paramTypes.size();
+                if (!oft.hasVarArg && nArgs > nParams) continue;
+                std::vector<bool> filled(nParams, false);
+                for (size_t i = 0; i < nArgs && i < nParams; ++i)
+                    filled[i] = true;
+                bool binds = true;
+                for (auto& kw : node.kwArgs) {
+                    auto pit = std::find(oft.paramNames.begin(),
+                                         oft.paramNames.end(), kw.first);
+                    if (pit == oft.paramNames.end()) { binds = false; break; }
+                    size_t idx =
+                        (size_t)std::distance(oft.paramNames.begin(), pit);
+                    if (idx >= nParams || filled[idx]) { binds = false; break; }
+                    filled[idx] = true;
+                }
+                if (!binds) continue;
+                size_t defaultsUsed = 0;
+                for (size_t i = 0; i < nParams; ++i) {
+                    if (filled[i]) continue;
+                    if (i < oft.requiredParams) { binds = false; break; }
+                    ++defaultsUsed;
+                }
+                if (!binds) continue;
+                if (!matched || defaultsUsed < matchedDefaults) {
                     matched = &oft;
-                    break;
+                    matchedDefaults = defaultsUsed;
+                    ambiguous = false;
+                } else if (defaultsUsed == matchedDefaults) {
+                    ambiguous = true;
                 }
             }
-            if (!matched) {
-                for (auto& ov : ct.constructorOverloads) {
-                    if (!ov || ov->kind() != Type::Kind::Function) continue;
-                    auto& oft = static_cast<FunctionType&>(*ov);
-                    if (!oft.hasArgMeta) continue;
-                    const bool fits = oft.hasVarArg
-                        ? nArgs >= oft.requiredParams
-                        : (nArgs >= oft.requiredParams &&
-                           nArgs < oft.paramTypes.size());
-                    if (fits) {
-                        matched = &oft;
-                        break;
-                    }
-                }
-            }
-            if (matched) {
-                if (matched->hasArgMeta)
-                    validateCall(*matched, "class '" + ct.name + "' constructor");
-                if (nArgs == matched->paramTypes.size())
+            if (ambiguous) {
+                error(node.location(),
+                      "ambiguous constructor call: multiple overloads of "
+                      "class '" + ct.name + "' match these arguments equally "
+                      "well; call an exact overload's argument count");
+            } else if (matched) {
+                validateCall(*matched, "class '" + ct.name + "' constructor");
+                if (node.kwArgs.empty() && nArgs == matched->paramTypes.size())
                     checkPositionalArgs(*matched);
             } else {
                 std::string counts;
@@ -775,11 +795,18 @@ void TypeChecker::visit(CallExpr& node) {
                     else
                         counts += std::to_string(oft.paramTypes.size());
                 }
-                error(node.location(),
-                      "no constructor overload of class '" + ct.name +
-                      "' takes " + std::to_string(nArgs) +
-                      " positional argument" + (nArgs == 1 ? "" : "s") +
-                      " (overloads take " + counts + ")");
+                if (node.kwArgs.empty())
+                    error(node.location(),
+                          "no constructor overload of class '" + ct.name +
+                          "' takes " + std::to_string(nArgs) +
+                          " positional argument" + (nArgs == 1 ? "" : "s") +
+                          " (overloads take " + counts + ")");
+                else
+                    error(node.location(),
+                          "no constructor overload of class '" + ct.name +
+                          "' accepts these arguments (overloads take " +
+                          counts + "; every keyword must name a parameter "
+                          "of one overload)");
             }
         }
         node.type = std::make_shared<InstanceType>(

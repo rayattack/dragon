@@ -162,6 +162,53 @@ x: Q = Q(1)
 y: Q = Q(1, 2)
 ```
 
+#### :ctor_overload_kwargs_ok
+
+```dr
+class Q {
+    v: int = 0
+    def (a: int) {
+        self.v = a
+    }
+    def (a: int, b: int) {
+        self.v = a + b
+    }
+}
+w: Q = Q(a=1, b=2)
+x: Q = Q(1, b=2)
+y: Q = Q(a=9)
+```
+
+#### :ctor_overload_kwargs_unknown_name_rejected
+
+```dr
+class Q {
+    v: int = 0
+    def (a: int) {
+        self.v = a
+    }
+    def (a: int, b: int) {
+        self.v = a + b
+    }
+}
+q: Q = Q(a=1, zz=2)
+```
+
+#### :ctor_overload_kwargs_missing_required_rejected
+
+```dr
+class Q {
+    v: int = 0
+    def (a: int) {
+        self.v = a
+    }
+    def (a: int, b: int) {
+        self.v = a + b
+    }
+}
+q: Q = Q(b=2)
+```
+
 #### :ctor_overload_default_range_ok
 
 A defaulted trailing parameter widens the overload's accepted count downward,
