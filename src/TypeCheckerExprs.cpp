@@ -731,6 +731,56 @@ void TypeChecker::visit(CallExpr& node) {
                       "not inherited. Define 'def (...)' on '" + ct.name +
                       "' and delegate with 'super(...)'");
             }
+        } else if (!ct.constructorOverloads.empty() && node.kwArgs.empty()) {
+            const size_t nArgs = node.args.size();
+            FunctionType* matched = nullptr;
+            for (auto& ov : ct.constructorOverloads) {
+                if (!ov || ov->kind() != Type::Kind::Function) continue;
+                auto& oft = static_cast<FunctionType&>(*ov);
+                if (!oft.hasVarArg && oft.paramTypes.size() == nArgs) {
+                    matched = &oft;
+                    break;
+                }
+            }
+            if (!matched) {
+                for (auto& ov : ct.constructorOverloads) {
+                    if (!ov || ov->kind() != Type::Kind::Function) continue;
+                    auto& oft = static_cast<FunctionType&>(*ov);
+                    if (!oft.hasArgMeta) continue;
+                    const bool fits = oft.hasVarArg
+                        ? nArgs >= oft.requiredParams
+                        : (nArgs >= oft.requiredParams &&
+                           nArgs < oft.paramTypes.size());
+                    if (fits) {
+                        matched = &oft;
+                        break;
+                    }
+                }
+            }
+            if (matched) {
+                if (matched->hasArgMeta)
+                    validateCall(*matched, "class '" + ct.name + "' constructor");
+                if (nArgs == matched->paramTypes.size())
+                    checkPositionalArgs(*matched);
+            } else {
+                std::string counts;
+                for (auto& ov : ct.constructorOverloads) {
+                    if (!ov || ov->kind() != Type::Kind::Function) continue;
+                    auto& oft = static_cast<FunctionType&>(*ov);
+                    if (!counts.empty()) counts += ", ";
+                    if (oft.hasArgMeta &&
+                        oft.requiredParams < oft.paramTypes.size())
+                        counts += std::to_string(oft.requiredParams) + ".." +
+                                  std::to_string(oft.paramTypes.size());
+                    else
+                        counts += std::to_string(oft.paramTypes.size());
+                }
+                error(node.location(),
+                      "no constructor overload of class '" + ct.name +
+                      "' takes " + std::to_string(nArgs) +
+                      " positional argument" + (nArgs == 1 ? "" : "s") +
+                      " (overloads take " + counts + ")");
+            }
         }
         node.type = std::make_shared<InstanceType>(
             std::static_pointer_cast<ClassType>(calleeType));

@@ -90,6 +90,58 @@ x: P = P(1)
 y: P = P(1, 2)
 ```
 
+#### :ctor_overload_arity_mismatch_rejected
+
+A call whose argument count matches no constructor overload used to pass the
+type checker and die at codegen as an internal error with an LLVM verifier
+dump; it must be a plain type-check error like the single-constructor case.
+
+```dr
+class Q {
+    a: int = 0
+    def (a: int) {
+        self.a = a
+    }
+    def (a: int, b: int) {
+        self.a = a + b
+    }
+}
+q: Q = Q(1, 2, 3)
+```
+
+#### :ctor_overload_zero_args_rejected
+
+```dr
+class Q {
+    a: int = 0
+    def (a: int) {
+        self.a = a
+    }
+    def (a: int, b: int) {
+        self.a = a + b
+    }
+}
+q: Q = Q()
+```
+
+#### :ctor_overload_default_range_ok
+
+A defaulted trailing parameter widens the overload's accepted count downward,
+so a two-argument call legally dispatches to the three-parameter constructor.
+
+```dr
+class R {
+    v: int = 0
+    def (a: int) {
+        self.v = a
+    }
+    def (a: int, b: int, c: int = 100) {
+        self.v = a + b + c
+    }
+}
+r: R = R(1, 2)
+```
+
 #### :function_value_subscript_rejected
 
 ```dr

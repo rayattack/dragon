@@ -1345,6 +1345,22 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                         funcParamKinds[newName] = std::move(ck);
                         funcParamOwns[newName] = std::move(cowns);
                     }
+
+                    {
+                        std::vector<Expr*> defaults;
+                        for (size_t i = paramStart; i < fd->params.size(); ++i) {
+                            defaults.push_back(fd->params[i].defaultValue.get());
+                        }
+                        funcParamDefaults[newName] = std::move(defaults);
+                        funcDefiningModule[newName] = currentModuleName;
+                    }
+                    {
+                        std::vector<std::string> names;
+                        for (size_t i = paramStart; i < fd->params.size(); ++i) {
+                            names.push_back(fd->params[i].name);
+                        }
+                        funcParamNames[newName] = std::move(names);
+                    }
                 }
             }
 

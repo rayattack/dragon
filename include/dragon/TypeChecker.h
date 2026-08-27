@@ -133,6 +133,7 @@ public:
     std::string definingFile;
     ClassDecl* decl = nullptr;
     std::set<const ContractDecl*> promisedContracts;
+    std::vector<std::shared_ptr<Type>> constructorOverloads;
     int constructorCount = 0;
     bool isTypedDict = false;
     bool isEnum = false;

@@ -201,6 +201,11 @@ foreach(_guard import_missing_guard from_import_missing_guard)
         PASS_REGULAR_EXPRESSION "cannot find module 'zzz_no_such_module'")
 endforeach()
 
+add_test(NAME dr_ctor_arity_guard
+    COMMAND $<TARGET_FILE:dragon> check ${CMAKE_CURRENT_SOURCE_DIR}/dr/ctor_arity_guard.dr)
+set_tests_properties(dr_ctor_arity_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "no constructor overload of class 'Pair'")
+
 add_test(NAME dr_test_generics_py
     COMMAND $<TARGET_FILE:dragon> run
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/generics_py/test_generics_py.py)

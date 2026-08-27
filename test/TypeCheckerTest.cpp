@@ -1807,3 +1807,9 @@ TEST(TypeCheckerTest, DuplicateConstructorArityIsRejected) {
     EXPECT_TRUE(checkHasErrors(code("duplicate_ctor_arity_rejected")));
     EXPECT_TRUE(checkOk(code("distinct_ctor_arities_ok")));
 }
+
+TEST(TypeCheckerTest, ConstructorOverloadArityIsValidatedAtCallSites) {
+    EXPECT_TRUE(checkHasErrors(code("ctor_overload_arity_mismatch_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("ctor_overload_zero_args_rejected")));
+    EXPECT_TRUE(checkOk(code("ctor_overload_default_range_ok")));
+}

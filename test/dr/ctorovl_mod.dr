@@ -1,0 +1,11 @@
+class Pair {
+    v: int = 0
+
+    def(a: int) {
+        self.v = a
+    }
+
+    def(a: int, b: int, c: int = 100) {
+        self.v = a + b + c
+    }
+}

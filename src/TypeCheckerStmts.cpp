@@ -1275,6 +1275,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
 
     classType->constructorCount = 0;
     classType->methodOverloads.clear();
+    classType->constructorOverloads.clear();
     std::unordered_map<std::string, int> _ovlCount;
     for (auto& s : node.body) {
         auto* f = dynamic_cast<FunctionDecl*>(s.get());
@@ -1323,7 +1324,9 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 classType->fields[func->name] = retType;
         } else {
             classType->methods[func->name] = fType;
-            if (func->name != "__init__" && !func->isConstructor) {
+            if (func->name == "__init__" || func->isConstructor) {
+                classType->constructorOverloads.push_back(fType);
+            } else {
                 int cnt = _ovlCount[func->name];
                 func->methodOverloadCount = cnt;
                 func->methodOverloadIndex = (cnt > 1) ? _ovlNext[func->name]++ : -1;

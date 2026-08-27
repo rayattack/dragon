@@ -1,0 +1,4 @@
+import ctorovl_mod
+
+p: ctorovl_mod.Pair = ctorovl_mod.Pair(1, 2, 3, 4)
+print(p.v)

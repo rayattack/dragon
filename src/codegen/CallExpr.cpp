@@ -2,6 +2,27 @@
 
 namespace dragon {
 
+static int ctorOverloadForArity(
+    const std::unordered_map<std::string, std::vector<Expr*>>& paramDefaults,
+    const std::string& ctorPrefix,
+    const std::vector<std::pair<size_t, int>>& arityVec,
+    size_t callArity) {
+    for (auto& [arity, idx] : arityVec) {
+        if (arity == callArity) return idx;
+    }
+    for (auto& [arity, idx] : arityVec) {
+        if (callArity >= arity) continue;
+        auto dIt = paramDefaults.find(ctorPrefix + "_new_" + std::to_string(idx));
+        if (dIt == paramDefaults.end()) continue;
+        size_t trailingDefaults = 0;
+        for (auto rit = dIt->second.rbegin();
+             rit != dIt->second.rend() && *rit; ++rit)
+            ++trailingDefaults;
+        if (callArity >= arity - trailingDefaults) return idx;
+    }
+    return -1;
+}
+
 void CodeGen::visit(CallExpr& node) {
     if (callHasSpread(node)) {
         bool isTypedDict = false;
@@ -307,18 +328,15 @@ void CodeGen::visit(CallExpr& node) {
             if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
                 size_t callArity = node.args.size();
                 auto& arityVec = impl_->classCtorAritiesBySym[impl_->classSym(name)];
-                int matchedIdx = -1;
-                for (auto& [arity, idx] : arityVec) {
-                    if (arity == callArity) { matchedIdx = idx; break; }
-                }
+                int matchedIdx = ctorOverloadForArity(
+                    impl_->funcParamDefaults, ctorPrefix, arityVec, callArity);
                 if (matchedIdx >= 0) {
                     ctorName = ctorPrefix + "_new_" + std::to_string(matchedIdx);
                 } else {
                     impl_->addError(
                         "internal error: no constructor overload of '" + name +
                         "' matches arity " + std::to_string(callArity) +
-                        "; calling the first overload would pass the wrong "
-                        "argument count",
+                        "; the type checker should have rejected this call",
                         node.location());
                     ctorName = ctorPrefix + "_new_" + std::to_string(arityVec[0].second);
                 }
@@ -918,11 +936,17 @@ void CodeGen::visit(CallExpr& node) {
                 if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
                     size_t callArity = node.args.size();
                     auto& arityVec = impl_->classCtorAritiesBySym[ctorPrefix];
-                    int matchedIdx = -1;
-                    for (auto& [arity, idx] : arityVec) {
-                        if (arity == callArity) { matchedIdx = idx; break; }
+                    int matchedIdx = ctorOverloadForArity(
+                        impl_->funcParamDefaults, ctorPrefix, arityVec, callArity);
+                    if (matchedIdx < 0) {
+                        impl_->addError(
+                            "internal error: no constructor overload of '" +
+                            attr->attribute + "' matches arity " +
+                            std::to_string(callArity) +
+                            "; the type checker should have rejected this call",
+                            node.location());
+                        matchedIdx = arityVec.empty() ? 0 : arityVec[0].second;
                     }
-                    if (matchedIdx < 0 && !arityVec.empty()) matchedIdx = arityVec[0].second;
                     ctorName = ctorPrefix + "_new_" + std::to_string(matchedIdx);
                 } else {
                     ctorName = ctorPrefix + "_new";
