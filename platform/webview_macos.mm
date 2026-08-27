@@ -297,6 +297,20 @@ void dragon_webview_show(void* handle) {
     }
 }
 
+void dragon_webview_maximize(void* handle) {
+    DragonWindow* wv = (__bridge DragonWindow*) handle;
+    if (!wv || !wv.window) return;
+    @autoreleasepool {
+        if (![wv.window isZoomed]) [wv.window zoom:nil];
+    }
+}
+
+int64_t dragon_webview_is_maximized(void* handle) {
+    DragonWindow* wv = (__bridge DragonWindow*) handle;
+    if (!wv || !wv.window) return 0;
+    return [wv.window isZoomed] ? 1 : 0;
+}
+
 void dragon_webview_close(void* handle) {
     DragonWindow* wv = (__bridge DragonWindow*) handle;
     if (wv && wv.window) [wv.window performClose:nil];

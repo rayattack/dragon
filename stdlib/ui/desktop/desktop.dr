@@ -14,6 +14,8 @@ extern "C" def dragon_webview_load_html(handle: ptr, html: str)
 extern "C" def dragon_webview_show(handle: ptr)
 extern "C" def dragon_webview_close(handle: ptr)
 extern "C" def dragon_webview_enable_inspector(handle: ptr)
+extern "C" def dragon_webview_maximize(handle: ptr)
+extern "C" def dragon_webview_is_maximized(handle: ptr) -> int
 extern "C" def dragon_webview_pick_folder(title: str, start_dir: str) -> str
 
 
@@ -44,12 +46,16 @@ class Window {
     handle: ptr
     _body: HTML
 
-    def(title: str, width: int, height: int, inspect: bool = false) {
+    def(title: str, width: int, height: int, inspect: bool = false,
+        maximized: bool = false) {
         dragon_webview_init()
         self.handle = dragon_webview_window_new(title, width, height)
         self._body = HTML("")
         if inspect {
             dragon_webview_enable_inspector(self.handle)
+        }
+        if maximized {
+            dragon_webview_maximize(self.handle)
         }
     }
 
@@ -69,6 +75,21 @@ class Window {
     def show() -> None {
         """Realize and display the window."""
         dragon_webview_show(self.handle)
+    }
+
+    def maximize() -> None {
+        """Ask the window manager to maximize the window. Works before or
+        after show() (`width`/`height` become the restore size); a no-op on a
+        closed window."""
+        dragon_webview_maximize(self.handle)
+    }
+
+    @property
+    def maximized() -> bool {
+        """Whether the window is currently maximized. Window-manager state is
+        asynchronous, so immediately after maximize() this can still answer
+        false until the manager applies it."""
+        return dragon_webview_is_maximized(self.handle) != 0
     }
 
     def enable_inspector() -> None {

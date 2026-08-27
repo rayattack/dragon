@@ -267,6 +267,18 @@ void dragon_webview_show(void* handle) {
     gtk_widget_show_all(wv->window);
 }
 
+void dragon_webview_maximize(void* handle) {
+    DragonWebView* wv = (DragonWebView*) handle;
+    if (!wv || !wv->window) return;
+    gtk_window_maximize(GTK_WINDOW(wv->window));
+}
+
+int64_t dragon_webview_is_maximized(void* handle) {
+    DragonWebView* wv = (DragonWebView*) handle;
+    if (!wv || !wv->window) return 0;
+    return gtk_window_is_maximized(GTK_WINDOW(wv->window)) ? 1 : 0;
+}
+
 void dragon_webview_close(void* handle) {
     DragonWebView* wv = (DragonWebView*) handle;
     if (wv && wv->window) gtk_widget_destroy(wv->window);

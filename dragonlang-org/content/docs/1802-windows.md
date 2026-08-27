@@ -43,6 +43,23 @@ always wins over the automatic one. (`ui.App.timeout(ms)` is the same
 loop with an automatic quit after `ms` milliseconds - handy for smoke tests
 and screenshots.)
 
+## Sizing and maximizing
+
+A `Window` opens at the `width` x `height` given at construction. To open
+maximized instead, pass `maximized=true` - the given size becomes the
+restore size the user gets back when they un-maximize:
+
+```dragon
+from ui.desktop import Window
+
+win: Window = Window("Dashboard", 1024, 700, maximized=true)
+```
+
+`win.maximize()` asks the window manager to maximize at any point, before
+or after `show()`, and `win.maximized` reads the current state. Window
+manager state is asynchronous: immediately after `maximize()` the property
+can still answer `false` until the manager applies it.
+
 ## The window is its `body`
 
 A `Window` has a `title` and a size, set at construction, and a `body` -
