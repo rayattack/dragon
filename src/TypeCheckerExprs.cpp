@@ -564,6 +564,15 @@ void TypeChecker::visit(CallExpr& node) {
                                   "' is not assignable to parameter type '" +
                                   pt->toString() + "'" +
                                   TypeChecker::listReprMismatchHint(*at, *pt));
+                        } else if (!diagnoseHeterogeneousLiteral(
+                                       node.args[i].get(), pt) &&
+                                   !ae->isSubtypeOf(*pe)) {
+                            error(node.args[i]->location(),
+                                  "argument " + std::to_string(i + 1) +
+                                  " of type '" + at->toString() +
+                                  "' is not assignable to parameter type '" +
+                                  pt->toString() + "'" +
+                                  TypeChecker::listReprMismatchHint(*at, *pt));
                         }
                     }
                 }

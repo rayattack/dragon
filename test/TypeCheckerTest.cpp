@@ -1792,3 +1792,8 @@ TEST(TypeCheckerTest, StrContainsRetiredForInOperator) {
     EXPECT_TRUE(checkHasErrors(code("str_contains_method_rejected")));
     EXPECT_TRUE(checkOk(code("str_substring_in_accepted")));
 }
+
+TEST(TypeCheckerTest, ClassObjectIsNotAnInstanceInAContainerArgument) {
+    EXPECT_TRUE(checkHasErrors(code("class_object_in_list_arg_rejected")));
+    EXPECT_TRUE(checkOk(code("instance_in_list_arg_accepted")));
+}

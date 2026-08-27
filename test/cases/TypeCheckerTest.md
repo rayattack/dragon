@@ -1644,3 +1644,33 @@ s: str = "hello"
 print("ell" in s)
 print("zzz" not in s)
 ```
+
+#### :class_object_in_list_arg_rejected
+
+Passing a class where an instance is expected is caught in a scalar slot and in
+an annotated container, but a call argument used to slip through and segfault at
+runtime instead. The element type is checked now.
+
+```dr
+class Thing {
+    n: int
+    def() { self.n = 1 }
+}
+
+def take(items: list[Thing]) -> int { return len(items) }
+
+print(take([Thing]))
+```
+
+#### :instance_in_list_arg_accepted
+
+```dr
+class Thing {
+    n: int
+    def() { self.n = 1 }
+}
+
+def take(items: list[Thing]) -> int { return len(items) }
+
+print(take([Thing(), Thing()]))
+```
