@@ -1797,3 +1797,8 @@ TEST(TypeCheckerTest, ClassObjectIsNotAnInstanceInAContainerArgument) {
     EXPECT_TRUE(checkHasErrors(code("class_object_in_list_arg_rejected")));
     EXPECT_TRUE(checkOk(code("instance_in_list_arg_accepted")));
 }
+
+TEST(TypeCheckerTest, GenericConstructionStillNeedsInferableTypeArguments) {
+    EXPECT_TRUE(checkHasErrors(code("generic_ctor_without_args_rejected")));
+    EXPECT_TRUE(checkOk(code("generic_ctor_explicit_accepted")));
+}

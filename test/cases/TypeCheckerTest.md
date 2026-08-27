@@ -1674,3 +1674,31 @@ def take(items: list[Thing]) -> int { return len(items) }
 
 print(take([Thing(), Thing()]))
 ```
+
+#### :generic_ctor_without_args_rejected
+
+A bare construction of a generic class with no annotation and no explicit type
+arguments has nothing to infer from, and stays a compile error after the
+DRG-85 scope-resolution fix routed same-named plain classes around this path.
+
+```dr
+class Box[T] {
+    def(v: T) {
+        self.v: T = v
+    }
+}
+
+b: Box = Box(5)
+```
+
+#### :generic_ctor_explicit_accepted
+
+```dr
+class Box[T] {
+    def(v: T) {
+        self.v: T = v
+    }
+}
+
+b: Box[int] = Box[int](5)
+```

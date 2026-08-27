@@ -761,11 +761,32 @@ bool TypeChecker::tryInstantiateGenericConstruction(
     std::string clsName;
     std::vector<std::shared_ptr<Type>> args;
 
+    auto scopedClassDecl = [&](const std::string& name) -> ClassDecl* {
+        std::shared_ptr<ClassType> cls;
+        if (auto looked = impl_->lookup(name))
+            cls = std::dynamic_pointer_cast<ClassType>(looked);
+        if (!cls)
+            if (auto tn = impl_->typeNames.find(name); tn != impl_->typeNames.end())
+                if (auto inst = std::dynamic_pointer_cast<InstanceType>(tn->second))
+                    cls = inst->classType;
+        if (!cls) return nullptr;
+        return cls->decl ? cls->decl : cls->originDecl;
+    };
+    auto templateInScope = [&](const std::string& name,
+                               ClassDecl* registryTemplate) -> ClassDecl* {
+        ClassDecl* scoped = scopedClassDecl(name);
+        if (!scoped || scoped == registryTemplate) return registryTemplate;
+        if (scoped->typeParams.empty()) return nullptr;
+        return scoped;
+    };
+
     if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get())) {
         if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
             auto it = impl_->genericClasses.find(nm->name);
-            if (it != impl_->genericClasses.end()) {
-                decl = it->second;
+            ClassDecl* templ = it != impl_->genericClasses.end()
+                ? templateInScope(nm->name, it->second) : nullptr;
+            if (templ) {
+                decl = templ;
                 clsName = nm->name;
                 std::vector<const Expr*> idxs;
                 if (auto* tup = dynamic_cast<TupleExpr*>(sub->index.get())) {
@@ -781,11 +802,13 @@ bool TypeChecker::tryInstantiateGenericConstruction(
         }
     } else if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
         auto it = impl_->genericClasses.find(nm->name);
-        if (it != impl_->genericClasses.end() && expected) {
+        ClassDecl* templ = it != impl_->genericClasses.end() && expected
+            ? templateInScope(nm->name, it->second) : nullptr;
+        if (templ) {
             auto exInst = std::dynamic_pointer_cast<InstanceType>(expected);
             if (exInst && exInst->classType &&
                 exInst->classType->genericOrigin == nm->name) {
-                decl = it->second;
+                decl = templ;
                 clsName = nm->name;
                 args = exInst->classType->genericArgs;
             } else {
