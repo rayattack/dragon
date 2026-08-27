@@ -2124,6 +2124,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, methodFuncType->getParamType(paramIdx));
                         args.push_back(arg);
                     }
+                    impl_->fillDefaultArgs(methodFuncName, methodFunc, args,
+                                           *this, &argTemps);
                     auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                     if (methodFunc->getReturnType()->isVoidTy()) {
                         impl_->builder->CreateCall(methodFunc, args);
@@ -2167,6 +2169,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                                 methodFuncType->getParamType(paramIdx));
                         args.push_back(arg);
                     }
+                    impl_->fillDefaultArgs(methodFuncName, methodFunc, args,
+                                           *this, &argTemps);
                     auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                     if (methodFunc->getReturnType()->isVoidTy()) {
                         impl_->builder->CreateCall(methodFunc, args);

@@ -355,4 +355,55 @@ class IterProtocolClassTests(TestCase) {
 }
 
 
-main([MethodKwargsTests(), MethodKwargsEscapeTests(), MethodGeneratorTests(), IterProtocolClassTests()])
+class Labeler {
+    @staticmethod
+    def scale(a: int, factor: int = 3) -> int {
+        return a * factor
+    }
+
+    @staticmethod
+    def tag(name: str, suffix: str = "-dr", upper: bool = false) -> str {
+        out: str = name + suffix
+        if upper {
+            return out.upper()
+        }
+        return out
+    }
+}
+
+
+class StaticMethodDefaultTests(TestCase) {
+    """Default arguments on @staticmethod calls. Call sites that omitted a
+    defaulted parameter used to reach codegen with too few LLVM arguments and
+    die at module verification ('Incorrect number of arguments passed to called
+    function'), even same-module; ctors and instance methods already filled
+    defaults via the shared fillDefaultArgs path. The 5000-iteration loop is the
+    adversarial rc probe: a materialized str default is a call-site temp that
+    must be decref'd per call, not leaked (pinned by the ASan/LSan tree)."""
+
+    def test_omitted_int_default() {
+        self.assertEqual(Labeler.scale(7), 21)
+    }
+
+    def test_explicit_arg_still_wins() {
+        self.assertEqual(Labeler.scale(7, 2), 14)
+    }
+
+    def test_omitted_heap_defaults() {
+        self.assertEqual(Labeler.tag("box"), "box-dr")
+        self.assertEqual(Labeler.tag("box", "!"), "box!")
+        self.assertEqual(Labeler.tag("box", "!", true), "BOX!")
+    }
+
+    def test_omitted_str_default_loop_no_leak() {
+        i: int = 0
+        while i < 5000 {
+            const t: str = Labeler.tag("k")
+            self.assertEqual(t, "k-dr")
+            i = i + 1
+        }
+    }
+}
+
+
+main([MethodKwargsTests(), MethodKwargsEscapeTests(), MethodGeneratorTests(), IterProtocolClassTests(), StaticMethodDefaultTests()])
