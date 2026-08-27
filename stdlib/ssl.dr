@@ -309,15 +309,16 @@ class SSLContext {
     def wrap_socket(sock: TcpStream, server_side: bool = False,
                     server_hostname: str = "",
                     do_handshake_on_connect: bool = True,
-                    timeout_ms: int = 0) -> SSLSocket {
-        """With `timeout_ms` > 0 the handshake is bounded (TimeoutError past the
-        deadline) and the returned socket's read deadline is armed, so a peer
-        that accepts and never answers cannot park the green thread forever."""
+                    timeout: int = 0) -> SSLSocket {
+        """With `timeout` (milliseconds) > 0 the handshake is bounded
+        (TimeoutError past the deadline) and the returned socket's read deadline
+        is armed, so a peer that accepts and never answers cannot park the green
+        thread forever."""
         conn: ptr = dragon_tls_conn_new(self._ctx, sock.raw_fd(), server_hostname)
         if do_handshake_on_connect {
             rc: int = 0
-            if timeout_ms > 0 {
-                rc = dragon_tls_handshake_timeout(conn, timeout_ms)
+            if timeout > 0 {
+                rc = dragon_tls_handshake_timeout(conn, timeout)
                 if rc != 0 and dragon_tls_last_read_timed_out(conn) != 0 {
                     dragon_tls_conn_free(conn)
                     raise TimeoutError("TLS handshake timed out")
@@ -332,8 +333,8 @@ class SSLContext {
             _raise_if_handshake_failed(rc, vr)
         }
         const wrapped: SSLSocket = SSLSocket(own conn, sock, server_hostname)
-        if timeout_ms > 0 {
-            wrapped.set_timeout(timeout_ms)
+        if timeout > 0 {
+            wrapped.set_timeout(timeout)
         }
         return wrapped
     }

@@ -102,17 +102,18 @@ class TcpStream {
     }
 
     @staticmethod
-    def open(host: str, port: int, timeout_ms: int = 0) -> TcpStream {
-        """Connect to host:port. With `timeout_ms` > 0 the connect attempt is
-        bounded (TimeoutError past the deadline, ConnectionError on refusal) and
-        the stream's read deadline is armed, so recv raises instead of parking
-        forever on a peer that accepts and never answers. 0 = wait indefinitely."""
+    def open(host: str, port: int, timeout: int = 0) -> TcpStream {
+        """Connect to host:port. With `timeout` (milliseconds) > 0 the connect
+        attempt is bounded (TimeoutError past the deadline, ConnectionError on
+        refusal) and the stream's read deadline is armed, so recv raises instead
+        of parking forever on a peer that accepts and never answers. 0 = wait
+        indefinitely."""
         const ip: str = dragon_resolve4(host)
         const fd: int = socket(AF_INET, SOCK_STREAM, 0)
         const addr: ptr = dragon_sockaddr_in_new(port, ip)
         const addrlen: int = dragon_sockaddr_in_size()
-        if timeout_ms > 0 {
-            const rc: int = dragon_nb_connect_timeout(fd, addr, addrlen, timeout_ms)
+        if timeout > 0 {
+            const rc: int = dragon_nb_connect_timeout(fd, addr, addrlen, timeout)
             free(addr)
             if rc == -2 {
                 close(fd)
@@ -123,7 +124,7 @@ class TcpStream {
                 raise ConnectionError(f"connect to {host}:{port} failed")
             }
             const stream: TcpStream = TcpStream(SocketHandle.adopt_raw(fd))
-            stream.set_timeout(timeout_ms)
+            stream.set_timeout(timeout)
             return stream
         }
         dragon_nb_connect(fd, addr, addrlen)

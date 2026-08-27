@@ -70,16 +70,16 @@ with Client("https://api.example.com", headers=auth) as api {
 }
 ```
 
-Every verb takes `timeout_ms: int = 0`, and `Client` accepts the same as a
-constructor argument applied to all its calls. With a deadline set, connect,
-TLS handshake, and every read are each bounded by it, and a peer that
-accepts and never answers raises `TimeoutError` instead of parking the green
-thread forever; `0` means wait indefinitely.
+Every verb takes `timeout: int = 0` (milliseconds), and `Client` accepts the
+same as a constructor argument applied to all its calls. With a deadline
+set, connect, TLS handshake, and every read are each bounded by it, and a
+peer that accepts and never answers raises `TimeoutError` instead of parking
+the green thread forever; `0` means wait indefinitely.
 
 ```dragon
 from http import get, Response
 
-r: Response = await get("https://api.example.com/v1/users", timeout_ms=5000)
+r: Response = await get("https://api.example.com/v1/users", timeout=5000)
 ```
 
 One v1 limit, stated honestly: redirects are not followed (`r.status` tells
@@ -241,7 +241,7 @@ listener.close()
 
 `http.client` speaks HTTP/1.1 over a `TcpStream`. The shape matches CPython's `http.client`: construct a connection, call `request`, then `getresponse`.
 
-`HTTPConnection(host: str, port: int, timeout_ms: int = 0)` creates a (not-yet-connected) connection. With `timeout_ms` > 0 (also settable later via `set_timeout(ms)`), connect and every read are each bounded by that deadline and raise `TimeoutError` when it passes, instead of parking the green thread forever on a peer that accepts and never answers; on `HTTPSConnection` the TLS handshake is bounded too. `request(method, url, body, headers)` sends the request line plus headers and an optional body; all four arguments are required - pass `""` for an empty body and an empty `dict[str, str]` for no extra headers. `getresponse() -> HTTPResponse` reads and parses the reply.
+`HTTPConnection(host: str, port: int, timeout: int = 0)` creates a (not-yet-connected) connection. With `timeout` (milliseconds) > 0 (also settable later via `set_timeout(ms)`), connect and every read are each bounded by that deadline and raise `TimeoutError` when it passes, instead of parking the green thread forever on a peer that accepts and never answers; on `HTTPSConnection` the TLS handshake is bounded too. `request(method, url, body, headers)` sends the request line plus headers and an optional body; all four arguments are required - pass `""` for an empty body and an empty `dict[str, str]` for no extra headers. `getresponse() -> HTTPResponse` reads and parses the reply.
 
 The `HTTPResponse` exposes `status: int`, `reason: str`, and `headers: dict[str, str]` as fields, plus `read() -> str` (the body, returned once - a second `read()` yields `""`), `getheader(name, default="") -> str` (case-insensitive), and `getheaders() -> list[tuple[str, str]]`.
 
@@ -275,7 +275,7 @@ server.join()
 listener.close()
 ```
 
-> **Differs from Python.** `request` has no default arguments - CPython lets you call `conn.request("GET", "/")` with body and headers defaulted, but in Dragon you must pass all four (`""` and `{}`). The deadline is `timeout_ms`, an `int` of milliseconds, not CPython's `timeout=` float of seconds. The connection always sends `Connection: close` and `getresponse()` reads until EOF, so there is no `Content-Length`/chunked early-exit yet and a connection is single-use (open a fresh `HTTPConnection` per request). `read()` takes no `amt` argument - the full body is buffered. There is an `HTTPSConnection` with the same shape, backed by an `ssl.SSLSocket`; see [Cryptography and Hashing](/docs/1407-stdlib-crypto) for the TLS layer it builds on.
+> **Differs from Python.** `request` has no default arguments - CPython lets you call `conn.request("GET", "/")` with body and headers defaulted, but in Dragon you must pass all four (`""` and `{}`). The `timeout` deadline is an `int` of milliseconds, not CPython's float of seconds. The connection always sends `Connection: close` and `getresponse()` reads until EOF, so there is no `Content-Length`/chunked early-exit yet and a connection is single-use (open a fresh `HTTPConnection` per request). `read()` takes no `amt` argument - the full body is buffered. There is an `HTTPSConnection` with the same shape, backed by an `ssl.SSLSocket`; see [Cryptography and Hashing](/docs/1407-stdlib-crypto) for the TLS layer it builds on.
 
 ## urllib.request - high-level HTTP
 

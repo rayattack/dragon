@@ -104,7 +104,7 @@ class SocketDeadlineTests(TestCase) {
 
 
 class HttpClientTimeoutTests(TestCase) {
-    """HTTPConnection/HTTPSConnection timeout_ms - a peer that accepts and never
+    """HTTPConnection/HTTPSConnection timeout - a peer that accepts and never
     answers used to park the request's green thread forever (there was no
     timeout anywhere in http.client); now getresponse raises TimeoutError past
     the deadline, and the TLS handshake against a mute peer does the same."""

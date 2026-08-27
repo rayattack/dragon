@@ -232,12 +232,12 @@ class HTTPResponse {
 
 
 class HTTPConnection {
-    def(host: str, port: int, timeout_ms: int = 0) {
+    def(host: str, port: int, timeout: int = 0) {
         self.host = host
         self.port = port
         self.stream = TcpStream(SocketHandle.adopt_raw(-1))
         self._connected = False
-        self._timeout_ms = timeout_ms
+        self._timeout_ms = timeout
     }
 
     def set_timeout(ms: int) -> None {
@@ -351,12 +351,12 @@ class HTTPSConnection {
     _connected: bool
     _timeout_ms: int
 
-    def(host: str, port: int, timeout_ms: int = 0) {
+    def(host: str, port: int, timeout: int = 0) {
         self.host = host
         self.port = port
         self._ctx = create_default_context()
         self._connected = False
-        self._timeout_ms = timeout_ms
+        self._timeout_ms = timeout
     }
 
     def set_timeout(ms: int) -> None {
