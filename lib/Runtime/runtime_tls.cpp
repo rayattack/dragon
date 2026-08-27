@@ -62,6 +62,7 @@ struct DragonTlsConn {
     mbedtls_ssl_context ssl;
     int fd;
     int64_t read_deadline_ms;
+    int read_timed_out;
 };
 
 #ifndef MSG_NOSIGNAL
@@ -92,8 +93,11 @@ static int dragon_tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
         if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             if (conn->read_deadline_ms > 0) {
-                if (dragon_io_wait_readable_timeout(fd, conn->read_deadline_ms) != 0)
+                int wr = dragon_io_wait_readable_timeout(fd, conn->read_deadline_ms);
+                if (wr != 0) {
+                    if (wr > 0) conn->read_timed_out = 1;
                     return MBEDTLS_ERR_NET_RECV_FAILED;
+                }
             } else {
                 if (dragon_io_wait_readable(fd) < 0) return MBEDTLS_ERR_NET_RECV_FAILED;
             }
@@ -326,10 +330,34 @@ const char* dragon_tls_recv_str(void* handle, int64_t maxlen) {
 
 const char* dragon_tls_recv_str_timeout(void* handle, int64_t maxlen, int64_t ms) {
     DragonTlsConn* conn = (DragonTlsConn*)handle;
+    conn->read_timed_out = 0;
     conn->read_deadline_ms = ms > 0 ? ms : 0;
     const char* out = dragon_tls_recv_str(handle, maxlen);
     conn->read_deadline_ms = 0;
     return out;
+}
+
+int64_t dragon_tls_read_timeout(void* handle, void* buf, int64_t len, int64_t ms) {
+    DragonTlsConn* conn = (DragonTlsConn*)handle;
+    conn->read_timed_out = 0;
+    conn->read_deadline_ms = ms > 0 ? ms : 0;
+    int64_t got = dragon_tls_read(handle, buf, len);
+    conn->read_deadline_ms = 0;
+    return got;
+}
+
+int64_t dragon_tls_handshake_timeout(void* handle, int64_t ms) {
+    DragonTlsConn* conn = (DragonTlsConn*)handle;
+    conn->read_timed_out = 0;
+    conn->read_deadline_ms = ms > 0 ? ms : 0;
+    int64_t ret = dragon_tls_handshake(handle);
+    conn->read_deadline_ms = 0;
+    return ret;
+}
+
+int64_t dragon_tls_last_read_timed_out(void* handle) {
+    if (!handle) return 0;
+    return ((DragonTlsConn*)handle)->read_timed_out ? 1 : 0;
 }
 
 int64_t dragon_tls_close(void* handle) {

@@ -1,0 +1,191 @@
+from unittest import TestCase, main
+from socket import TcpListener, TcpStream
+from http.client import HTTPConnection, HTTPResponse, HTTPSConnection
+import socket
+
+
+def _accept_and_stall(lis: TcpListener) -> None {
+    const conn: TcpStream = lis.accept()
+    const req: bytes = conn.recv_timeout(4096, 5000)
+    const eof: bytes = conn.recv_timeout(4096, 5000)
+    conn.close()
+}
+
+
+def _accept_reply_close(lis: TcpListener) -> None {
+    const conn: TcpStream = lis.accept()
+    const req: bytes = conn.recv_timeout(4096, 5000)
+    conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nquick")
+    conn.close()
+}
+
+
+def _accept_and_close(lis: TcpListener) -> None {
+    const conn: TcpStream = lis.accept()
+    conn.close()
+}
+
+
+class SocketDeadlineTests(TestCase) {
+    """TcpStream.set_timeout - the read deadline under http.client. recv raises
+    TimeoutError after the deadline instead of parking the green thread forever,
+    and EOF keeps returning "" so a closed peer is never mistaken for a stall."""
+
+    def test_recv_deadline_raises_timeout() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19240)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_stall(lis)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 19240, 250)
+        c.send("ping")
+        raised: bool = False
+        try {
+            const got: str = c.recv(1024)
+            print(got)
+        } except TimeoutError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        c.close()
+        await t
+        lis.close()
+    }
+
+    def test_recv_bytes_deadline_raises_timeout() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19241)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_stall(lis)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 19241, 250)
+        c.send("ping")
+        raised: bool = False
+        try {
+            const got: bytes = c.recv_bytes(1024)
+            print(len(got))
+        } except TimeoutError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        c.close()
+        await t
+        lis.close()
+    }
+
+    def test_module_qualified_open_omitting_timeout() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19247)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_close(lis)
+
+        const c: TcpStream = socket.TcpStream.open("127.0.0.1", 19247)
+        const got: str = c.recv(1024)
+        self.assertEqual(got, "")
+        c.close()
+        await t
+        lis.close()
+    }
+
+    def test_eof_with_deadline_returns_empty_not_timeout() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19242)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_close(lis)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 19242, 2000)
+        const got: str = c.recv(1024)
+        self.assertEqual(got, "")
+        c.close()
+        await t
+        lis.close()
+    }
+}
+
+
+class HttpClientTimeoutTests(TestCase) {
+    """HTTPConnection/HTTPSConnection timeout_ms - a peer that accepts and never
+    answers used to park the request's green thread forever (there was no
+    timeout anywhere in http.client); now getresponse raises TimeoutError past
+    the deadline, and the TLS handshake against a mute peer does the same."""
+
+    def test_getresponse_times_out_on_silent_peer() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19243)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_stall(lis)
+
+        const conn: HTTPConnection = HTTPConnection("127.0.0.1", 19243, 300)
+        conn.request("GET", "/", "", {})
+        raised: bool = False
+        try {
+            const resp: HTTPResponse = conn.getresponse()
+            print(resp.status)
+        } except TimeoutError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        conn.close()
+        await t
+        lis.close()
+    }
+
+    def test_prompt_response_does_not_time_out() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19244)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_reply_close(lis)
+
+        const conn: HTTPConnection = HTTPConnection("127.0.0.1", 19244, 3000)
+        conn.request("GET", "/", "", {})
+        const resp: HTTPResponse = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.read(), "quick")
+        conn.close()
+        await t
+        lis.close()
+    }
+
+    def test_set_timeout_after_construction() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19245)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_stall(lis)
+
+        const conn: HTTPConnection = HTTPConnection("127.0.0.1", 19245)
+        conn.set_timeout(300)
+        conn.request("GET", "/", "", {})
+        raised: bool = False
+        try {
+            const resp: HTTPResponse = conn.getresponse()
+            print(resp.status)
+        } except TimeoutError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        conn.close()
+        await t
+        lis.close()
+    }
+
+    def test_tls_handshake_times_out_on_mute_peer() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 19246)
+        self.assertEqual(lis.bind(), 0)
+        lis.listen(4)
+        t: Task[None] = fire _accept_and_stall(lis)
+
+        const conn: HTTPSConnection = HTTPSConnection("127.0.0.1", 19246, 300)
+        raised: bool = False
+        try {
+            conn.request("GET", "/", "", {})
+        } except TimeoutError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        await t
+        lis.close()
+    }
+}
+
+
+main([SocketDeadlineTests(), HttpClientTimeoutTests()])

@@ -36,6 +36,9 @@ extern "C" def dragon_tls_send_bytes(conn: ptr, data: bytes) -> int
 extern "C" def dragon_tls_read(conn: ptr, buf: ptr, length: int) -> int
 extern "C" def dragon_tls_recv_str(conn: ptr, maxlen: int) -> str
 extern "C" def dragon_tls_recv_str_timeout(conn: ptr, maxlen: int, ms: int) -> str
+extern "C" def dragon_tls_read_timeout(conn: ptr, buf: ptr, length: int, ms: int) -> int
+extern "C" def dragon_tls_handshake_timeout(conn: ptr, ms: int) -> int
+extern "C" def dragon_tls_last_read_timed_out(conn: ptr) -> int
 extern "C" def dragon_tls_close(conn: ptr) -> int
 extern "C" def dragon_tls_error_string(code: int, buf: ptr, length: int)
 
@@ -91,9 +94,16 @@ class SSLSocket {
         self._conn = own conn
         self._sock = sock
         self.server_hostname = server_hostname
+        self._timeout_ms = 0
         # Guards close() against a double free and keeps sock.close()
         # idempotent alongside the nulled handle. See close().
         self._closed = False
+    }
+
+    def set_timeout(ms: int) -> None {
+        """Arm a read deadline: recv/recv_bytes raise TimeoutError after `ms` of
+        silence instead of parking forever. EOF still returns ""/b"". 0 disarms."""
+        self._timeout_ms = ms
     }
 
     def do_handshake() -> None {
@@ -117,7 +127,16 @@ class SSLSocket {
         if not buf {
             raise MemoryError("recv_bytes: could not allocate the read buffer")
         }
-        got: int = dragon_tls_read(self._conn, buf, n)
+        got: int = 0
+        if self._timeout_ms > 0 {
+            got = dragon_tls_read_timeout(self._conn, buf, n, self._timeout_ms)
+            if got < 0 and dragon_tls_last_read_timed_out(self._conn) != 0 {
+                free(buf)
+                raise TimeoutError("TLS receive timed out")
+            }
+        } else {
+            got = dragon_tls_read(self._conn, buf, n)
+        }
         if got < 0 {
             free(buf)
             raise SSLError(f"TLS read failed: {_err_msg(got)}")
@@ -160,6 +179,13 @@ class SSLSocket {
     def recv(size: int) -> str {
         """TcpStream-compatible read so http.client.HTTPSConnection can drive
         SSLSocket like TcpStream; returns str (recv_bytes is the binary read)."""
+        if self._timeout_ms > 0 {
+            const out: str = dragon_tls_recv_str_timeout(self._conn, size, self._timeout_ms)
+            if len(out) == 0 and dragon_tls_last_read_timed_out(self._conn) != 0 {
+                raise TimeoutError("TLS receive timed out")
+            }
+            return out
+        }
         return dragon_tls_recv_str(self._conn, size)
     }
 
@@ -282,17 +308,34 @@ class SSLContext {
 
     def wrap_socket(sock: TcpStream, server_side: bool = False,
                     server_hostname: str = "",
-                    do_handshake_on_connect: bool = True) -> SSLSocket {
+                    do_handshake_on_connect: bool = True,
+                    timeout_ms: int = 0) -> SSLSocket {
+        """With `timeout_ms` > 0 the handshake is bounded (TimeoutError past the
+        deadline) and the returned socket's read deadline is armed, so a peer
+        that accepts and never answers cannot park the green thread forever."""
         conn: ptr = dragon_tls_conn_new(self._ctx, sock.raw_fd(), server_hostname)
         if do_handshake_on_connect {
-            rc: int = dragon_tls_handshake(conn)
+            rc: int = 0
+            if timeout_ms > 0 {
+                rc = dragon_tls_handshake_timeout(conn, timeout_ms)
+                if rc != 0 and dragon_tls_last_read_timed_out(conn) != 0 {
+                    dragon_tls_conn_free(conn)
+                    raise TimeoutError("TLS handshake timed out")
+                }
+            } else {
+                rc = dragon_tls_handshake(conn)
+            }
             vr: int = dragon_tls_get_verify_result(conn)
             if rc != 0 {
                 dragon_tls_conn_free(conn)
             }
             _raise_if_handshake_failed(rc, vr)
         }
-        return SSLSocket(own conn, sock, server_hostname)
+        const wrapped: SSLSocket = SSLSocket(own conn, sock, server_hostname)
+        if timeout_ms > 0 {
+            wrapped.set_timeout(timeout_ms)
+        }
+        return wrapped
     }
 }
 

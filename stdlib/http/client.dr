@@ -232,18 +232,28 @@ class HTTPResponse {
 
 
 class HTTPConnection {
-    def(host: str, port: int) {
+    def(host: str, port: int, timeout_ms: int = 0) {
         self.host = host
         self.port = port
         self.stream = TcpStream(SocketHandle.adopt_raw(-1))
         self._connected = False
+        self._timeout_ms = timeout_ms
+    }
+
+    def set_timeout(ms: int) -> None {
+        """Bound connect and every read by `ms`: past the deadline the request
+        raises TimeoutError instead of parking forever. 0 = wait indefinitely."""
+        self._timeout_ms = ms
+        if self._connected {
+            self.stream.set_timeout(ms)
+        }
     }
 
     def connect() -> None {
         if self._connected {
             return
         }
-        self.stream = TcpStream.open(self.host, self.port)
+        self.stream = TcpStream.open(self.host, self.port, self._timeout_ms)
         self._connected = True
     }
 
@@ -339,20 +349,31 @@ class HTTPSConnection {
     _ctx: SSLContext
     stream: SSLSocket
     _connected: bool
+    _timeout_ms: int
 
-    def(host: str, port: int) {
+    def(host: str, port: int, timeout_ms: int = 0) {
         self.host = host
         self.port = port
         self._ctx = create_default_context()
         self._connected = False
+        self._timeout_ms = timeout_ms
+    }
+
+    def set_timeout(ms: int) -> None {
+        """Bound connect, TLS handshake, and every read by `ms`: past the deadline
+        the request raises TimeoutError instead of parking forever. 0 = no bound."""
+        self._timeout_ms = ms
+        if self._connected {
+            self.stream.set_timeout(ms)
+        }
     }
 
     def connect() -> None {
         if self._connected {
             return
         }
-        raw: TcpStream = TcpStream.open(self.host, self.port)
-        self.stream = self._ctx.wrap_socket(raw, False, self.host)
+        raw: TcpStream = TcpStream.open(self.host, self.port, self._timeout_ms)
+        self.stream = self._ctx.wrap_socket(raw, False, self.host, True, self._timeout_ms)
         self._connected = True
     }
 

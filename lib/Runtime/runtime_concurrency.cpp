@@ -1810,6 +1810,74 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
     return result;
 }
 
+static int64_t dragon_nb_recv_deadline_raw(int64_t fd, void* buf, int64_t max_len,
+                                           int64_t timeout_ms, int* timed_out) {
+    *timed_out = 0;
+    if (max_len <= 0) return 0;
+    if (timeout_ms <= 0) {
+        int64_t n = dragon_nb_recv(fd, buf, max_len);
+        return n < 0 ? 0 : n;
+    }
+    make_nonblocking((int)fd);
+    while (1) {
+#ifdef _WIN32
+        int r = recv((SOCKET)fd, (char*)buf, (int)max_len, 0);
+#else
+        ssize_t r = recv((int)fd, buf, (size_t)max_len, 0);
+#endif
+        if (r >= 0) return (int64_t)r;
+        if (dragon_sock_wouldblock()) {
+            DragonVThread* vt = __current_vthread;
+            if (vt && vt->coro) {
+                vt->io_timed_out = 0;
+                dragon_io_watch_fd_deadline((int)fd, IO_EVENT_FD_READ, vt, timeout_ms);
+                mco_yield(vt->coro);
+                if (vt->io_timed_out) { *timed_out = 1; return 0; }
+                continue;
+            }
+            int pr = nb_wait_fd_timeout((int)fd, POLLIN, (int)timeout_ms);
+            if (pr == 0) { *timed_out = 1; return 0; }
+            if (pr < 0) return 0;
+            continue;
+        }
+        return 0;
+    }
+}
+
+const char* dragon_nb_recv_str_deadline(int64_t fd, int64_t max_len, int64_t timeout_ms) {
+    dragon_recv_len_or_raise(max_len);
+    int64_t cap = max_len > 0 ? max_len : 1;
+    char* buf = (char*)dragon_xmalloc_ex(cap, 1, 1);
+    int timed_out = 0;
+    int64_t n = dragon_nb_recv_deadline_raw(fd, buf, max_len, timeout_ms, &timed_out);
+    if (timed_out) {
+        free(buf);
+        dragon_raise_exc_cstr(56, "TimeoutError: receive timed out");
+    }
+    buf[n] = '\0';
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
+    const char* result = dragon_string_alloc(buf, n);
+    dragon_cleanup_reset(clbase);
+    free(buf);
+    return result;
+}
+
+DragonBytes* dragon_nb_recv_bytes_deadline(int64_t fd, int64_t max_len, int64_t timeout_ms) {
+    dragon_recv_len_or_raise(max_len);
+    int64_t cap = max_len > 0 ? max_len : 1;
+    uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
+    int timed_out = 0;
+    int64_t n = dragon_nb_recv_deadline_raw(fd, buf, max_len, timeout_ms, &timed_out);
+    if (timed_out) {
+        free(buf);
+        dragon_raise_exc_cstr(56, "TimeoutError: receive timed out");
+    }
+    DragonBytes* result = dragon_bytes_new(buf, n);
+    free(buf);
+    return result;
+}
+
 int64_t dragon_nb_send_bytes(int64_t fd, DragonBytes* data) {
     if (!data || data->len == 0) return 0;
     return dragon_nb_send(fd, (const char*)data->data, data->len);
@@ -1840,6 +1908,46 @@ int64_t dragon_nb_connect(int64_t fd, void* addr, int64_t addrlen) {
         mco_yield(vt->coro);
     } else if (nb_wait_fd((int)fd, POLLOUT) < 0) {
         return -1;
+    }
+
+    int err = 0;
+    socklen_t elen = sizeof(err);
+#ifdef _WIN32
+    getsockopt((SOCKET)fd, SOL_SOCKET, SO_ERROR, (char*)&err, &elen);
+#else
+    getsockopt((int)fd, SOL_SOCKET, SO_ERROR, &err, &elen);
+#endif
+    if (err != 0) {
+#ifndef _WIN32
+        errno = err;
+#endif
+        return -1;
+    }
+    return 0;
+}
+
+int64_t dragon_nb_connect_timeout(int64_t fd, void* addr, int64_t addrlen,
+                                  int64_t timeout_ms) {
+    if (timeout_ms <= 0) return dragon_nb_connect(fd, addr, addrlen);
+    make_nonblocking((int)fd);
+#ifdef _WIN32
+    int rc = connect((SOCKET)fd, (struct sockaddr*)addr, (int)addrlen);
+#else
+    int rc = connect((int)fd, (struct sockaddr*)addr, (socklen_t)addrlen);
+#endif
+    if (rc == 0) return 0;
+    if (!dragon_connect_in_progress()) return -1;
+
+    DragonVThread* vt = __current_vthread;
+    if (vt && vt->coro) {
+        vt->io_timed_out = 0;
+        dragon_io_watch_fd_deadline((int)fd, IO_EVENT_FD_WRITE, vt, timeout_ms);
+        mco_yield(vt->coro);
+        if (vt->io_timed_out) return -2;
+    } else {
+        int pr = nb_wait_fd_timeout((int)fd, POLLOUT, (int)timeout_ms);
+        if (pr == 0) return -2;
+        if (pr < 0) return -1;
     }
 
     int err = 0;

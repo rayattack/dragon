@@ -21,6 +21,9 @@ extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
 extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
 extern "C" def dragon_nb_send_bytes(fd: int, data: bytes) -> int
 extern "C" def dragon_nb_recv_timeout(fd: int, max_len: int, ms: int) -> bytes
+extern "C" def dragon_nb_recv_str_deadline(fd: int, max_len: int, ms: int) -> str
+extern "C" def dragon_nb_recv_bytes_deadline(fd: int, max_len: int, ms: int) -> bytes
+extern "C" def dragon_nb_connect_timeout(fd: int, addr: ptr, addrlen: int, ms: int) -> int
 
 extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
 extern "C" def dragon_sockaddr_in_size() -> intc
@@ -86,9 +89,11 @@ class TcpStream {
     # The one claim on this connection; own-consumed, raw_fd() only borrows.
     # Defined before TcpListener: a fwd-ref to an own-field ctor once miscompiled into a UAF hang (fixed in codegen, test_fire_own_fwdref.dr).
     own _sock: SocketHandle
+    _timeout_ms: int
 
     def(own sock: SocketHandle) {
         self._sock = sock
+        self._timeout_ms = 0
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)
@@ -97,14 +102,39 @@ class TcpStream {
     }
 
     @staticmethod
-    def open(host: str, port: int) -> TcpStream {
+    def open(host: str, port: int, timeout_ms: int = 0) -> TcpStream {
+        """Connect to host:port. With `timeout_ms` > 0 the connect attempt is
+        bounded (TimeoutError past the deadline, ConnectionError on refusal) and
+        the stream's read deadline is armed, so recv raises instead of parking
+        forever on a peer that accepts and never answers. 0 = wait indefinitely."""
         const ip: str = dragon_resolve4(host)
         const fd: int = socket(AF_INET, SOCK_STREAM, 0)
         const addr: ptr = dragon_sockaddr_in_new(port, ip)
         const addrlen: int = dragon_sockaddr_in_size()
+        if timeout_ms > 0 {
+            const rc: int = dragon_nb_connect_timeout(fd, addr, addrlen, timeout_ms)
+            free(addr)
+            if rc == -2 {
+                close(fd)
+                raise TimeoutError(f"connect to {host}:{port} timed out")
+            }
+            if rc != 0 {
+                close(fd)
+                raise ConnectionError(f"connect to {host}:{port} failed")
+            }
+            const stream: TcpStream = TcpStream(SocketHandle.adopt_raw(fd))
+            stream.set_timeout(timeout_ms)
+            return stream
+        }
         dragon_nb_connect(fd, addr, addrlen)
         free(addr)
         return TcpStream(SocketHandle.adopt_raw(fd))
+    }
+
+    def set_timeout(ms: int) -> None {
+        """Arm a read deadline: recv/recv_bytes raise TimeoutError after `ms` of
+        silence instead of parking forever. EOF still returns ""/b"". 0 disarms."""
+        self._timeout_ms = ms
     }
 
     def send(data: str) -> int {
@@ -112,6 +142,9 @@ class TcpStream {
     }
 
     def recv(size: int) -> str {
+        if self._timeout_ms > 0 {
+            return dragon_nb_recv_str_deadline(self._sock.fd(), size, self._timeout_ms)
+        }
         return dragon_nb_recv_str(self._sock.fd(), size)
     }
 
@@ -122,6 +155,9 @@ class TcpStream {
     }
 
     def recv_bytes(size: int) -> bytes {
+        if self._timeout_ms > 0 {
+            return dragon_nb_recv_bytes_deadline(self._sock.fd(), size, self._timeout_ms)
+        }
         return dragon_nb_recv_bytes(self._sock.fd(), size)
     }
 
