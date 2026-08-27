@@ -105,10 +105,14 @@ void CodeGen::visit(StringLiteral& node) {
                        (exprVal->getType() == impl_->i8PtrType ||
                         exprVal->getType()->isPointerTy())) {
                 strVal = impl_->callDunder(fClassName, "__str__", exprVal);
+                impl_->emitDecrefByKind(
+                    exprVal, impl_->ownedTempDrainKind(part.expr.get(), exprVal));
             } else if (!fClassName.empty() && impl_->hasDunder(fClassName, "__repr__") &&
                        (exprVal->getType() == impl_->i8PtrType ||
                         exprVal->getType()->isPointerTy())) {
                 strVal = impl_->callDunder(fClassName, "__repr__", exprVal);
+                impl_->emitDecrefByKind(
+                    exprVal, impl_->ownedTempDrainKind(part.expr.get(), exprVal));
             } else if (exprVal->getType() == impl_->i8PtrType ||
                        exprVal->getType()->isPointerTy()) {
                 std::string creprFn = impl_->containerReprFn(part.expr.get());
@@ -479,9 +483,13 @@ void CodeGen::visit(TemplateExpr& node) {
                 if (!fClassName.empty() && impl_->hasDunder(fClassName, "__str__") &&
                     (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy())) {
                     strVal = impl_->callDunder(fClassName, "__str__", exprVal);
+                    impl_->emitDecrefByKind(exprVal,
+                                            impl_->ownedTempDrainKind(fExpr, exprVal));
                 } else if (!fClassName.empty() && impl_->hasDunder(fClassName, "__repr__") &&
                            (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy())) {
                     strVal = impl_->callDunder(fClassName, "__repr__", exprVal);
+                    impl_->emitDecrefByKind(exprVal,
+                                            impl_->ownedTempDrainKind(fExpr, exprVal));
                 } else if (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy()) {
                     strVal = exprVal;
                     strValOwned = impl_->isOwnedStrResult(exprVal);

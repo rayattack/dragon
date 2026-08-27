@@ -172,4 +172,73 @@ class TemplateRenderRcTests(TestCase) {
 }
 
 
-main([BorrowedFieldRCTests(), TemplateRenderRcTests()])
+class Badge {
+    def(text: str) {
+        self.text = text
+    }
+
+    def __str__() -> str {
+        return "[" + self.text + "]"
+    }
+}
+
+
+def make_badge(text: str) -> Badge {
+    return Badge(text)
+}
+
+
+class StringifiedTempDrainTests(TestCase) {
+    """An instance temporary stringified via __str__ must be released.
+
+    You write ordinary, correct-looking Dragon - a helper minting a fragment
+    that is rendered straight into markup, never bound to a name:
+
+        page: HTML = template[HTML] {<div>!{make_badge("new")}</div>}
+        line: str = f"{make_badge('new')}"
+
+    You did nothing wrong: the helper's return value is yours to consume, and
+    consuming it by rendering looks like consuming it by any other call. But
+    interpolation only called `__str__` on the temporary and kept the string;
+    the instance itself was never released, so every render of a page built
+    this way leaked one object. A long-running server rendering such a
+    fragment per request grew without bound.
+
+    Borrowed receivers (a named local, a field) are untouched: only the owned
+    temporary is drained, after its `__str__` result is taken. These tests
+    assert the rendered VALUES; the ASan leak gate over this suite asserts
+    the drain.
+    """
+
+    def test_owned_temp_in_template_interp() {
+        const page: HTML = template[HTML] {<div>!{make_badge("new")}</div>}
+        self.assertEqual(page.to_str(), "<div>[new]</div>")
+    }
+
+    def test_owned_temp_in_fstring() {
+        self.assertEqual(f"{make_badge('new')}", "[new]")
+    }
+
+    def test_borrowed_local_still_usable_after_render() {
+        b: Badge = Badge("kept")
+        first: str = f"{b}"
+        second: HTML = template[HTML] {!{b}}
+        self.assertEqual(first, "[kept]")
+        self.assertEqual(second.to_str(), "[kept]")
+        self.assertEqual(b.text, "kept")
+    }
+
+    def test_repeated_renders_stay_correct() {
+        out: str = ""
+        i: int = 0
+        while i < 2000 {
+            out = template[HTML] {!{make_badge("x")}}.to_str()
+            i = i + 1
+        }
+        self.assertEqual(out, "[x]")
+    }
+}
+
+
+main([BorrowedFieldRCTests(), TemplateRenderRcTests(),
+      StringifiedTempDrainTests()])
