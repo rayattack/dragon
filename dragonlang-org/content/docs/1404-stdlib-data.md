@@ -43,6 +43,22 @@ into a boxed `Any` tree: objects become `dict[str, Any]`, arrays become
 body). This is the Python-parity convenience tier - every node is one box,
 so it is fine off hot paths.
 
+When you already know the top level is an object, skip the `Any` at the
+root: `loads_obj(s: str) -> dict[str, Any]` returns the typed dict directly
+and raises `ValueError` when the document's top level is anything else.
+`loads_list(s: str) -> list[Any]` is the array twin, and `loadb_obj` /
+`loadb_list` are their bytes siblings:
+
+```dragon
+from json import loads_obj
+
+const obj: dict[str, Any] = loads_obj('{"name": "ada", "age": 36}')
+const name: str = obj["name"]
+const age: int = obj["age"]
+print(name)                # ada
+print(age)                 # 36
+```
+
 The catch is that you cannot index *straight* into the boxed `Any` and read
 a value out of it; the box does not auto-unbox under a subscript. The
 working pattern for a document you know is an object is to decode it AT

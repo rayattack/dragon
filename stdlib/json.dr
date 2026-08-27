@@ -982,7 +982,7 @@ def loads(s: str) -> Any {
     return loadb(s.encode("utf-8"))
 }
 
-def _decode_obj_any(data: bytes) -> dict[str, Any] {
+def loadb_obj(data: bytes) -> dict[str, Any] {
     const v: Any = loadb(data)
     if isinstance(v, dict) {
         const m: dict[str, Any] = v
@@ -991,13 +991,21 @@ def _decode_obj_any(data: bytes) -> dict[str, Any] {
     raise ValueError("JSON top-level value is not an object")
 }
 
-def _decode_list_any(data: bytes) -> list[Any] {
+def loadb_list(data: bytes) -> list[Any] {
     const v: Any = loadb(data)
     if isinstance(v, list) {
         const xs: list[Any] = v
         return xs
     }
     raise ValueError("JSON top-level value is not an array")
+}
+
+def loads_obj(s: str) -> dict[str, Any] {
+    return loadb_obj(s.encode("utf-8"))
+}
+
+def loads_list(s: str) -> list[Any] {
+    return loadb_list(s.encode("utf-8"))
 }
 
 class JSON(Template) {

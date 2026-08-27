@@ -1437,7 +1437,7 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         auto& dt = static_cast<DictType&>(*targetType);
         const bool strKey = dt.keyType && dt.keyType->kind() == Type::Kind::Str;
         if (strKey && dt.valueType && dt.valueType->kind() == Type::Kind::Any)
-            return sdBoxedDelegateFn("_decode_obj_any", sdInnerType("dict:Any", loc), loc);
+            return sdBoxedDelegateFn("loadb_obj", sdInnerType("dict:Any", loc), loc);
         const std::string vk = dt.valueType ? sdScalarKindName(dt.valueType->kind()) : "";
         if (!strKey || vk.empty()) {
             error(loc, "json.decode[dict[K, V]]: only dict[str, <scalar>] decodes "
@@ -1456,7 +1456,7 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     if (targetType && targetType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*targetType);
         if (lt.elementType && lt.elementType->kind() == Type::Kind::Any)
-            return sdBoxedDelegateFn("_decode_list_any", sdInnerType("list:Any", loc), loc);
+            return sdBoxedDelegateFn("loadb_list", sdInnerType("list:Any", loc), loc);
         const std::string elemScalar =
             lt.elementType ? sdScalarKindName(lt.elementType->kind()) : "";
         if (!elemScalar.empty()) {

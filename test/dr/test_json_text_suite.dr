@@ -1,5 +1,6 @@
 from unittest import TestCase, main
 from json import loads, loadb, dumps, escape, unescape, decode, encode, JsonWriter, JSON
+from json import loads_obj, loads_list, loadb_obj, loadb_list
 import json
 
 
@@ -624,8 +625,80 @@ class TestUcs4DumpsRepr(TestCase) {
 }
 
 
+class TypedTopLevelTests(TestCase) {
+    """json.loads_obj / loads_list (and the loadb_* bytes twins) - the public
+    typed entry points for boxed-tier JSON. loads returns Any, so every caller
+    that knows the top level is an object used to repeat the same isinstance
+    narrowing boilerplate; these return dict[str, Any] / list[Any] directly and
+    raise ValueError when the document's top level is a different shape."""
+
+    def test_loads_obj_returns_typed_dict() {
+        const m: dict[str, Any] = loads_obj("{\"name\": \"Ada\", \"age\": 36, \"ok\": true}")
+        self.assertEqual(m["name"], "Ada")
+        self.assertEqual(m["age"], 36)
+        self.assertEqual(m["ok"], True)
+    }
+
+    def test_loads_obj_empty_object() {
+        const m: dict[str, Any] = loads_obj("{}")
+        self.assertEqual(len(m), 0)
+    }
+
+    def test_loads_obj_rejects_array() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const m: dict[str, Any] = loads_obj("[1, 2, 3]")
+        })
+    }
+
+    def test_loads_obj_rejects_scalar() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const m: dict[str, Any] = loads_obj("42")
+        })
+    }
+
+    def test_loads_obj_rejects_malformed() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const m: dict[str, Any] = loads_obj("{\"a\": ")
+        })
+    }
+
+    def test_loads_list_returns_typed_list() {
+        const xs: list[Any] = loads_list("[1, \"two\", true, null]")
+        self.assertEqual(len(xs), 4)
+        self.assertEqual(xs[0], 1)
+        self.assertEqual(xs[1], "two")
+        self.assertEqual(xs[2], True)
+    }
+
+    def test_loads_list_rejects_object() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const xs: list[Any] = loads_list("{\"a\": 1}")
+        })
+    }
+
+    def test_loadb_obj_bytes_twin() {
+        const m: dict[str, Any] = loadb_obj(b"{\"n\": 7}")
+        self.assertEqual(m["n"], 7)
+    }
+
+    def test_loadb_list_bytes_twin() {
+        const xs: list[Any] = loadb_list(b"[10, 20]")
+        self.assertEqual(len(xs), 2)
+        self.assertEqual(xs[1], 20)
+    }
+
+    def test_loads_obj_nested_values_stay_boxed() {
+        const m: dict[str, Any] = loads_obj("{\"tags\": [\"a\", \"b\"], \"meta\": {\"depth\": 2}}")
+        const tags: Any = m["tags"]
+        self.assertTrue(isinstance(tags, list))
+        const meta: Any = m["meta"]
+        self.assertTrue(isinstance(meta, dict))
+    }
+}
+
+
 main([JsonScalarTests(), JsonObjectTests(), JsonArrayTests(),
       JsonRoundTripTests(), JsonTypedConstructionTests(), JsonParseErrorTests(),
       EscapeControlTests(), WriterControlTests(), EncodeControlTests(),
       WriterShapeTests(), WriterEscapeTests(), WriterListHelperTests(), WriterOwnershipTests(),
-      JsonAnyListTests(), TestUcs4DumpsRepr()])
+      JsonAnyListTests(), TestUcs4DumpsRepr(), TypedTopLevelTests()])
