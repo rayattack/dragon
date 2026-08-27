@@ -18,6 +18,10 @@ add_compile_definitions(
     DRAGON_ROOT_DIR="${CMAKE_SOURCE_DIR}"
     DRAGON_TEST_CASES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cases")
 
+add_executable(dragon_zen_tests ZenTest.cpp)
+target_link_libraries(dragon_zen_tests PRIVATE gtest_main)
+add_test(NAME ZenTests COMMAND dragon_zen_tests)
+
 add_executable(dragon_lexer_tests LexerTest.cpp)
 target_link_libraries(dragon_lexer_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME LexerTests COMMAND dragon_lexer_tests)
