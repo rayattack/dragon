@@ -113,6 +113,11 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 impl_->varClassNames[name->name] = "__Deque";
                 impl_->moduleGlobalClassNames[gKey] = {"__Deque", ""};
             }
+            if (auto* lockAnn = dynamic_cast<NamedTypeExpr*>(ann->annotation.get()))
+                if (lockAnn->name == "Lock") {
+                    impl_->varClassNames[name->name] = "__Lock";
+                    impl_->moduleGlobalClassNames[gKey] = {"__Lock", ""};
+                }
 
             auto* gv = new llvm::GlobalVariable(
                 *impl_->module, gvType, false,
@@ -209,6 +214,11 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->varClassNames[name->name] = "__Deque";
             impl_->moduleGlobalClassNames[gKey] = {"__Deque", ""};
         }
+        if (auto* lockAnn = dynamic_cast<NamedTypeExpr*>(ann->annotation.get()))
+            if (lockAnn->name == "Lock") {
+                impl_->varClassNames[name->name] = "__Lock";
+                impl_->moduleGlobalClassNames[gKey] = {"__Lock", ""};
+            }
         if (auto* cte = dynamic_cast<CallableTypeExpr*>(ann->annotation.get())) {
             impl_->callableTypes[name->name] = impl_->callableTypeExprToFnType(cte);
             vk = Impl::VarKind::Closure;
