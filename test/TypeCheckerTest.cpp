@@ -1802,3 +1802,8 @@ TEST(TypeCheckerTest, GenericConstructionStillNeedsInferableTypeArguments) {
     EXPECT_TRUE(checkHasErrors(code("generic_ctor_without_args_rejected")));
     EXPECT_TRUE(checkOk(code("generic_ctor_explicit_accepted")));
 }
+
+TEST(TypeCheckerTest, DuplicateConstructorArityIsRejected) {
+    EXPECT_TRUE(checkHasErrors(code("duplicate_ctor_arity_rejected")));
+    EXPECT_TRUE(checkOk(code("distinct_ctor_arities_ok")));
+}

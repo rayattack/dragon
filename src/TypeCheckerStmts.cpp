@@ -8,6 +8,7 @@
 #include <functional>
 #include <set>
 #include <system_error>
+#include <unordered_set>
 
 namespace dragon {
 
@@ -1282,12 +1283,25 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         _ovlCount[f->name]++;
     }
     std::unordered_map<std::string, int> _ovlNext;
+    std::unordered_set<size_t> ctorAritiesSeen;
     for (auto& s : node.body) {
         auto* func = dynamic_cast<FunctionDecl*>(s.get());
         if (!func) continue;
         if (!func->typeParams.empty()) continue;
-        if (func->name == "__init__" || func->isConstructor)
+        if (func->name == "__init__" || func->isConstructor) {
             classType->constructorCount++;
+            size_t ctorParamStart = func->hasImplicitSelf ? 0 : 1;
+            size_t ctorArity = func->params.size() >= ctorParamStart
+                                   ? func->params.size() - ctorParamStart
+                                   : 0;
+            if (!ctorAritiesSeen.insert(ctorArity).second)
+                error(func->location(),
+                      "class '" + node.name + "' declares two constructors taking " +
+                          std::to_string(ctorArity) +
+                          " argument(s); constructors dispatch by argument count, so "
+                          "each must take a different number (for same-count variants, "
+                          "use a `static def` factory)");
+        }
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (size_t i = 0; i < func->params.size(); ++i) {
             if (func->isMethod && !func->hasImplicitSelf &&

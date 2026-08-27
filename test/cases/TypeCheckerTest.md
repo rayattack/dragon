@@ -55,6 +55,41 @@ class C(B) {
 c: C = C()
 ```
 
+#### :duplicate_ctor_arity_rejected
+
+Constructors dispatch by argument count alone, so two constructors with the
+same count cannot both be reachable. Left in, they used to miscompile into an
+arity switch with duplicate cases; the class must be rejected at type check.
+
+```dr
+class P {
+    tag: str = ""
+    def (a: int, b: int) {
+        self.tag = "int-int"
+    }
+    def (a: str, b: int) {
+        self.tag = "str-int"
+    }
+}
+p: P = P("hello", 1)
+```
+
+#### :distinct_ctor_arities_ok
+
+```dr
+class P {
+    tag: str = ""
+    def (a: int) {
+        self.tag = "one"
+    }
+    def (a: int, b: int) {
+        self.tag = "two"
+    }
+}
+x: P = P(1)
+y: P = P(1, 2)
+```
+
 #### :function_value_subscript_rejected
 
 ```dr
