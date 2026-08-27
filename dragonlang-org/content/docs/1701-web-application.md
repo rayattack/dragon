@@ -135,6 +135,11 @@ Both arguments have defaults (`Router(8000, "0.0.0.0")`), so a bare
 `Router()` listens on every interface on port 8000. Use `127.0.0.1` to
 bind to loopback only - the right default while developing.
 
+Request bodies are capped at 1 MiB by default, and an oversized body is
+answered with `413 Payload Too Large` (malformed framing stays `400`).
+When your endpoints legitimately take more - file uploads, telemetry
+exports - raise the cap per router with `app.set_max_body_bytes(n)`.
+
 You attach handlers with one method per HTTP verb. The full set is
 `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`, `TRACE`, and
 `CONNECT`; there is also `HTTP`, which registers the same handler for

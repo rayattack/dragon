@@ -73,6 +73,27 @@ def _serve(app: Router, request: bytes) -> str {
 }
 
 
+def _len_handler(req: Request, res: Response, ctx: Context) -> None {
+    res.text(f"len={len(req.body)}")
+}
+
+
+def _plain_post(body: bytes) -> bytes {
+    head: bytes = b"POST /len HTTP/1.1" + CRLF_B + b"Host: x" + CRLF_B
+    head = head + (b"Content-Length: " + str(len(body)).encode()) + CRLF_B
+    head = head + b"Connection: close" + CRLF_B + CRLF_B
+    return head + body
+}
+
+
+def _declared_post(declared_len: int, body: bytes) -> bytes {
+    head: bytes = b"POST /len HTTP/1.1" + CRLF_B + b"Host: x" + CRLF_B
+    head = head + (b"Content-Length: " + str(declared_len).encode()) + CRLF_B
+    head = head + b"Connection: close" + CRLF_B + CRLF_B
+    return head + body
+}
+
+
 class HttpMultipartTests(TestCase) {
     """http.multipart - parse multipart/form-data bodies into Parts (W3).
 
@@ -251,4 +272,78 @@ class HttpFormTests(TestCase) {
 }
 
 
-main([HttpMultipartTests(), HttpFormTests()])
+class BodyCapTests(TestCase) {
+    """Router.set_max_body_bytes + the 413 answer for oversized requests.
+
+    The body cap used to be a hard 1 MiB module const, and overflow surfaced as
+    a bare 400 indistinguishable from malformed framing. Now the cap is
+    per-Router and an oversized body answers 413 Payload Too Large, while
+    genuinely malformed requests keep answering 400."""
+
+    def test_over_default_cap_answers_413() {
+        const app: Router = Router()
+        app.POST("/len", _len_handler)
+        const sent: str = _serve(app, _declared_post(1048577, b""))
+        self.assertIn("413", sent)
+        self.assertIn("Payload Too Large", sent)
+    }
+
+    def test_lowered_cap_answers_413() {
+        const app: Router = Router()
+        app.set_max_body_bytes(16)
+        app.POST("/len", _len_handler)
+        const sent: str = _serve(app, _plain_post(b"seventeen bytes!!"))
+        self.assertIn("413", sent)
+        self.assertIn("Payload Too Large", sent)
+    }
+
+    def test_body_at_cap_passes() {
+        const app: Router = Router()
+        app.set_max_body_bytes(16)
+        app.POST("/len", _len_handler)
+        const sent: str = _serve(app, _plain_post(b"sixteen bytes ok"))
+        self.assertIn("200", sent)
+        self.assertIn("len=16", sent)
+    }
+
+    def test_raised_cap_allows_body_over_one_mib() {
+        const app: Router = Router()
+        app.set_max_body_bytes(4194304)
+        app.POST("/len", _len_handler)
+        const big: bytes = ("x" * 1048577).encode()
+        const sent: str = _serve(app, _plain_post(big))
+        self.assertIn("200", sent)
+        self.assertIn("len=1048577", sent)
+    }
+
+    def test_chunked_over_cap_answers_413() {
+        const app: Router = Router()
+        app.set_max_body_bytes(16)
+        app.POST("/len", _len_handler)
+        head: bytes = b"POST /len HTTP/1.1" + CRLF_B + b"Host: x" + CRLF_B
+        head = head + b"Transfer-Encoding: chunked" + CRLF_B
+        head = head + b"Connection: close" + CRLF_B + CRLF_B
+        const body: bytes = b"11" + CRLF_B + b"seventeen bytes!!" + CRLF_B + b"0" + CRLF_B + CRLF_B
+        const sent: str = _serve(app, head + body)
+        self.assertIn("413", sent)
+        self.assertIn("Payload Too Large", sent)
+    }
+
+    def test_truncated_body_still_answers_400() {
+        const app: Router = Router()
+        app.POST("/len", _len_handler)
+        const sent: str = _serve(app, _declared_post(10, b"abc"))
+        self.assertIn("400", sent)
+        self.assertIn("Bad Request", sent)
+    }
+
+    def test_nonpositive_cap_rejected() {
+        const app: Router = Router()
+        self.assertRaises(ValueError, lambda () -> None {
+            app.set_max_body_bytes(0)
+        })
+    }
+}
+
+
+main([HttpMultipartTests(), HttpFormTests(), BodyCapTests()])

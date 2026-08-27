@@ -654,6 +654,7 @@ class Router {
         self._csrf_header_name: str = "x-csrf-token"
         self._idle_timeout_ms: int = _IDLE_TIMEOUT_MS
         self._max_connections: int = _MAX_CONNECTIONS
+        self._max_body_bytes: int = 0
         self._conn_cell = malloc(8)
         dragon_atomic_store(self._conn_cell, 0)
         self._allowed_hosts: list[str] = []
@@ -661,6 +662,13 @@ class Router {
 
     def set_max_connections(n: int) -> None {
         self._max_connections = n
+    }
+
+    def set_max_body_bytes(n: int) -> None {
+        if n <= 0 {
+            raise ValueError("set_max_body_bytes: the cap must be positive")
+        }
+        self._max_body_bytes = n
     }
 
     def set_allowed_hosts(hosts: list[str]) -> None {
@@ -1316,6 +1324,9 @@ class Router {
     def serve_connection(reader: ConnReader) -> None {
         const rr: RequestReader = RequestReader(reader)
         rr.idle_timeout_ms = self._idle_timeout_ms
+        if self._max_body_bytes > 0 {
+            rr.max_body_bytes = self._max_body_bytes
+        }
         const deadline: float = monotonic() + float(_KEEPALIVE_TIMEOUT_SECS)
         served: int = 0
 
@@ -1326,8 +1337,13 @@ class Router {
             }
             if fr.bad {
                 const bad: Response = Response()
-                bad.status = 400
-                bad.text("Bad Request")
+                if fr.too_large {
+                    bad.status = 413
+                    bad.text("Payload Too Large")
+                } else {
+                    bad.status = 400
+                    bad.text("Bad Request")
+                }
                 bad._close = true
                 const bs: str = bad.serialize()
                 reader.send(bs)

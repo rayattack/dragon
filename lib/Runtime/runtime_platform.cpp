@@ -149,7 +149,7 @@ void* dragon_ptr_deref(void** pp) {
 
 
 #define DRAGON_HTTP_MAX_HEADERS 64
-#define DRAGON_HTTP_MAX_BODY (1024 * 1024)
+#define DRAGON_HTTP_MAX_BODY (1024 * 1024 * 1024)
 #define DRAGON_HTTP_HEADERS_MAX (64 * 1024)
 
 typedef struct {
@@ -168,6 +168,7 @@ typedef struct {
     char* body;
     int body_len;
     int body_cap;
+    int max_body;
     int complete;
     uint8_t http_major;
     uint8_t http_minor;
@@ -229,13 +230,14 @@ static int http_on_header_value(llhttp_t* p, const char* at, size_t len) {
 
 static int http_on_body(llhttp_t* p, const char* at, size_t len) {
     HttpParseState* s = (HttpParseState*)p->data;
-    if (s->body_len + (int)len > DRAGON_HTTP_MAX_BODY) return -1;
-    while (s->body_len + (int)len >= s->body_cap) {
-        int new_cap = s->body_cap * 2;
-        if (new_cap > DRAGON_HTTP_MAX_BODY) new_cap = DRAGON_HTTP_MAX_BODY + 1;
-        char* tmp = (char*)dragon_xrealloc_or_abort(s->body, new_cap);
+    int64_t need = (int64_t)s->body_len + (int64_t)len;
+    if (need > (int64_t)s->max_body) return -1;
+    while (need >= (int64_t)s->body_cap) {
+        int64_t new_cap = (int64_t)s->body_cap * 2;
+        if (new_cap > (int64_t)s->max_body) new_cap = (int64_t)s->max_body + 1;
+        char* tmp = (char*)dragon_xrealloc_or_abort(s->body, (size_t)new_cap);
         s->body = tmp;
-        s->body_cap = new_cap;
+        s->body_cap = (int)new_cap;
     }
     memcpy(s->body + s->body_len, at, len);
     s->body_len += (int)len;
@@ -264,6 +266,9 @@ void* dragon_http_parse_request(const char* buf, int64_t len) {
     state->body = (char*)dragon_malloc_nullable(state->body_cap);
     if (!state->body) { free(state->url); free(state); dragon_raise_oom(); }
     state->body[0] = '\0';
+    int64_t mb = len > 0 ? len : 0;
+    if (mb > (int64_t)DRAGON_HTTP_MAX_BODY) mb = DRAGON_HTTP_MAX_BODY;
+    state->max_body = (int)mb;
 
     llhttp_settings_t settings;
     memset(&settings, 0, sizeof(settings));

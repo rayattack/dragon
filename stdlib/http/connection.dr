@@ -155,13 +155,16 @@ class FramedRequest {
     bad: bool
     raw: bytes
     body: bytes
+    too_large: bool
 
-    def(ok: bool, eof: bool, bad: bool, raw: bytes, body: bytes) {
+    def(ok: bool, eof: bool, bad: bool, raw: bytes, body: bytes,
+        too_large: bool = false) {
         self.ok = ok
         self.eof = eof
         self.bad = bad
         self.raw = raw
         self.body = body
+        self.too_large = too_large
     }
 }
 
@@ -173,6 +176,7 @@ class RequestReader {
     reader: ConnReader
     buf: bytes
     idle_timeout_ms: int
+    max_body_bytes: int
 
     consumed: int
 
@@ -180,6 +184,7 @@ class RequestReader {
         self.reader = reader
         self.buf = b""
         self.idle_timeout_ms = 0
+        self.max_body_bytes = _MAX_BODY_BYTES
         self.consumed = 0
     }
 
@@ -267,8 +272,8 @@ class RequestReader {
 
         body_len: int = 0
         if cl > 0 {
-            if cl > _MAX_BODY_BYTES {
-                return FramedRequest(false, false, true, empty, empty)
+            if cl > self.max_body_bytes {
+                return FramedRequest(false, false, true, empty, empty, true)
             }
             body_len = cl
         }
@@ -308,8 +313,8 @@ class RequestReader {
                 }
                 break
             }
-            if body_len + size > _MAX_BODY_BYTES {
-                return FramedRequest(false, false, true, empty, empty)
+            if body_len + size > self.max_body_bytes {
+                return FramedRequest(false, false, true, empty, empty, true)
             }
             if not self._fill_to(self.consumed + size + 2) {
                 return FramedRequest(false, false, true, empty, empty)
