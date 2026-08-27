@@ -1285,6 +1285,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     }
     std::unordered_map<std::string, int> _ovlNext;
     std::unordered_set<size_t> ctorAritiesSeen;
+    std::vector<std::pair<size_t, size_t>> ctorArityRanges;
     for (auto& s : node.body) {
         auto* func = dynamic_cast<FunctionDecl*>(s.get());
         if (!func) continue;
@@ -1302,6 +1303,25 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                           " argument(s); constructors dispatch by argument count, so "
                           "each must take a different number (for same-count variants, "
                           "use a `static def` factory)");
+            size_t ctorTrailingDefaults = 0;
+            for (size_t i = func->params.size();
+                 i > ctorParamStart && func->params[i - 1].defaultValue;
+                 --i)
+                ++ctorTrailingDefaults;
+            size_t ctorMinArity = ctorArity - ctorTrailingDefaults;
+            for (auto& [prevMin, prevMax] : ctorArityRanges) {
+                size_t lo = std::max(prevMin, ctorMinArity);
+                size_t hi = std::min(prevMax, ctorArity);
+                if (lo < hi)
+                    error(func->location(),
+                          "class '" + node.name + "' declares constructors whose "
+                          "defaulted parameters overlap: a " + std::to_string(lo) +
+                          "-argument call would match both the " +
+                          std::to_string(prevMax) + "-parameter and the " +
+                          std::to_string(ctorArity) + "-parameter constructor; "
+                          "shrink the defaults or use a `static def` factory");
+            }
+            ctorArityRanges.push_back({ctorMinArity, ctorArity});
         }
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (size_t i = 0; i < func->params.size(); ++i) {

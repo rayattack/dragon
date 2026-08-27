@@ -1813,3 +1813,8 @@ TEST(TypeCheckerTest, ConstructorOverloadArityIsValidatedAtCallSites) {
     EXPECT_TRUE(checkHasErrors(code("ctor_overload_zero_args_rejected")));
     EXPECT_TRUE(checkOk(code("ctor_overload_default_range_ok")));
 }
+
+TEST(TypeCheckerTest, OverlappingConstructorDefaultsAreRejected) {
+    EXPECT_TRUE(checkHasErrors(code("ctor_overlapping_defaults_rejected")));
+    EXPECT_TRUE(checkOk(code("ctor_exact_shadow_of_defaults_ok")));
+}

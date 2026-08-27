@@ -124,6 +124,44 @@ class Q {
 q: Q = Q()
 ```
 
+#### :ctor_overlapping_defaults_rejected
+
+Two constructors whose defaulted parameters overlap make some call counts
+ambiguous (a 1-argument call below fits both). Never guess: the class is
+rejected where it is declared, with both constructors on screen.
+
+```dr
+class Q {
+    v: int = 0
+    def (a: int, b: int = 1) {
+        self.v = a + b
+    }
+    def (x: int, y: int = 1, z: int = 2) {
+        self.v = x + y + z
+    }
+}
+q: Q = Q(5)
+```
+
+#### :ctor_exact_shadow_of_defaults_ok
+
+An exact-arity constructor beside a defaulted one is legal: exact match always
+wins, so no call count is ambiguous.
+
+```dr
+class Q {
+    v: int = 0
+    def (a: int) {
+        self.v = a
+    }
+    def (a: int, b: int = 5) {
+        self.v = a + b
+    }
+}
+x: Q = Q(1)
+y: Q = Q(1, 2)
+```
+
 #### :ctor_overload_default_range_ok
 
 A defaulted trailing parameter widens the overload's accepted count downward,
