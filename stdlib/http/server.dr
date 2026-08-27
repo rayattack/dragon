@@ -33,6 +33,7 @@ extern "C" def dragon_str_to_float(s: str) -> float
 extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
 extern "C" def dragon_close_fd(fd: int)
 extern "C" def dragon_setsockopt_reuse(fd: int)
+extern "C" def dragon_log_stderr(msg: str)
 
 extern "C" def dragon_atomic_load(p: ptr) -> int
 extern "C" def dragon_atomic_store(p: ptr, val: int)
@@ -1219,59 +1220,69 @@ class Router {
         req.app = self
         req.subdomain = raw_sd
 
-        if self._session_enabled {
-            self._load_session(req)
-        }
+        try {
+            if self._session_enabled {
+                self._load_session(req)
+            }
 
-        if route == none {
-            res.status = 404
-            res.text("Not Found")
-        } else {
-            req.route = route.pattern
+            if route == none {
+                res.status = 404
+                res.text("Not Found")
+            } else {
+                req.route = route.pattern
 
-            query_ok: bool = true
-            for qkey in route.query_types {
-                const qtype: str = route.query_types[qkey]
-                if qkey in query {
-                    if not _validate_type(query[qkey], qtype) {
-                        res.status = 400
-                        res.text(f"Bad Request: query parameter '{qkey}' is not {qtype}")
-                        query_ok = false
-                        break
+                query_ok: bool = true
+                for qkey in route.query_types {
+                    const qtype: str = route.query_types[qkey]
+                    if qkey in query {
+                        if not _validate_type(query[qkey], qtype) {
+                            res.status = 400
+                            res.text(f"Bad Request: query parameter '{qkey}' is not {qtype}")
+                            query_ok = false
+                            break
+                        }
+                    }
+                }
+
+                if query_ok {
+                    const before_mw: list[MiddlewareEntry] = self._match_before(path, target_sd)
+                    for mw in before_mw {
+                        if res._aborted {
+                            break
+                        }
+                        mw.handler(req, res, ctx)
+                    }
+
+                    if self._csrf_enabled and not res._aborted {
+                        if not self._csrf_ok(req) {
+                            res.status = 403
+                            res.text("CSRF token invalid or missing")
+                            res.abort()
+                        }
+                    }
+
+                    if not res._aborted {
+                        route.handler(req, res, ctx)
+                    }
+
+                    const after_mw: list[MiddlewareEntry] = self._match_after(path, target_sd)
+                    for mw in after_mw {
+                        mw.handler(req, res, ctx)
+                    }
+
+                    if self._session_enabled {
+                        self._save_session(req, res)
                     }
                 }
             }
-
-            if query_ok {
-                const before_mw: list[MiddlewareEntry] = self._match_before(path, target_sd)
-                for mw in before_mw {
-                    if res._aborted {
-                        break
-                    }
-                    mw.handler(req, res, ctx)
-                }
-
-                if self._csrf_enabled and not res._aborted {
-                    if not self._csrf_ok(req) {
-                        res.status = 403
-                        res.text("CSRF token invalid or missing")
-                        res.abort()
-                    }
-                }
-
-                if not res._aborted {
-                    route.handler(req, res, ctx)
-                }
-
-                const after_mw: list[MiddlewareEntry] = self._match_after(path, target_sd)
-                for mw in after_mw {
-                    mw.handler(req, res, ctx)
-                }
-
-                if self._session_enabled {
-                    self._save_session(req, res)
-                }
-            }
+        } except Exception as e {
+            dragon_log_stderr("http: " + method + " " + path + " failed: " + str(e))
+            const err: Response = Response()
+            err.status = 500
+            err.text("Internal Server Error")
+            err._close = true
+            err._accept_encoding = headers["accept-encoding"] if "accept-encoding" in headers else ""
+            return err
         }
         res._accept_encoding = headers["accept-encoding"] if "accept-encoding" in headers else ""
         return res
@@ -1281,6 +1292,9 @@ class Router {
         try {
             const reader: ConnReader = FdReader(TcpStream(SocketHandle.adopt_raw(client_fd)))
             self.serve_connection(reader)
+        } except Exception as e {
+            dragon_log_stderr("http: connection dropped: " + str(e))
+            dragon_close_fd(client_fd)
         } finally {
             dragon_atomic_add(self._conn_cell, -1)
         }
