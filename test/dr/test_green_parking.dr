@@ -1,0 +1,490 @@
+from unittest import TestCase, main
+from threading import Lock, RWLock, Semaphore, Barrier, Condition, Event, Thread
+import os
+import time
+
+const _carriers_pinned: int = os.setenv("DRAGON_WORKER_THREADS", "2", 1)
+
+glock: Lock = Lock()
+hits: int = 0
+
+def lock_blocker() -> int {
+    global hits
+    with glock {
+        hits = hits + 1
+    }
+    return 1
+}
+
+def probe() -> int {
+    return 7
+}
+
+gevent: Event = Event()
+
+def event_waiter() -> int {
+    gevent.wait()
+    return 1
+}
+
+def event_setter() -> int {
+    time.sleep_ms(20)
+    gevent.set()
+    return 1
+}
+
+gcond: Condition = Condition()
+ready: int = 0
+woken: int = 0
+
+def cond_consumer() -> int {
+    global woken
+    gcond.acquire()
+    while ready == 0 {
+        gcond.wait()
+    }
+    woken = woken + 1
+    gcond.release()
+    return 1
+}
+
+def cond_producer() -> int {
+    global ready
+    time.sleep_ms(20)
+    gcond.acquire()
+    ready = 1
+    gcond.notify_all()
+    gcond.release()
+    return 1
+}
+
+tcond: Condition = Condition()
+tokens: int = 0
+
+def token_consumer() -> int {
+    global tokens
+    tcond.acquire()
+    while tokens == 0 {
+        tcond.wait()
+    }
+    tokens = tokens - 1
+    tcond.release()
+    return 1
+}
+
+gsem: Semaphore = Semaphore(0)
+
+def sem_acquirer() -> int {
+    gsem.acquire()
+    return 1
+}
+
+def sem_releaser() -> int {
+    time.sleep_ms(20)
+    gsem.release()
+    gsem.release()
+    gsem.release()
+    return 1
+}
+
+gbar: Barrier = Barrier(3)
+
+def barrier_party() -> int {
+    return gbar.wait()
+}
+
+def child(n: int) -> int {
+    time.sleep_ms(10)
+    return n
+}
+
+def parent_await(n: int) -> int {
+    c: Task[int] = fire child(n)
+    return await c
+}
+
+def parent_join(n: int) -> int {
+    c: Task[int] = fire child(n)
+    return c.join()
+}
+
+def os_napper() -> None {
+    time.sleep_ms(1200)
+}
+
+def thread_join_worker() -> int {
+    th: Thread = Thread(target=os_napper)
+    th.start()
+    th.join()
+    return 1
+}
+
+def scoped_thread_worker() -> int {
+    thread {
+        time.sleep_ms(1200)
+    }
+    return 1
+}
+
+tlock: Lock = Lock()
+
+def timed_lock_try() -> int {
+    const t0: float = time.monotonic()
+    const got: bool = tlock.acquire(blocking=True, timeout=0.15)
+    if got {
+        tlock.release()
+        return -1
+    }
+    if time.monotonic() - t0 < 0.1 {
+        return -2
+    }
+    return 1
+}
+
+tsem: Semaphore = Semaphore(0)
+
+def timed_sem_try() -> int {
+    const t0: float = time.monotonic()
+    const got: bool = tsem.acquire(blocking=True, timeout=0.15)
+    if got {
+        return -1
+    }
+    if time.monotonic() - t0 < 0.1 {
+        return -2
+    }
+    return 1
+}
+
+grw: RWLock = RWLock()
+reads_done: int = 0
+rcount_lock: Lock = Lock()
+
+def rw_reader() -> int {
+    global reads_done
+    grw.acquire()
+    grw.release()
+    with rcount_lock {
+        reads_done = reads_done + 1
+    }
+    return 1
+}
+
+def rw_writer() -> int {
+    grw.acquire(write=True)
+    grw.release()
+    return 1
+}
+
+def timed_rw_try() -> int {
+    const t0: float = time.monotonic()
+    const got: bool = grw.acquire(timeout=0.15)
+    if got {
+        grw.release()
+        return -1
+    }
+    if time.monotonic() - t0 < 0.1 {
+        return -2
+    }
+    return 1
+}
+
+mx_lock: Lock = Lock()
+mx_total: int = 0
+
+def mx_hammer() -> int {
+    global mx_total
+    i: int = 0
+    while i < 2000 {
+        with mx_lock {
+            mx_total = mx_total + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+
+class LockParkingTests(TestCase) {
+    def test_contended_lock_frees_carriers() {
+        global hits
+        hits = 0
+        glock.acquire()
+        b1: Task[int] = fire lock_blocker()
+        b2: Task[int] = fire lock_blocker()
+        b3: Task[int] = fire lock_blocker()
+        b4: Task[int] = fire lock_blocker()
+        time.sleep_ms(50)
+        p: Task[int] = fire probe()
+        const t0: float = time.monotonic()
+        while p.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const probe_ran: bool = not p.is_alive()
+        self.assertTrue(probe_ran, "probe starved: waiters on a held Lock ate the carriers")
+        self.assertEqual(hits, 0)
+        glock.release()
+        if probe_ran {
+            self.assertEqual(p.join(), 7)
+            self.assertEqual(b1.join() + b2.join() + b3.join() + b4.join(), 4)
+            self.assertEqual(hits, 4)
+        }
+    }
+
+    def test_timed_acquire_on_green_thread_times_out() {
+        tlock.acquire()
+        t: Task[int] = fire timed_lock_try()
+        const t0: float = time.monotonic()
+        while t.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const done: bool = not t.is_alive()
+        self.assertTrue(done, "timed acquire never returned on a green thread")
+        tlock.release()
+        if done {
+            self.assertEqual(t.join(), 1)
+        }
+    }
+
+    def test_mutual_exclusion_survives_parking() {
+        h1: Task[int] = fire mx_hammer()
+        h2: Task[int] = fire mx_hammer()
+        h3: Task[int] = fire mx_hammer()
+        h4: Task[int] = fire mx_hammer()
+        self.assertEqual(h1.join() + h2.join() + h3.join() + h4.join(), 4)
+        self.assertEqual(mx_total, 8000)
+    }
+}
+
+
+class EventParkingTests(TestCase) {
+    def test_event_waiters_park_until_a_green_setter_runs() {
+        w1: Task[int] = fire event_waiter()
+        w2: Task[int] = fire event_waiter()
+        w3: Task[int] = fire event_waiter()
+        time.sleep_ms(50)
+        s: Task[int] = fire event_setter()
+        const t0: float = time.monotonic()
+        while s.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const set_ran: bool = not s.is_alive()
+        self.assertTrue(set_ran, "setter starved: Event waiters ate the carriers")
+        if set_ran {
+            self.assertEqual(s.join(), 1)
+            self.assertEqual(w1.join() + w2.join() + w3.join(), 3)
+        }
+    }
+
+    def test_wait_on_set_event_returns_immediately() {
+        ev: Event = Event()
+        ev.set()
+        const t0: float = time.monotonic()
+        ev.wait()
+        self.assertLess(time.monotonic() - t0, 1.0)
+        self.assertTrue(ev.is_set())
+        ev.clear()
+        self.assertFalse(ev.is_set())
+        ev.destroy()
+    }
+}
+
+
+class ConditionParkingTests(TestCase) {
+    def test_notify_all_reaches_parked_consumers() {
+        c1: Task[int] = fire cond_consumer()
+        c2: Task[int] = fire cond_consumer()
+        time.sleep_ms(50)
+        p: Task[int] = fire cond_producer()
+        const t0: float = time.monotonic()
+        while (c1.is_alive() or c2.is_alive()) and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const all_woke: bool = not c1.is_alive() and not c2.is_alive()
+        self.assertTrue(all_woke, "consumers starved: Condition waiters ate the carriers")
+        if all_woke {
+            self.assertEqual(c1.join() + c2.join() + p.join(), 3)
+            self.assertEqual(woken, 2)
+        }
+    }
+
+    def test_notify_from_main_wakes_one_parked_consumer() {
+        global tokens
+        k1: Task[int] = fire token_consumer()
+        k2: Task[int] = fire token_consumer()
+        time.sleep_ms(50)
+        tcond.acquire()
+        tokens = 1
+        tcond.notify()
+        tcond.release()
+        const t0: float = time.monotonic()
+        while k1.is_alive() and k2.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const one_woke: bool = not k1.is_alive() or not k2.is_alive()
+        self.assertTrue(one_woke, "notify from the main thread never woke a parked consumer")
+        time.sleep_ms(50)
+        self.assertTrue(k1.is_alive() or k2.is_alive())
+        tcond.acquire()
+        tokens = tokens + 1
+        tcond.notify()
+        tcond.release()
+        if one_woke {
+            self.assertEqual(k1.join() + k2.join(), 2)
+        }
+    }
+}
+
+
+class SemaphoreParkingTests(TestCase) {
+    def test_empty_semaphore_parks_acquirers() {
+        a1: Task[int] = fire sem_acquirer()
+        a2: Task[int] = fire sem_acquirer()
+        a3: Task[int] = fire sem_acquirer()
+        time.sleep_ms(50)
+        r: Task[int] = fire sem_releaser()
+        const t0: float = time.monotonic()
+        while r.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const released: bool = not r.is_alive()
+        self.assertTrue(released, "releaser starved: Semaphore waiters ate the carriers")
+        if released {
+            self.assertEqual(a1.join() + a2.join() + a3.join() + r.join(), 4)
+        }
+    }
+
+    def test_timed_acquire_on_green_thread_times_out() {
+        t: Task[int] = fire timed_sem_try()
+        const t0: float = time.monotonic()
+        while t.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const done: bool = not t.is_alive()
+        self.assertTrue(done, "timed semaphore acquire never returned on a green thread")
+        if done {
+            self.assertEqual(t.join(), 1)
+        }
+    }
+}
+
+
+class BarrierParkingTests(TestCase) {
+    def test_more_parties_than_carriers_still_rendezvous() {
+        p1: Task[int] = fire barrier_party()
+        p2: Task[int] = fire barrier_party()
+        p3: Task[int] = fire barrier_party()
+        const t0: float = time.monotonic()
+        while (p1.is_alive() or p2.is_alive() or p3.is_alive()) and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const met: bool = not p1.is_alive() and not p2.is_alive() and not p3.is_alive()
+        self.assertTrue(met, "barrier deadlocked: parked parties never freed their carriers")
+        if met {
+            self.assertEqual(p1.join() + p2.join() + p3.join(), 1)
+        }
+    }
+}
+
+
+class JoinParkingTests(TestCase) {
+    def test_green_threads_awaiting_green_children_park() {
+        pa: Task[int] = fire parent_await(1)
+        pb: Task[int] = fire parent_join(2)
+        const t0: float = time.monotonic()
+        while (pa.is_alive() or pb.is_alive()) and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const finished: bool = not pa.is_alive() and not pb.is_alive()
+        self.assertTrue(finished, "parents blocked their carriers awaiting children that never ran")
+        if finished {
+            self.assertEqual(pa.join() + pb.join(), 3)
+        }
+    }
+
+    def test_green_threads_joining_os_threads_park() {
+        j1: Task[int] = fire thread_join_worker()
+        j2: Task[int] = fire scoped_thread_worker()
+        time.sleep_ms(150)
+        p: Task[int] = fire probe()
+        const t0: float = time.monotonic()
+        while p.is_alive() and time.monotonic() - t0 < 0.8 {
+            time.sleep_ms(5)
+        }
+        const probe_ran: bool = not p.is_alive()
+        self.assertTrue(probe_ran, "probe starved: OS-thread joins ate the carriers")
+        if probe_ran {
+            self.assertEqual(p.join(), 7)
+        }
+        const t1: float = time.monotonic()
+        while (j1.is_alive() or j2.is_alive()) and time.monotonic() - t1 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const joined: bool = not j1.is_alive() and not j2.is_alive()
+        self.assertTrue(joined)
+        if joined {
+            self.assertEqual(j1.join() + j2.join(), 2)
+        }
+    }
+}
+
+
+class RWLockParkingTests(TestCase) {
+    def test_readers_park_while_main_writes() {
+        grw.acquire(write=True)
+        r1: Task[int] = fire rw_reader()
+        r2: Task[int] = fire rw_reader()
+        r3: Task[int] = fire rw_reader()
+        time.sleep_ms(50)
+        p: Task[int] = fire probe()
+        const t0: float = time.monotonic()
+        while p.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const probe_ran: bool = not p.is_alive()
+        self.assertTrue(probe_ran, "probe starved: blocked readers ate the carriers")
+        self.assertEqual(reads_done, 0)
+        grw.release()
+        if probe_ran {
+            self.assertEqual(p.join(), 7)
+            self.assertEqual(r1.join() + r2.join() + r3.join(), 3)
+            self.assertEqual(reads_done, 3)
+        }
+    }
+
+    def test_writer_parks_while_main_reads() {
+        grw.acquire()
+        w: Task[int] = fire rw_writer()
+        time.sleep_ms(50)
+        self.assertTrue(w.is_alive())
+        grw.release()
+        const t0: float = time.monotonic()
+        while w.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const done: bool = not w.is_alive()
+        self.assertTrue(done)
+        if done {
+            self.assertEqual(w.join(), 1)
+        }
+    }
+
+    def test_timed_read_on_green_thread_times_out() {
+        grw.acquire(write=True)
+        t: Task[int] = fire timed_rw_try()
+        const t0: float = time.monotonic()
+        while t.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const done: bool = not t.is_alive()
+        self.assertTrue(done, "timed read never returned on a green thread")
+        grw.release()
+        if done {
+            self.assertEqual(t.join(), 1)
+        }
+    }
+}
+
+
+main([LockParkingTests(), EventParkingTests(), ConditionParkingTests(),
+      SemaphoreParkingTests(), BarrierParkingTests(), JoinParkingTests(),
+      RWLockParkingTests()])

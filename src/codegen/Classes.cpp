@@ -1171,6 +1171,7 @@ void CodeGen::visit(ClassDecl& node) {
                         {"dragon_tls_ctx_new", "dragon_tls_ctx_free"},
                         {"dragon_rwlock_new", "dragon_rwlock_free"},
                         {"dragon_cond_new", "dragon_cond_free"},
+                        {"dragon_condvar_new", "dragon_condvar_free"},
                         {"dragon_mutex_new", "dragon_mutex_free"},
                         {"dragon_flag_new", "dragon_flag_free"},
                         {"dragon_sem_new", "dragon_sem_free"},

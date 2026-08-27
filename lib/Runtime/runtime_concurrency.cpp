@@ -34,12 +34,19 @@ extern "C" {
 #define MSG_NOSIGNAL 0
 #endif
 
+static void vthread_wake(DragonVThread* vt);
+static void vthread_arm_park(DragonVThread* vt);
+static DragonVThread* dragon_green_self(void);
+static void osthread_exit_wake_green_joiner(void** slot);
+static void osthread_green_join_wait(void** slot, volatile int8_t* done);
+
 typedef struct {
     pthread_t tid;
     int64_t result;
     int8_t done;
     int8_t joined;  // CAS'd 0->1 in join to defeat double-join race (UB + double-free)
     int8_t started;
+    void* green_waiter;
 } DragonThread;
 
 typedef struct {
@@ -78,6 +85,7 @@ static void* dragon_thread_entry(void* raw) {
     }
     fa->thread->result = res;
     __atomic_store_n(&fa->thread->done, (int8_t)1, __ATOMIC_RELEASE);
+    osthread_exit_wake_green_joiner(&fa->thread->green_waiter);
     free(fa->args);
     free(fa);
     dragon_exc_thread_state_release();
@@ -90,6 +98,7 @@ DragonThread* dragon_thread_fire(void* fn, int64_t* args, int64_t nargs) {
     t->done = 0;
     t->joined = 0;
     t->started = 0;
+    t->green_waiter = NULL;
     DragonFireArgs* fa = (DragonFireArgs*)dragon_xmalloc(sizeof(DragonFireArgs));
     fa->thread = t;
     fa->fn = fn;
@@ -126,8 +135,10 @@ int64_t dragon_thread_join(DragonThread* t) {
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return __atomic_load_n(&t->result, __ATOMIC_ACQUIRE);
     }
-    if (t->started)
+    if (t->started) {
+        osthread_green_join_wait(&t->green_waiter, &t->done);
         pthread_join(t->tid, NULL);
+    }
     int64_t result = t->result;
     free(t);
     return result;
@@ -142,6 +153,7 @@ typedef struct {
     void* fn;
     int64_t* args;
     int64_t nargs;
+    void* green_waiter;
 } DragonOSThread;
 
 static void* dragon_osthread_entry(void* raw) {
@@ -165,6 +177,7 @@ static void* dragon_osthread_entry(void* raw) {
     }
     t->result = res;
     __atomic_store_n(&t->done, (int8_t)1, __ATOMIC_RELEASE);
+    osthread_exit_wake_green_joiner(&t->green_waiter);
     dragon_exc_thread_state_release();
     return NULL;
 }
@@ -206,6 +219,7 @@ int64_t dragon_osthread_join(void* handle) {
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return __atomic_load_n(&t->result, __ATOMIC_ACQUIRE);
     }
+    osthread_green_join_wait(&t->green_waiter, &t->done);
     pthread_join(t->tid, NULL);
     int64_t result = t->result;
     free(t->args);
@@ -225,60 +239,6 @@ int64_t dragon_sizeof_mutex(void)  { return (int64_t)sizeof(pthread_mutex_t); }
 int64_t dragon_sizeof_rwlock(void) { return (int64_t)sizeof(pthread_rwlock_t); }
 int64_t dragon_sizeof_cond(void)   { return (int64_t)sizeof(pthread_cond_t); }
 int64_t dragon_sizeof_sem(void)    { return (int64_t)sizeof(sem_t); }
-
-typedef struct DragonBarrier {
-    pthread_mutex_t mutex;
-    pthread_cond_t  cond;
-    uint64_t        generation;
-    unsigned        threshold;
-    unsigned        waiting;
-} DragonBarrier;
-
-void* dragon_barrier_new(int64_t count) {
-    if (count <= 0) return nullptr;
-    DragonBarrier* b = (DragonBarrier*)dragon_xmalloc(sizeof(DragonBarrier));
-    if (pthread_mutex_init(&b->mutex, nullptr) != 0) {
-        free(b);
-        return nullptr;
-    }
-    if (pthread_cond_init(&b->cond, nullptr) != 0) {
-        pthread_mutex_destroy(&b->mutex);
-        free(b);
-        return nullptr;
-    }
-    b->generation = 0;
-    b->threshold = (unsigned)count;
-    b->waiting = 0;
-    return b;
-}
-
-int64_t dragon_barrier_wait(void* handle) {
-    DragonBarrier* b = (DragonBarrier*)handle;
-    if (!b) return -1;
-    pthread_mutex_lock(&b->mutex);
-    const uint64_t gen = b->generation;
-    if (++b->waiting >= b->threshold) {
-        b->generation++;
-        b->waiting = 0;
-        pthread_cond_broadcast(&b->cond);
-        pthread_mutex_unlock(&b->mutex);
-        return 1;
-    }
-    while (gen == b->generation) {
-        pthread_cond_wait(&b->cond, &b->mutex);
-    }
-    pthread_mutex_unlock(&b->mutex);
-    return 0;
-}
-
-int64_t dragon_barrier_destroy(void* handle) {
-    DragonBarrier* b = (DragonBarrier*)handle;
-    if (!b) return -1;
-    pthread_cond_destroy(&b->cond);
-    pthread_mutex_destroy(&b->mutex);
-    free(b);
-    return 0;
-}
 
 typedef struct {
     DragonVThread*  head;
@@ -311,11 +271,11 @@ static void scheduler_enqueue(DragonVThread* vt) {
 #define PARK_PARKED 2
 #define PARK_FIRED  3
 
-static inline void dragon_io_arm_park(DragonVThread* vt) {
+static void vthread_arm_park(DragonVThread* vt) {
     __atomic_store_n(&vt->park_state, PARK_ARMED, __ATOMIC_RELEASE);
 }
 
-static void dragon_io_wake(DragonVThread* vt) {
+static void vthread_wake(DragonVThread* vt) {
     for (;;) {
         int32_t st = __atomic_load_n(&vt->park_state, __ATOMIC_ACQUIRE);
         if (st == PARK_PARKED) {
@@ -346,6 +306,74 @@ static bool dragon_vthread_finish_park(DragonVThread* vt) {
     }
     __atomic_store_n(&vt->park_state, PARK_NONE, __ATOMIC_RELEASE);
     return true;
+}
+
+static DragonVThread* dragon_green_self(void) {
+    DragonVThread* vt = __current_vthread;
+    return (vt && vt->coro) ? vt : NULL;
+}
+
+static void vthread_waitq_push(DragonVThreadQueue* q, DragonVThread* vt) {
+    vt->park_next = NULL;
+    if (q->tail) {
+        q->tail->park_next = vt;
+    } else {
+        q->head = vt;
+    }
+    q->tail = vt;
+}
+
+static DragonVThread* vthread_waitq_pop(DragonVThreadQueue* q) {
+    DragonVThread* vt = q->head;
+    if (vt) {
+        q->head = vt->park_next;
+        if (!q->head) q->tail = NULL;
+        vt->park_next = NULL;
+    }
+    return vt;
+}
+
+static DragonVThread* vthread_waitq_steal(DragonVThreadQueue* q) {
+    DragonVThread* head = q->head;
+    q->head = NULL;
+    q->tail = NULL;
+    return head;
+}
+
+static void vthread_wake_stolen(DragonVThread* head) {
+    while (head) {
+        DragonVThread* next = head->park_next;
+        head->park_next = NULL;
+        vthread_wake(head);
+        head = next;
+    }
+}
+
+static void green_park(DragonVThreadQueue* q, DragonVThread* vt,
+                       pthread_mutex_t* guard) {
+    vthread_waitq_push(q, vt);
+    vthread_arm_park(vt);
+    pthread_mutex_unlock(guard);
+    mco_yield(vt->coro);
+    pthread_mutex_lock(guard);
+}
+
+static void osthread_exit_wake_green_joiner(void** slot) {
+    void* prev = __atomic_exchange_n(slot, (void*)(uintptr_t)1, __ATOMIC_ACQ_REL);
+    if ((uintptr_t)prev > 1) vthread_wake((DragonVThread*)prev);
+}
+
+static void osthread_green_join_wait(void** slot, volatile int8_t* done) {
+    DragonVThread* self = dragon_green_self();
+    if (!self || __atomic_load_n(done, __ATOMIC_ACQUIRE)) return;
+    vthread_arm_park(self);
+    void* expected = NULL;
+    if (__atomic_compare_exchange_n(slot, &expected, (void*)self, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        mco_yield(self->coro);
+    } else {
+        __atomic_store_n(&self->park_state, PARK_NONE, __ATOMIC_RELEASE);
+    }
 }
 
 static DragonVThread* scheduler_dequeue() {
@@ -398,8 +426,10 @@ static void vthread_mark_done_and_release(DragonVThread* vt) {
         return;
     __atomic_fetch_sub(&__dragon_vthread_live, 1, __ATOMIC_ACQ_REL);
     pthread_mutex_lock(&vt->join_lock);
+    DragonVThread* joiners = vthread_waitq_steal(&vt->join_waiters);
     pthread_cond_broadcast(&vt->join_cond);
     pthread_mutex_unlock(&vt->join_lock);
+    vthread_wake_stolen(joiners);
     vthread_release(vt);
 }
 
@@ -535,9 +565,14 @@ int64_t dragon_vthread_join(DragonVThread* vt) {
     bool winner = __atomic_compare_exchange_n(&vt->joined, &expected, (int8_t)1,
                                               false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 
+    DragonVThread* self = dragon_green_self();
     pthread_mutex_lock(&vt->join_lock);
     while (!vt->done) {
-        pthread_cond_wait(&vt->join_cond, &vt->join_lock);
+        if (self) {
+            green_park(&vt->join_waiters, self, &vt->join_lock);
+        } else {
+            pthread_cond_wait(&vt->join_cond, &vt->join_lock);
+        }
     }
     pthread_mutex_unlock(&vt->join_lock);
 
@@ -645,7 +680,7 @@ static int win_make_socketpair(SOCKET out[2]) {
 #endif
 
 static void io_post_request(IoRequest* req) {
-    if (req->vt) dragon_io_arm_park(req->vt);
+    if (req->vt) vthread_arm_park(req->vt);
     pthread_mutex_lock(&__io_pending_lock);
     req->next = __io_pending_head;
     __io_pending_head = req;
@@ -756,7 +791,7 @@ static void* io_thread_entry(void*) {
                 }
                 DragonVThread* wv = req->vt;
                 free(req);
-                dragon_io_wake(wv);
+                vthread_wake(wv);
             }
         }
         if (__io_deadline_head) {
@@ -770,7 +805,7 @@ static void* io_thread_entry(void*) {
                     req->vt->io_timed_out = 1;
                     DragonVThread* wv = req->vt;
                     free(req);
-                    dragon_io_wake(wv);
+                    vthread_wake(wv);
                 } else {
                     pp = &req->dl_next;
                 }
@@ -847,7 +882,7 @@ static void* io_thread_entry(void*) {
                 }
                 DragonVThread* wv = req->vt;
                 free(req);
-                dragon_io_wake(wv);
+                vthread_wake(wv);
             }
         }
         if (__io_deadline_head) {
@@ -865,7 +900,7 @@ static void* io_thread_entry(void*) {
                     req->vt->io_timed_out = 1;
                     DragonVThread* wv = req->vt;
                     free(req);
-                    dragon_io_wake(wv);
+                    vthread_wake(wv);
                 } else {
                     pp = &req->dl_next;
                 }
@@ -982,7 +1017,7 @@ static void* io_thread_entry(void*) {
                 free(req);
                 __io_active[idx].req = nullptr;
                 to_remove.push_back(idx);
-                dragon_io_wake(wv);
+                vthread_wake(wv);
             }
             pthread_mutex_unlock(&__io_active_lock);
         }
@@ -999,7 +1034,7 @@ static void* io_thread_entry(void*) {
                 free(e.req);
                 e.req = nullptr;
                 to_remove.push_back(i);
-                dragon_io_wake(wv);
+                vthread_wake(wv);
             }
         }
         std::sort(to_remove.begin(), to_remove.end(),
@@ -1092,54 +1127,6 @@ void dragon_vthread_yield() {
     }
 }
 
-void* dragon_lock_new() {
-    pthread_mutex_t* m = (pthread_mutex_t*)dragon_xmalloc(sizeof(pthread_mutex_t));
-    pthread_mutex_init(m, NULL);
-    return m;
-}
-
-void dragon_lock_acquire(void* lock) {
-    pthread_mutex_lock((pthread_mutex_t*)lock);
-}
-
-int64_t dragon_lock_acquire_ex(void* lock, int64_t blocking, double timeout) {
-    pthread_mutex_t* m = (pthread_mutex_t*)lock;
-    if (!blocking) {
-        return pthread_mutex_trylock(m) == 0 ? 1 : 0;
-    }
-    if (timeout < 0) {
-        pthread_mutex_lock(m);
-        return 1;
-    }
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    int64_t whole = (int64_t)timeout;
-    deadline.tv_sec += (time_t)whole;
-    deadline.tv_nsec += (long)((timeout - (double)whole) * 1e9);
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec += 1;
-        deadline.tv_nsec -= 1000000000L;
-    }
-#if defined(__APPLE__)
-    for (;;) {
-        if (pthread_mutex_trylock(m) == 0) return 1;
-        struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
-        if (now.tv_sec > deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
-            return 0;
-        struct timespec nap = {0, 500000};
-        nanosleep(&nap, nullptr);
-    }
-#else
-    return pthread_mutex_timedlock(m, &deadline) == 0 ? 1 : 0;
-#endif
-}
-
-int64_t dragon_lock_try_acquire(void* lock) {
-    return pthread_mutex_trylock((pthread_mutex_t*)lock) == 0 ? 1 : 0;
-}
-
 static void dragon__abs_deadline(double seconds, struct timespec* d) {
     clock_gettime(CLOCK_REALTIME, d);
     int64_t whole = (int64_t)seconds;
@@ -1155,73 +1142,343 @@ static int dragon__deadline_passed(const struct timespec* d) {
            (now.tv_sec == d->tv_sec && now.tv_nsec >= d->tv_nsec);
 }
 
-int dragon_rwlock_timedrdlock_sec(void* rw, double seconds) {
-    pthread_rwlock_t* l = (pthread_rwlock_t*)rw;
-    struct timespec d;
-    dragon__abs_deadline(seconds, &d);
-#if defined(__APPLE__)
-    for (;;) {
-        if (pthread_rwlock_tryrdlock(l) == 0) return 1;
-        if (dragon__deadline_passed(&d)) return 0;
-        struct timespec nap = {0, 500000};
-        nanosleep(&nap, nullptr);
+static int green_timed_wait_expired(const struct timespec* deadline) {
+    if (dragon__deadline_passed(deadline)) return 1;
+    dragon_vthread_sleep(1);
+    return 0;
+}
+
+typedef struct DragonLock {
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    DragonVThreadQueue waiters;
+    int64_t os_waiters;
+    int8_t  locked;
+} DragonLock;
+
+void* dragon_lock_new() {
+    DragonLock* l = (DragonLock*)dragon_xcalloc_n(1, sizeof(DragonLock));
+    pthread_mutex_init(&l->m, NULL);
+    pthread_cond_init(&l->c, NULL);
+    return l;
+}
+
+void dragon_lock_acquire(void* lock) {
+    DragonLock* l = (DragonLock*)lock;
+    DragonVThread* vt = dragon_green_self();
+    pthread_mutex_lock(&l->m);
+    while (l->locked) {
+        if (vt) {
+            green_park(&l->waiters, vt, &l->m);
+        } else {
+            l->os_waiters++;
+            pthread_cond_wait(&l->c, &l->m);
+            l->os_waiters--;
+        }
     }
-#else
-    return pthread_rwlock_timedrdlock(l, &d) == 0 ? 1 : 0;
-#endif
+    l->locked = 1;
+    pthread_mutex_unlock(&l->m);
+}
+
+int64_t dragon_lock_try_acquire(void* lock) {
+    DragonLock* l = (DragonLock*)lock;
+    pthread_mutex_lock(&l->m);
+    int64_t got = 0;
+    if (!l->locked) {
+        l->locked = 1;
+        got = 1;
+    }
+    pthread_mutex_unlock(&l->m);
+    return got;
+}
+
+int64_t dragon_lock_acquire_ex(void* lock, int64_t blocking, double timeout) {
+    if (!blocking) return dragon_lock_try_acquire(lock);
+    if (timeout < 0) {
+        dragon_lock_acquire(lock);
+        return 1;
+    }
+    struct timespec deadline;
+    dragon__abs_deadline(timeout, &deadline);
+    if (dragon_green_self()) {
+        while (!dragon_lock_try_acquire(lock)) {
+            if (green_timed_wait_expired(&deadline)) return 0;
+        }
+        return 1;
+    }
+    DragonLock* l = (DragonLock*)lock;
+    pthread_mutex_lock(&l->m);
+    while (l->locked) {
+        l->os_waiters++;
+        const int rc = pthread_cond_timedwait(&l->c, &l->m, &deadline);
+        l->os_waiters--;
+        if (l->locked && (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+            pthread_mutex_unlock(&l->m);
+            return 0;
+        }
+    }
+    l->locked = 1;
+    pthread_mutex_unlock(&l->m);
+    return 1;
+}
+
+void dragon_lock_release(void* lock) {
+    DragonLock* l = (DragonLock*)lock;
+    pthread_mutex_lock(&l->m);
+    l->locked = 0;
+    DragonVThread* waiter = vthread_waitq_pop(&l->waiters);
+    if (!waiter && l->os_waiters > 0) pthread_cond_signal(&l->c);
+    pthread_mutex_unlock(&l->m);
+    if (waiter) vthread_wake(waiter);
+}
+
+void dragon_lock_destroy(void* lock) {
+    if (!lock) return;
+    DragonLock* l = (DragonLock*)lock;
+    pthread_cond_destroy(&l->c);
+    pthread_mutex_destroy(&l->m);
+    free(l);
+}
+
+typedef struct DragonCondVar {
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    DragonVThreadQueue waiters;
+    int64_t os_waiters;
+    int64_t os_signals;
+} DragonCondVar;
+
+void* dragon_condvar_new() {
+    DragonCondVar* cv = (DragonCondVar*)dragon_xcalloc_n(1, sizeof(DragonCondVar));
+    pthread_mutex_init(&cv->m, NULL);
+    pthread_cond_init(&cv->c, NULL);
+    return cv;
+}
+
+void dragon_condvar_free(void* cond) {
+    if (!cond) return;
+    DragonCondVar* cv = (DragonCondVar*)cond;
+    pthread_cond_destroy(&cv->c);
+    pthread_mutex_destroy(&cv->m);
+    free(cv);
+}
+
+void dragon_condvar_wait(void* cond, void* lock) {
+    DragonCondVar* cv = (DragonCondVar*)cond;
+    DragonVThread* vt = dragon_green_self();
+    pthread_mutex_lock(&cv->m);
+    if (vt) {
+        vthread_waitq_push(&cv->waiters, vt);
+        vthread_arm_park(vt);
+        pthread_mutex_unlock(&cv->m);
+        dragon_lock_release(lock);
+        mco_yield(vt->coro);
+    } else {
+        cv->os_waiters++;
+        dragon_lock_release(lock);
+        while (cv->os_signals == 0) {
+            pthread_cond_wait(&cv->c, &cv->m);
+        }
+        cv->os_signals--;
+        cv->os_waiters--;
+        pthread_mutex_unlock(&cv->m);
+    }
+    dragon_lock_acquire(lock);
+}
+
+void dragon_condvar_signal(void* cond) {
+    DragonCondVar* cv = (DragonCondVar*)cond;
+    pthread_mutex_lock(&cv->m);
+    DragonVThread* waiter = vthread_waitq_pop(&cv->waiters);
+    if (!waiter && cv->os_waiters > cv->os_signals) {
+        cv->os_signals++;
+        pthread_cond_signal(&cv->c);
+    }
+    pthread_mutex_unlock(&cv->m);
+    if (waiter) vthread_wake(waiter);
+}
+
+void dragon_condvar_broadcast(void* cond) {
+    DragonCondVar* cv = (DragonCondVar*)cond;
+    pthread_mutex_lock(&cv->m);
+    DragonVThread* stolen = vthread_waitq_steal(&cv->waiters);
+    if (cv->os_waiters > cv->os_signals) {
+        cv->os_signals = cv->os_waiters;
+        pthread_cond_broadcast(&cv->c);
+    }
+    pthread_mutex_unlock(&cv->m);
+    vthread_wake_stolen(stolen);
+}
+
+typedef struct DragonRWLock {
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    DragonVThreadQueue reader_waiters;
+    DragonVThreadQueue writer_waiters;
+    int64_t os_waiters;
+    int64_t active_readers;
+    int8_t  writer_active;
+} DragonRWLock;
+
+void* dragon_rwlock_new() {
+    DragonRWLock* l = (DragonRWLock*)dragon_xcalloc_n(1, sizeof(DragonRWLock));
+    pthread_mutex_init(&l->m, NULL);
+    pthread_cond_init(&l->c, NULL);
+    return l;
+}
+
+void dragon_rwlock_free(void* rw) {
+    if (!rw) return;
+    DragonRWLock* l = (DragonRWLock*)rw;
+    pthread_cond_destroy(&l->c);
+    pthread_mutex_destroy(&l->m);
+    free(l);
+}
+
+void dragon_rwlock_rdlock(void* rw) {
+    DragonRWLock* l = (DragonRWLock*)rw;
+    DragonVThread* vt = dragon_green_self();
+    pthread_mutex_lock(&l->m);
+    while (l->writer_active) {
+        if (vt) {
+            green_park(&l->reader_waiters, vt, &l->m);
+        } else {
+            l->os_waiters++;
+            pthread_cond_wait(&l->c, &l->m);
+            l->os_waiters--;
+        }
+    }
+    l->active_readers++;
+    pthread_mutex_unlock(&l->m);
+}
+
+void dragon_rwlock_wrlock(void* rw) {
+    DragonRWLock* l = (DragonRWLock*)rw;
+    DragonVThread* vt = dragon_green_self();
+    pthread_mutex_lock(&l->m);
+    while (l->writer_active || l->active_readers > 0) {
+        if (vt) {
+            green_park(&l->writer_waiters, vt, &l->m);
+        } else {
+            l->os_waiters++;
+            pthread_cond_wait(&l->c, &l->m);
+            l->os_waiters--;
+        }
+    }
+    l->writer_active = 1;
+    pthread_mutex_unlock(&l->m);
+}
+
+int64_t dragon_rwlock_tryrdlock(void* rw) {
+    DragonRWLock* l = (DragonRWLock*)rw;
+    pthread_mutex_lock(&l->m);
+    int64_t got = 0;
+    if (!l->writer_active) {
+        l->active_readers++;
+        got = 1;
+    }
+    pthread_mutex_unlock(&l->m);
+    return got;
+}
+
+int64_t dragon_rwlock_trywrlock(void* rw) {
+    DragonRWLock* l = (DragonRWLock*)rw;
+    pthread_mutex_lock(&l->m);
+    int64_t got = 0;
+    if (!l->writer_active && l->active_readers == 0) {
+        l->writer_active = 1;
+        got = 1;
+    }
+    pthread_mutex_unlock(&l->m);
+    return got;
+}
+
+void dragon_rwlock_unlock(void* rw) {
+    DragonRWLock* l = (DragonRWLock*)rw;
+    pthread_mutex_lock(&l->m);
+    if (l->writer_active) {
+        l->writer_active = 0;
+    } else if (l->active_readers > 0) {
+        l->active_readers--;
+    }
+    DragonVThread* writer = NULL;
+    DragonVThread* readers = NULL;
+    if (l->active_readers == 0) writer = vthread_waitq_pop(&l->writer_waiters);
+    if (!writer) readers = vthread_waitq_steal(&l->reader_waiters);
+    if (l->os_waiters > 0) pthread_cond_broadcast(&l->c);
+    pthread_mutex_unlock(&l->m);
+    if (writer) vthread_wake(writer);
+    vthread_wake_stolen(readers);
+}
+
+int dragon_rwlock_timedrdlock_sec(void* rw, double seconds) {
+    struct timespec deadline;
+    dragon__abs_deadline(seconds, &deadline);
+    if (dragon_green_self()) {
+        while (!dragon_rwlock_tryrdlock(rw)) {
+            if (green_timed_wait_expired(&deadline)) return 0;
+        }
+        return 1;
+    }
+    DragonRWLock* l = (DragonRWLock*)rw;
+    pthread_mutex_lock(&l->m);
+    while (l->writer_active) {
+        l->os_waiters++;
+        const int rc = pthread_cond_timedwait(&l->c, &l->m, &deadline);
+        l->os_waiters--;
+        if (l->writer_active && (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+            pthread_mutex_unlock(&l->m);
+            return 0;
+        }
+    }
+    l->active_readers++;
+    pthread_mutex_unlock(&l->m);
+    return 1;
 }
 
 int dragon_rwlock_timedwrlock_sec(void* rw, double seconds) {
-    pthread_rwlock_t* l = (pthread_rwlock_t*)rw;
-    struct timespec d;
-    dragon__abs_deadline(seconds, &d);
-#if defined(__APPLE__)
-    for (;;) {
-        if (pthread_rwlock_trywrlock(l) == 0) return 1;
-        if (dragon__deadline_passed(&d)) return 0;
-        struct timespec nap = {0, 500000};
-        nanosleep(&nap, nullptr);
+    struct timespec deadline;
+    dragon__abs_deadline(seconds, &deadline);
+    if (dragon_green_self()) {
+        while (!dragon_rwlock_trywrlock(rw)) {
+            if (green_timed_wait_expired(&deadline)) return 0;
+        }
+        return 1;
     }
-#else
-    return pthread_rwlock_timedwrlock(l, &d) == 0 ? 1 : 0;
-#endif
-}
-
-int dragon_sem_timedwait_sec(void* sem, double seconds) {
-    sem_t* s = (sem_t*)sem;
-    struct timespec d;
-    dragon__abs_deadline(seconds, &d);
-#if defined(__APPLE__)
-    for (;;) {
-        if (sem_trywait(s) == 0) return 1;
-        if (dragon__deadline_passed(&d)) return 0;
-        struct timespec nap = {0, 500000};
-        nanosleep(&nap, nullptr);
+    DragonRWLock* l = (DragonRWLock*)rw;
+    pthread_mutex_lock(&l->m);
+    while (l->writer_active || l->active_readers > 0) {
+        l->os_waiters++;
+        const int rc = pthread_cond_timedwait(&l->c, &l->m, &deadline);
+        l->os_waiters--;
+        if ((l->writer_active || l->active_readers > 0) &&
+            (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+            pthread_mutex_unlock(&l->m);
+            return 0;
+        }
     }
-#else
-    while (sem_timedwait(s, &d) != 0) {
-        if (errno == EINTR) continue;
-        return 0;
-    }
+    l->writer_active = 1;
+    pthread_mutex_unlock(&l->m);
     return 1;
-#endif
 }
 
 typedef struct DragonSem {
-    pthread_mutex_t mutex;
-    pthread_cond_t  cond;
-    int64_t         permits;
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    DragonVThreadQueue waiters;
+    int64_t os_waiters;
+    int64_t permits;
 } DragonSem;
 
 void* dragon_sem_new(int64_t value) {
     if (value < 0) return nullptr;
-    DragonSem* s = (DragonSem*)dragon_xmalloc(sizeof(DragonSem));
-    if (pthread_mutex_init(&s->mutex, nullptr) != 0) {
+    DragonSem* s = (DragonSem*)dragon_xcalloc_n(1, sizeof(DragonSem));
+    if (pthread_mutex_init(&s->m, nullptr) != 0) {
         free(s);
         return nullptr;
     }
-    if (pthread_cond_init(&s->cond, nullptr) != 0) {
-        pthread_mutex_destroy(&s->mutex);
+    if (pthread_cond_init(&s->c, nullptr) != 0) {
+        pthread_mutex_destroy(&s->m);
         free(s);
         return nullptr;
     }
@@ -1232,25 +1489,32 @@ void* dragon_sem_new(int64_t value) {
 int64_t dragon_sem_acquire(void* handle) {
     DragonSem* s = (DragonSem*)handle;
     if (!s) return -1;
-    pthread_mutex_lock(&s->mutex);
+    DragonVThread* vt = dragon_green_self();
+    pthread_mutex_lock(&s->m);
     while (s->permits == 0) {
-        pthread_cond_wait(&s->cond, &s->mutex);
+        if (vt) {
+            green_park(&s->waiters, vt, &s->m);
+        } else {
+            s->os_waiters++;
+            pthread_cond_wait(&s->c, &s->m);
+            s->os_waiters--;
+        }
     }
     s->permits--;
-    pthread_mutex_unlock(&s->mutex);
+    pthread_mutex_unlock(&s->m);
     return 0;
 }
 
 int64_t dragon_sem_tryacquire(void* handle) {
     DragonSem* s = (DragonSem*)handle;
     if (!s) return 0;
-    pthread_mutex_lock(&s->mutex);
+    pthread_mutex_lock(&s->m);
     int64_t taken = 0;
     if (s->permits > 0) {
         s->permits--;
         taken = 1;
     }
-    pthread_mutex_unlock(&s->mutex);
+    pthread_mutex_unlock(&s->m);
     return taken;
 }
 
@@ -1259,62 +1523,106 @@ int64_t dragon_sem_timedacquire_sec(void* handle, double seconds) {
     if (!s) return 0;
     struct timespec deadline;
     dragon__abs_deadline(seconds, &deadline);
-    pthread_mutex_lock(&s->mutex);
-    while (s->permits == 0) {
-        const int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &deadline);
-        if (rc == ETIMEDOUT) {
-            pthread_mutex_unlock(&s->mutex);
-            return 0;
+    if (dragon_green_self()) {
+        while (!dragon_sem_tryacquire(handle)) {
+            if (green_timed_wait_expired(&deadline)) return 0;
         }
-        if (rc != 0 && dragon__deadline_passed(&deadline)) {
-            pthread_mutex_unlock(&s->mutex);
+        return 1;
+    }
+    pthread_mutex_lock(&s->m);
+    while (s->permits == 0) {
+        s->os_waiters++;
+        const int rc = pthread_cond_timedwait(&s->c, &s->m, &deadline);
+        s->os_waiters--;
+        if (s->permits == 0 && (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+            pthread_mutex_unlock(&s->m);
             return 0;
         }
     }
     s->permits--;
-    pthread_mutex_unlock(&s->mutex);
+    pthread_mutex_unlock(&s->m);
     return 1;
 }
 
 int64_t dragon_sem_release(void* handle) {
     DragonSem* s = (DragonSem*)handle;
     if (!s) return -1;
-    pthread_mutex_lock(&s->mutex);
+    pthread_mutex_lock(&s->m);
     s->permits++;
-    pthread_cond_signal(&s->cond);
-    pthread_mutex_unlock(&s->mutex);
+    DragonVThread* waiter = vthread_waitq_pop(&s->waiters);
+    if (!waiter && s->os_waiters > 0) pthread_cond_signal(&s->c);
+    pthread_mutex_unlock(&s->m);
+    if (waiter) vthread_wake(waiter);
     return 0;
 }
 
 int64_t dragon_sem_free(void* handle) {
     DragonSem* s = (DragonSem*)handle;
     if (!s) return -1;
-    pthread_cond_destroy(&s->cond);
-    pthread_mutex_destroy(&s->mutex);
+    pthread_cond_destroy(&s->c);
+    pthread_mutex_destroy(&s->m);
     free(s);
     return 0;
 }
 
-void dragon_lock_release(void* lock) {
-    pthread_mutex_unlock((pthread_mutex_t*)lock);
+typedef struct DragonBarrier {
+    pthread_mutex_t m;
+    pthread_cond_t  c;
+    DragonVThreadQueue waiters;
+    uint64_t generation;
+    int64_t  threshold;
+    int64_t  waiting;
+} DragonBarrier;
+
+void* dragon_barrier_new(int64_t count) {
+    if (count <= 0) return nullptr;
+    DragonBarrier* b = (DragonBarrier*)dragon_xcalloc_n(1, sizeof(DragonBarrier));
+    if (pthread_mutex_init(&b->m, nullptr) != 0) {
+        free(b);
+        return nullptr;
+    }
+    if (pthread_cond_init(&b->c, nullptr) != 0) {
+        pthread_mutex_destroy(&b->m);
+        free(b);
+        return nullptr;
+    }
+    b->threshold = count;
+    return b;
 }
 
-void dragon_lock_destroy(void* lock) {
-    pthread_mutex_destroy((pthread_mutex_t*)lock);
-    free(lock);
+int64_t dragon_barrier_wait(void* handle) {
+    DragonBarrier* b = (DragonBarrier*)handle;
+    if (!b) return -1;
+    DragonVThread* vt = dragon_green_self();
+    pthread_mutex_lock(&b->m);
+    const uint64_t gen = b->generation;
+    if (++b->waiting >= b->threshold) {
+        b->generation++;
+        b->waiting = 0;
+        DragonVThread* stolen = vthread_waitq_steal(&b->waiters);
+        pthread_cond_broadcast(&b->c);
+        pthread_mutex_unlock(&b->m);
+        vthread_wake_stolen(stolen);
+        return 1;
+    }
+    while (gen == b->generation) {
+        if (vt) {
+            green_park(&b->waiters, vt, &b->m);
+        } else {
+            pthread_cond_wait(&b->c, &b->m);
+        }
+    }
+    pthread_mutex_unlock(&b->m);
+    return 0;
 }
 
-void* dragon_rwlock_new() {
-    pthread_rwlock_t* rw =
-        (pthread_rwlock_t*)dragon_xmalloc(sizeof(pthread_rwlock_t));
-    pthread_rwlock_init(rw, NULL);
-    return rw;
-}
-
-void dragon_rwlock_free(void* rw) {
-    if (!rw) return;
-    pthread_rwlock_destroy((pthread_rwlock_t*)rw);
-    free(rw);
+int64_t dragon_barrier_destroy(void* handle) {
+    DragonBarrier* b = (DragonBarrier*)handle;
+    if (!b) return -1;
+    pthread_cond_destroy(&b->c);
+    pthread_mutex_destroy(&b->m);
+    free(b);
+    return 0;
 }
 
 void* dragon_cond_new() {

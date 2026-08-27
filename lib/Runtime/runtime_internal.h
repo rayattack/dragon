@@ -125,6 +125,11 @@ enum VThreadYieldReason {
     YIELD_SLEEP = 2
 };
 
+typedef struct DragonVThreadQueue {
+    struct DragonVThread* head;
+    struct DragonVThread* tail;
+} DragonVThreadQueue;
+
 typedef struct {
     DragonObjectHeader header;
     int64_t len;
@@ -271,6 +276,8 @@ typedef struct DragonVThread {
     pthread_mutex_t join_lock;
     pthread_cond_t  join_cond;
     struct DragonVThread* next;
+    struct DragonVThread* park_next;
+    DragonVThreadQueue join_waiters;
 } DragonVThread;
 
 struct DragonGenerator {

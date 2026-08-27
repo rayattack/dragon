@@ -6,27 +6,24 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 
-extern "C" def pthread_mutex_init(mtx: ptr, attr: ptr) -> intc
-extern "C" def pthread_mutex_lock(mtx: ptr) -> intc
-extern "C" def pthread_mutex_trylock(mtx: ptr) -> intc
-extern "C" def pthread_mutex_unlock(mtx: ptr) -> intc
-extern "C" def pthread_mutex_destroy(mtx: ptr) -> intc
+extern "C" def dragon_lock_new() -> ptr
+extern "C" def dragon_lock_acquire(lock: ptr)
+extern "C" def dragon_lock_release(lock: ptr)
+extern "C" def dragon_lock_destroy(lock: ptr)
 
-extern "C" def pthread_rwlock_init(rw: ptr, attr: ptr) -> intc
-extern "C" def pthread_rwlock_rdlock(rw: ptr) -> intc
-extern "C" def pthread_rwlock_wrlock(rw: ptr) -> intc
-extern "C" def pthread_rwlock_tryrdlock(rw: ptr) -> intc
-extern "C" def pthread_rwlock_trywrlock(rw: ptr) -> intc
-extern "C" def pthread_rwlock_unlock(rw: ptr) -> intc
-extern "C" def pthread_rwlock_destroy(rw: ptr) -> intc
+extern "C" def dragon_rwlock_rdlock(rw: ptr)
+extern "C" def dragon_rwlock_wrlock(rw: ptr)
+extern "C" def dragon_rwlock_tryrdlock(rw: ptr) -> int
+extern "C" def dragon_rwlock_trywrlock(rw: ptr) -> int
+extern "C" def dragon_rwlock_unlock(rw: ptr)
 extern "C" def dragon_rwlock_timedrdlock_sec(rw: ptr, seconds: float) -> intc
 extern "C" def dragon_rwlock_timedwrlock_sec(rw: ptr, seconds: float) -> intc
 
-extern "C" def pthread_cond_init(cond: ptr, attr: ptr) -> intc
-extern "C" def pthread_cond_wait(cond: ptr, mtx: ptr) -> intc
-extern "C" def pthread_cond_signal(cond: ptr) -> intc
-extern "C" def pthread_cond_broadcast(cond: ptr) -> intc
-extern "C" def pthread_cond_destroy(cond: ptr) -> intc
+extern "C" def dragon_condvar_new() -> ptr
+extern "C" def dragon_condvar_free(cond: ptr)
+extern "C" def dragon_condvar_wait(cond: ptr, lock: ptr)
+extern "C" def dragon_condvar_signal(cond: ptr)
+extern "C" def dragon_condvar_broadcast(cond: ptr)
 
 extern "C" def dragon_barrier_new(count: int) -> ptr
 extern "C" def dragon_barrier_wait(barrier: ptr) -> int
@@ -54,10 +51,6 @@ extern "C" def dragon_sizeof_cond() -> int
 
 extern "C" def dragon_rwlock_new() -> ptr
 extern "C" def dragon_rwlock_free(rw: ptr)
-extern "C" def dragon_cond_new() -> ptr
-extern "C" def dragon_cond_free(cond: ptr)
-extern "C" def dragon_mutex_new() -> ptr
-extern "C" def dragon_mutex_free(mtx: ptr)
 extern "C" def dragon_flag_new() -> ptr
 extern "C" def dragon_flag_free(flag: ptr)
 
@@ -75,15 +68,17 @@ class RWLock {
         once; blocking=True with timeout>=0 waits up to `timeout`s, else blocks forever."""
         if not blocking {
             if write {
-                return pthread_rwlock_trywrlock(self.rw) == 0
+                return dragon_rwlock_trywrlock(self.rw) == 1
             }
-            return pthread_rwlock_tryrdlock(self.rw) == 0
+            return dragon_rwlock_tryrdlock(self.rw) == 1
         }
         if timeout < 0.0 {
             if write {
-                return pthread_rwlock_wrlock(self.rw) == 0
+                dragon_rwlock_wrlock(self.rw)
+                return True
             }
-            return pthread_rwlock_rdlock(self.rw) == 0
+            dragon_rwlock_rdlock(self.rw)
+            return True
         }
         if write {
             return dragon_rwlock_timedwrlock_sec(self.rw, timeout) == 1
@@ -92,7 +87,8 @@ class RWLock {
     }
 
     def release() -> int {
-        return pthread_rwlock_unlock(self.rw)
+        dragon_rwlock_unlock(self.rw)
+        return 0
     }
 
     def destroy() -> int {
@@ -182,35 +178,40 @@ class Condition {
     own mtx: ptr
 
     def() {
-        self.cond = dragon_cond_new()
-        self.mtx = dragon_mutex_new()
+        self.cond = dragon_condvar_new()
+        self.mtx = dragon_lock_new()
     }
 
     def acquire() -> int {
-        return pthread_mutex_lock(self.mtx)
+        dragon_lock_acquire(self.mtx)
+        return 0
     }
 
     def release() -> int {
-        return pthread_mutex_unlock(self.mtx)
+        dragon_lock_release(self.mtx)
+        return 0
     }
 
     def wait() -> int {
-        return pthread_cond_wait(self.cond, self.mtx)
+        dragon_condvar_wait(self.cond, self.mtx)
+        return 0
     }
 
     def notify() -> int {
-        return pthread_cond_signal(self.cond)
+        dragon_condvar_signal(self.cond)
+        return 0
     }
 
     def notify_all() -> int {
-        return pthread_cond_broadcast(self.cond)
+        dragon_condvar_broadcast(self.cond)
+        return 0
     }
 
     def destroy() -> int {
         """Release the OS primitives now instead of at instance death.
         Idempotent: nulling the own fields disarms the generated release."""
-        dragon_cond_free(self.cond)
-        dragon_mutex_free(self.mtx)
+        dragon_condvar_free(self.cond)
+        dragon_lock_destroy(self.mtx)
         self.cond = 0
         self.mtx = 0
         return 0
@@ -234,8 +235,8 @@ class Event {
 
     def() {
         self.flag = dragon_flag_new()
-        self.cond = dragon_cond_new()
-        self.mtx = dragon_mutex_new()
+        self.cond = dragon_condvar_new()
+        self.mtx = dragon_lock_new()
     }
 
     def is_set() -> bool {
@@ -243,10 +244,10 @@ class Event {
     }
 
     def set() -> int {
-        pthread_mutex_lock(self.mtx)
+        dragon_lock_acquire(self.mtx)
         dragon_atomic_store(self.flag, 1)
-        pthread_cond_broadcast(self.cond)
-        pthread_mutex_unlock(self.mtx)
+        dragon_condvar_broadcast(self.cond)
+        dragon_lock_release(self.mtx)
         return 0
     }
 
@@ -256,19 +257,19 @@ class Event {
     }
 
     def wait() -> int {
-        pthread_mutex_lock(self.mtx)
+        dragon_lock_acquire(self.mtx)
         while dragon_atomic_load(self.flag) == 0 {
-            pthread_cond_wait(self.cond, self.mtx)
+            dragon_condvar_wait(self.cond, self.mtx)
         }
-        pthread_mutex_unlock(self.mtx)
+        dragon_lock_release(self.mtx)
         return 0
     }
 
     def destroy() -> int {
         """Release the OS primitives now instead of at instance death.
         Idempotent: nulling the own fields disarms the generated release."""
-        dragon_cond_free(self.cond)
-        dragon_mutex_free(self.mtx)
+        dragon_condvar_free(self.cond)
+        dragon_lock_destroy(self.mtx)
         dragon_flag_free(self.flag)
         self.cond = 0
         self.mtx = 0

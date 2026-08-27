@@ -161,6 +161,21 @@ print(ready.is_set())    # True
 acquires and releases for you, the same as `Lock` (a `with` on an `RWLock` takes the
 exclusive write lock).
 
+## Green threads park; carriers stay free
+
+Every wait on this page is green-thread aware. When a
+[green thread](/docs/1101-green-threads) blocks - on a contended `Lock`, an unset
+`Event`, a `Condition`, a `Semaphore` out of permits, a `Barrier` still filling, an
+`RWLock`, or a `join()`/`await` on another task - the runtime parks the green thread
+and hands its carrier OS thread to other work, the same way it parks a green thread
+waiting on a socket read or a `sleep_ms`. A parked waiter costs nothing, and it wakes
+the moment the primitive is released, set, or notified.
+
+That makes the leader/worker shape safe at any pool size: workers that enqueue a
+request and then `wait()` on an `Event` park instead of eating the carriers the
+leader needs to run and set that event. You never need a polling loop to keep
+carriers free - `wait()` is already the cheap wait.
+
 ## Thread-safe collections
 
 When the shared state is a whole container, a lock around every access is tedious.

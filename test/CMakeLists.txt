@@ -144,6 +144,7 @@ foreach(_dr ${DR_TEST_FILES})
     get_filename_component(_name ${_dr} NAME_WE)
     add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr})
 endforeach()
+set_tests_properties(dr_test_green_parking PROPERTIES TIMEOUT 120)
 
 # Linux-only: macOS accepts but does not enforce RLIMIT_AS, and it lazily grants
 # huge reservations Linux overcommit refuses, so no oom probe can fail there.

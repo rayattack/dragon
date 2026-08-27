@@ -45,7 +45,8 @@ fire {
 Green threads are not OS threads. The runtime schedules many of them onto a small
 pool of OS threads (an "M:N" scheduler), so each costs about 64 KB instead of the
 ~1 MB an OS thread needs - spawning ten thousand is normal. And when a green thread
-does I/O - a socket read, a database query - the runtime quietly parks it and runs
+waits - a socket read, a database query, a `sleep_ms`, a contended `Lock`, an unset
+`Event`, a `join()`/`await` on another task - the runtime quietly parks it and runs
 another, instead of blocking the underlying OS thread.
 
 ## What may cross into a green thread
