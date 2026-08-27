@@ -1,0 +1,227 @@
+from unittest import TestCase, main
+from term import KeyDecoder, ScriptBytes, Byte, Final, Tilde, Modifier
+from term import KEY_ENTER, KEY_RUN, KEY_ESC, KEY_TAB, KEY_SHIFT_TAB
+from term import KEY_BACKSPACE, KEY_DELETE, KEY_INSERT
+from term import KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT
+from term import KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN
+from term import KEY_CTRL_LEFT, KEY_CTRL_RIGHT, KEY_UNKNOWN
+from term import KEY_CTRL_C, KEY_CTRL_D, KEY_CTRL_L
+from term import KEY_ALT_BASE, KEY_TIMEOUT
+from term import is_text, is_ctrl, ctrl_letter
+
+
+const ESC: str = "\x1b"
+
+
+def seq(s: str) -> list[int] {
+    """The byte script a terminal sends for `s`, one int per UTF-8 byte."""
+    const encoded: bytes = s.encode("utf-8")
+    out: list[int] = []
+    for i in range(len(encoded)) {
+        out.append(encoded[i])
+    }
+    return out
+}
+
+def csi(body: str) -> str {
+    return ESC + "[" + body
+}
+
+def modified_csi(final: int, modifier: int) -> str {
+    return csi("1;" + str(modifier) + chr(final))
+}
+
+def tilde_seq(code: int) -> str {
+    return csi(str(code) + "~")
+}
+
+def kitty_seq(code: int, modifier: int) -> str {
+    return csi(str(code) + ";" + str(modifier) + "u")
+}
+
+def kitty_plain_seq(code: int) -> str {
+    return csi(str(code) + "u")
+}
+
+def ctrl_byte(letter: str) -> int {
+    return ord(letter) - ord("a") + 1
+}
+
+def decode_bytes(script: list[int]) -> int {
+    const d: KeyDecoder = KeyDecoder(ScriptBytes(script))
+    return d.next()
+}
+
+def decode(s: str) -> int {
+    return decode_bytes(seq(s))
+}
+
+def decode_kitty(s: str) -> int {
+    const d: KeyDecoder = KeyDecoder(ScriptBytes(seq(s)))
+    d.kitty = True
+    return d.next()
+}
+
+
+class TestPlainKeys(TestCase) {
+    def test_enter() {
+        self.assertEqual(decode("\r"), KEY_ENTER)
+        self.assertEqual(decode("\n"), KEY_ENTER)
+    }
+
+    def test_tab_and_backspace() {
+        self.assertEqual(decode("\t"), KEY_TAB)
+        self.assertEqual(decode_bytes([Byte.DEL]), KEY_BACKSPACE)
+    }
+
+    def test_control_bytes() {
+        self.assertEqual(decode_bytes([ctrl_byte("c")]), KEY_CTRL_C)
+        self.assertEqual(decode_bytes([ctrl_byte("d")]), KEY_CTRL_D)
+        self.assertEqual(decode_bytes([ctrl_byte("l")]), KEY_CTRL_L)
+    }
+
+    def test_printable_ascii() {
+        self.assertEqual(decode("A"), ord("A"))
+        self.assertEqual(decode("z"), ord("z"))
+        self.assertEqual(decode(" "), ord(" "))
+    }
+}
+
+
+class TestEscapeSequences(TestCase) {
+    def test_alt_enter_is_run() {
+        self.assertEqual(decode(ESC + "\r"), KEY_RUN)
+        self.assertEqual(decode(ESC + "\n"), KEY_RUN)
+    }
+
+    def test_bare_escape_times_out_to_esc() {
+        self.assertEqual(decode(ESC), KEY_ESC)
+    }
+
+    def test_arrows() {
+        self.assertEqual(decode(csi(chr(Final.UP))), KEY_UP)
+        self.assertEqual(decode(csi(chr(Final.DOWN))), KEY_DOWN)
+        self.assertEqual(decode(csi(chr(Final.RIGHT))), KEY_RIGHT)
+        self.assertEqual(decode(csi(chr(Final.LEFT))), KEY_LEFT)
+    }
+
+    def test_ctrl_arrows() {
+        self.assertEqual(decode(modified_csi(Final.LEFT, Modifier.CTRL)), KEY_CTRL_LEFT)
+        self.assertEqual(decode(modified_csi(Final.RIGHT, Modifier.CTRL)), KEY_CTRL_RIGHT)
+    }
+
+    def test_home_end_and_tilde_forms() {
+        self.assertEqual(decode(csi(chr(Final.HOME))), KEY_HOME)
+        self.assertEqual(decode(csi(chr(Final.END))), KEY_END)
+        self.assertEqual(decode(tilde_seq(Tilde.DELETE)), KEY_DELETE)
+        self.assertEqual(decode(tilde_seq(Tilde.INSERT)), KEY_INSERT)
+        self.assertEqual(decode(tilde_seq(Tilde.PGUP)), KEY_PGUP)
+        self.assertEqual(decode(tilde_seq(Tilde.PGDN)), KEY_PGDN)
+    }
+
+    def test_shift_tab() {
+        self.assertEqual(decode(csi(chr(Final.SHIFT_TAB))), KEY_SHIFT_TAB)
+    }
+
+    def test_alt_letter() {
+        self.assertEqual(decode(ESC + "b"), KEY_ALT_BASE + ord("b"))
+    }
+
+    def test_unknown_csi_is_reported_not_guessed() {
+        self.assertEqual(decode(csi("99X")), KEY_UNKNOWN)
+    }
+}
+
+
+class TestUtf8Assembly(TestCase) {
+    def test_two_byte() {
+        self.assertEqual(decode("é"), ord("é"))
+    }
+
+    def test_three_byte_euro() {
+        self.assertEqual(decode("€"), ord("€"))
+    }
+
+    def test_four_byte_dragon() {
+        self.assertEqual(decode("🐉"), ord("🐉"))
+    }
+
+    def test_truncated_sequence_yields_lead_byte() {
+        const lead: int = seq("é")[0]
+        self.assertEqual(decode_bytes([lead]), lead)
+    }
+
+    def test_invalid_continuation_resyncs() {
+        const lead: int = seq("€")[0]
+        const d: KeyDecoder = KeyDecoder(ScriptBytes([lead, ord("A")]))
+        self.assertEqual(d.next(), lead)
+        self.assertEqual(d.next(), ord("A"))
+    }
+}
+
+
+class TestKittyProtocol(TestCase) {
+    def test_ctrl_enter_is_run() {
+        self.assertEqual(decode_kitty(kitty_seq(ord("\r"), Modifier.CTRL)), KEY_RUN)
+    }
+
+    def test_alt_enter_is_run() {
+        self.assertEqual(decode_kitty(kitty_seq(ord("\r"), Modifier.ALT)), KEY_RUN)
+    }
+
+    def test_shift_enter_is_a_newline() {
+        self.assertEqual(decode_kitty(kitty_seq(ord("\r"), Modifier.SHIFT)), KEY_ENTER)
+    }
+
+    def test_plain_enter() {
+        self.assertEqual(decode_kitty(kitty_plain_seq(ord("\r"))), KEY_ENTER)
+    }
+
+    def test_bare_escape_is_unambiguous() {
+        self.assertEqual(decode_kitty(kitty_plain_seq(ord(ESC))), KEY_ESC)
+    }
+
+    def test_ctrl_letter() {
+        self.assertEqual(decode_kitty(kitty_seq(ord("c"), Modifier.CTRL)), KEY_CTRL_C)
+    }
+
+    def test_legacy_arrows_still_decode_under_kitty() {
+        self.assertEqual(decode_kitty(csi(chr(Final.UP))), KEY_UP)
+    }
+}
+
+
+class TestKeyPredicates(TestCase) {
+    def test_is_text() {
+        self.assertTrue(is_text(ord("A")))
+        self.assertTrue(is_text(ord("€")))
+        self.assertFalse(is_text(KEY_ENTER))
+        self.assertFalse(is_text(KEY_TIMEOUT))
+    }
+
+    def test_is_ctrl() {
+        self.assertTrue(is_ctrl(KEY_CTRL_C))
+        self.assertFalse(is_ctrl(ord("A")))
+        self.assertFalse(is_ctrl(KEY_ALT_BASE + ord("b")))
+    }
+
+    def test_ctrl_letter_names() {
+        self.assertEqual(ctrl_letter(KEY_CTRL_C), "c")
+        self.assertEqual(ctrl_letter(KEY_CTRL_D), "d")
+        self.assertEqual(ctrl_letter(ord("A")), "")
+    }
+}
+
+
+class TestPushBack(TestCase) {
+    def test_pushed_byte_is_read_first() {
+        const d: KeyDecoder = KeyDecoder(ScriptBytes(seq("B")))
+        d.push_back(ord("A"))
+        self.assertEqual(d.next(), ord("A"))
+        self.assertEqual(d.next(), ord("B"))
+    }
+}
+
+
+main([TestPlainKeys(), TestEscapeSequences(), TestUtf8Assembly(),
+      TestKittyProtocol(), TestKeyPredicates(), TestPushBack()])

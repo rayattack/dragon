@@ -142,6 +142,7 @@ add_library(dragon_runtime STATIC
     lib/Runtime/runtime_getpass.cpp
     lib/Runtime/runtime_subprocess.cpp
     lib/Runtime/runtime_argon2id.cpp
+    lib/Runtime/runtime_term.cpp
     lib/ed25519/ed25519.c)
 target_include_directories(dragon_runtime PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Minicoro

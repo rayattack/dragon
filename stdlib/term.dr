@@ -1,0 +1,661 @@
+"""term - raw-mode terminal input, key decoding and screen control.
+
+    from term import RawMode, KeyDecoder, KEY_RUN, KEY_ENTER
+
+    with RawMode() as tty {
+        keys: KeyDecoder = tty.keys()
+        while True {
+            k: int = keys.next()
+            if k == KEY_RUN { break }
+        }
+    }
+
+The termios dance (save attributes, go raw, guaranteed restore) and the polled
+byte read live in the native shim `runtime_term.cpp`, for the same reason
+`getpass` does: restoration has to survive paths Dragon control flow cannot
+reach. `getpass` only has to survive its own exit paths; an interactive shell
+has to survive the process's - atexit, SIGTERM on a window close, SIGHUP on
+disconnect, and a fatal signal mid-keystroke. A terminal left in raw mode after
+a crash is the most-hated failure mode an interactive tool has, so the restore
+is registered with atexit and with handlers that restore then re-raise the
+default action, keeping the exit status honest.
+
+Key decoding, escape-sequence parsing and UTF-8 assembly are Dragon: they are
+arithmetic over bytes with no platform surface, and being Dragon they are
+testable by feeding a fixed byte script through `ScriptBytes` with no terminal
+attached.
+
+A key is one `int`. Values 32 to 1114111 are text codepoints, so `chr(k)` gives
+the character. Named, control and Alt keys occupy bands above that. Negative
+values are conditions rather than keys.
+"""
+
+extern "C" def dragon_term_raw_enable() -> intc
+extern "C" def dragon_term_raw_disable() -> intc
+extern "C" def dragon_term_is_raw() -> intc
+extern "C" def dragon_term_read_byte(timeout_ms: intc) -> intc
+extern "C" def dragon_term_write(s: str) -> intc
+extern "C" def dragon_term_flush() -> intc
+extern "C" def dragon_term_width() -> intc
+extern "C" def dragon_term_height() -> intc
+extern "C" def dragon_term_kitty_push(flags: intc) -> intc
+extern "C" def dragon_term_kitty_pop() -> intc
+extern "C" def dragon_term_isatty_stdin() -> intc
+
+const KEY_TIMEOUT: int = -1
+const KEY_EOF: int = -2
+const KEY_ERROR: int = -3
+const KEY_RESIZED: int = -4
+
+const KEY_TEXT_MAX: int = 1114111
+
+const KEY_NAMED_BASE: int = 1114112
+const KEY_ENTER: int = 1114113
+const KEY_RUN: int = 1114114
+const KEY_ESC: int = 1114115
+const KEY_TAB: int = 1114116
+const KEY_SHIFT_TAB: int = 1114117
+const KEY_BACKSPACE: int = 1114118
+const KEY_DELETE: int = 1114119
+const KEY_UP: int = 1114120
+const KEY_DOWN: int = 1114121
+const KEY_LEFT: int = 1114122
+const KEY_RIGHT: int = 1114123
+const KEY_HOME: int = 1114124
+const KEY_END: int = 1114125
+const KEY_PGUP: int = 1114126
+const KEY_PGDN: int = 1114127
+const KEY_INSERT: int = 1114128
+const KEY_CTRL_LEFT: int = 1114129
+const KEY_CTRL_RIGHT: int = 1114130
+const KEY_UNKNOWN: int = 1114131
+
+const KEY_CTRL_BASE: int = 1114368
+const KEY_CTRL_A: int = 1114369
+const KEY_CTRL_C: int = 1114371
+const KEY_CTRL_D: int = 1114372
+const KEY_CTRL_E: int = 1114373
+const KEY_CTRL_K: int = 1114379
+const KEY_CTRL_L: int = 1114380
+const KEY_CTRL_R: int = 1114386
+const KEY_CTRL_U: int = 1114389
+const KEY_CTRL_W: int = 1114391
+
+const KEY_ALT_BASE: int = 1179648
+
+const KITTY_DISAMBIGUATE: int = 1
+
+const KITTY_QUERY: str = "\x1b[?u"
+const DA1_QUERY: str = "\x1b[c"
+
+const _HANDSHAKE_TIMEOUT_MS: int = 150
+const _HANDSHAKE_READS: int = 64
+
+const _DEFAULT_ESC_TIMEOUT_MS: int = 50
+
+enum Byte {
+    TAB = 9
+    LF = 10
+    CR = 13
+    ESC = 27
+    SPACE = 32
+    DIGIT_0 = 48
+    DIGIT_9 = 57
+    COLON = 58
+    SEMICOLON = 59
+    UPPER_A = 65
+    UPPER_Z = 90
+    SS3 = 79
+    CSI = 91
+    LOWER_A = 97
+    LOWER_Z = 122
+    DEL = 127
+    ASCII_MAX = 127
+    DA1_FINAL = 99
+    KITTY_FINAL = 117
+}
+
+enum Final {
+    UP = 65
+    DOWN = 66
+    RIGHT = 67
+    LEFT = 68
+    END = 70
+    HOME = 72
+    SHIFT_TAB = 90
+    KITTY = 117
+    TILDE = 126
+}
+
+enum Tilde {
+    HOME = 1
+    INSERT = 2
+    DELETE = 3
+    END = 4
+    PGUP = 5
+    PGDN = 6
+}
+
+enum Utf8 {
+    CONT_LOW = 128
+    CONT_HIGH = 191
+    LEAD_2 = 192
+    LEAD_3 = 224
+    LEAD_4 = 240
+}
+
+enum Modifier {
+    NONE = 1
+    SHIFT = 2
+    ALT = 3
+    CTRL = 5
+}
+
+def _csi_final_of(bytes_seen: list[int]) -> int {
+    """The final byte if `bytes_seen` is a complete CSI reply, else -1.
+
+    A kitty flags reply and a DA1 reply share the `ESC [ ?` prefix and differ
+    only in this final byte, so the final is exactly what has to be read.
+    """
+    const n: int = len(bytes_seen)
+    if n < 3 {
+        return -1
+    }
+    if bytes_seen[0] != Byte.ESC or bytes_seen[1] != Byte.CSI {
+        return -1
+    }
+    const last: int = bytes_seen[n - 1]
+    if last == Byte.KITTY_FINAL or last == Byte.DA1_FINAL {
+        return last
+    }
+    return -1
+}
+
+
+def is_text(key: int) -> bool {
+    """True when `key` is a printable codepoint, so `chr(key)` is meaningful."""
+    return key >= 32 and key <= KEY_TEXT_MAX
+}
+
+def is_ctrl(key: int) -> bool {
+    """True when `key` is a Ctrl combination."""
+    return key > KEY_CTRL_BASE and key < KEY_ALT_BASE
+}
+
+def ctrl_letter(key: int) -> str {
+    """The lowercase letter of a Ctrl key, or "" when `key` is not one."""
+    if not is_ctrl(key) {
+        return ""
+    }
+    const offset: int = key - KEY_CTRL_BASE
+    if offset < 1 or offset > 26 {
+        return ""
+    }
+    return chr(96 + offset)
+}
+
+class ByteSource {
+    """A source of raw input bytes. Subclasses decide where they come from."""
+
+    def read_byte(timeout_ms: int) -> int {
+        return KEY_EOF
+    }
+}
+
+class TtyBytes(ByteSource) {
+    """Bytes from the terminal, via the native polled read."""
+
+    def() {}
+
+    def read_byte(timeout_ms: int) -> int {
+        return dragon_term_read_byte(timeout_ms)
+    }
+}
+
+class ScriptBytes(ByteSource) {
+    """A fixed byte script, for testing a decoder with no terminal attached.
+
+    Returns KEY_TIMEOUT once drained, which is what makes the escape-timeout
+    path deterministic in tests: no wall-clock dependence at all.
+    """
+
+    data: list[int]
+    pos: int
+
+    def(data: list[int]) {
+        self.data = data
+        self.pos = 0
+    }
+
+    def read_byte(timeout_ms: int) -> int {
+        if self.pos >= len(self.data) {
+            return KEY_TIMEOUT
+        }
+        const b: int = self.data[self.pos]
+        self.pos = self.pos + 1
+        return b
+    }
+}
+
+class KeyDecoder {
+    """Turns a byte stream into keys, one `int` at a time.
+
+    Handles legacy escape sequences and, when `kitty` is set, the
+    `CSI ... u` forms the kitty keyboard protocol reports. Both are decoded
+    unconditionally, because a terminal in kitty mode still sends legacy
+    arrow sequences.
+    """
+
+    src: ByteSource
+    pending: list[int]
+    esc_timeout_ms: int
+    kitty: bool
+
+    def(src: ByteSource) {
+        self.src = src
+        self.pending = []
+        self.esc_timeout_ms = _DEFAULT_ESC_TIMEOUT_MS
+        self.kitty = False
+    }
+
+    def push_back(b: int) -> None {
+        """Return a byte to the front of the stream."""
+        self.pending.append(b)
+    }
+
+    def _take(timeout_ms: int) -> int {
+        if len(self.pending) > 0 {
+            const n: int = len(self.pending)
+            const b: int = self.pending[n - 1]
+            self.pending = self.pending[0:n - 1]
+            return b
+        }
+        return self.src.read_byte(timeout_ms)
+    }
+
+    def next() -> int {
+        """Read one key, blocking until something arrives."""
+        return self.next_within(-1)
+    }
+
+    def next_within(timeout_ms: int) -> int {
+        const b: int = self._take(timeout_ms)
+        if b < 0 {
+            return b
+        }
+        if b == Byte.ESC {
+            return self._after_esc()
+        }
+        return self._decode_plain(b)
+    }
+
+    def _decode_plain(b: int) -> int {
+        match b {
+            case Byte.CR | Byte.LF { return KEY_ENTER }
+            case Byte.TAB { return KEY_TAB }
+            case Byte.DEL { return KEY_BACKSPACE }
+        }
+        if b < Byte.SPACE {
+            return KEY_CTRL_BASE + b
+        }
+        if b <= Byte.ASCII_MAX {
+            return b
+        }
+        return self._assemble_utf8(b)
+    }
+
+    def _assemble_utf8(lead: int) -> int {
+        """Combine a UTF-8 lead byte with its continuations into a codepoint.
+
+        An invalid sequence yields the lead byte as a codepoint and resyncs,
+        matching what `dragon_string_alloc` already does for malformed input
+        rather than inventing a second policy for the terminal.
+        """
+        extra: int = 0
+        cp: int = 0
+        if lead >= Utf8.LEAD_4 {
+            extra = 3
+            cp = lead - Utf8.LEAD_4
+        } else if lead >= Utf8.LEAD_3 {
+            extra = 2
+            cp = lead - Utf8.LEAD_3
+        } else if lead >= Utf8.LEAD_2 {
+            extra = 1
+            cp = lead - Utf8.LEAD_2
+        } else {
+            return lead
+        }
+
+        i: int = 0
+        while i < extra {
+            const c: int = self._take(self.esc_timeout_ms)
+            if c < Utf8.CONT_LOW or c > Utf8.CONT_HIGH {
+                if c >= 0 {
+                    self.push_back(c)
+                }
+                return lead
+            }
+            cp = cp * 64 + (c - Utf8.CONT_LOW)
+            i = i + 1
+        }
+        return cp
+    }
+
+    def _after_esc() -> int {
+        const b: int = self._take(self.esc_timeout_ms)
+        if b < 0 {
+            return KEY_ESC
+        }
+        match b {
+            case Byte.CR | Byte.LF { return KEY_RUN }
+            case Byte.CSI { return self._read_csi() }
+            case Byte.SS3 { return self._cursor_final(self._take(self.esc_timeout_ms)) }
+            case Byte.ESC {
+                self.push_back(b)
+                return KEY_ESC
+            }
+        }
+        if b >= Byte.SPACE and b <= Byte.ASCII_MAX {
+            return KEY_ALT_BASE + b
+        }
+        return KEY_ESC
+    }
+
+    def _cursor_final(final: int) -> int {
+        """Map a cursor-key final byte, shared by the CSI and SS3 forms."""
+        match final {
+            case Final.UP { return KEY_UP }
+            case Final.DOWN { return KEY_DOWN }
+            case Final.RIGHT { return KEY_RIGHT }
+            case Final.LEFT { return KEY_LEFT }
+            case Final.HOME { return KEY_HOME }
+            case Final.END { return KEY_END }
+        }
+        return KEY_UNKNOWN
+    }
+
+    def _read_csi() -> int {
+        params: list[int] = []
+        current: int = 0
+        have_current: bool = False
+        final: int = 0
+
+        while True {
+            const c: int = self._take(self.esc_timeout_ms)
+            if c < 0 {
+                return KEY_UNKNOWN
+            }
+            if c >= Byte.DIGIT_0 and c <= Byte.DIGIT_9 {
+                current = current * 10 + (c - Byte.DIGIT_0)
+                have_current = True
+            } else if c == Byte.SEMICOLON or c == Byte.COLON {
+                params.append(current if have_current else 0)
+                current = 0
+                have_current = False
+            } else {
+                if have_current {
+                    params.append(current)
+                }
+                final = c
+                break
+            }
+        }
+        return self._csi_key(params, final)
+    }
+
+    def _csi_key(params: list[int], final: int) -> int {
+        const modifier: int = params[1] if len(params) > 1 else Modifier.NONE
+        const ctrl: bool = modifier == Modifier.CTRL
+
+        match final {
+            case Final.KITTY { return self._kitty_key(params) }
+            case Final.RIGHT { return KEY_CTRL_RIGHT if ctrl else KEY_RIGHT }
+            case Final.LEFT { return KEY_CTRL_LEFT if ctrl else KEY_LEFT }
+            case Final.SHIFT_TAB { return KEY_SHIFT_TAB }
+            case Final.TILDE { return self._tilde_key(params) }
+        }
+        return self._cursor_final(final)
+    }
+
+    def _tilde_key(params: list[int]) -> int {
+        """Decode the `CSI <n> ~` family, where the number names the key."""
+        if len(params) == 0 {
+            return KEY_UNKNOWN
+        }
+        match params[0] {
+            case Tilde.HOME { return KEY_HOME }
+            case Tilde.INSERT { return KEY_INSERT }
+            case Tilde.DELETE { return KEY_DELETE }
+            case Tilde.END { return KEY_END }
+            case Tilde.PGUP { return KEY_PGUP }
+            case Tilde.PGDN { return KEY_PGDN }
+        }
+        return KEY_UNKNOWN
+    }
+
+    def _kitty_key(params: list[int]) -> int {
+        if len(params) == 0 {
+            return KEY_UNKNOWN
+        }
+        const cp: int = params[0]
+        const modifier: int = params[1] if len(params) > 1 else 1
+        const mask: int = modifier - 1
+
+        const shift: bool = mask % 2 == 1
+        const alt: bool = (mask // 2) % 2 == 1
+        const ctrl: bool = (mask // 4) % 2 == 1
+
+        match cp {
+            case Byte.CR { return KEY_RUN if alt or ctrl else KEY_ENTER }
+            case Byte.ESC { return KEY_ESC }
+            case Byte.TAB { return KEY_SHIFT_TAB if shift else KEY_TAB }
+            case Byte.DEL { return KEY_BACKSPACE }
+        }
+
+        if ctrl and cp >= Byte.LOWER_A and cp <= Byte.LOWER_Z {
+            return KEY_CTRL_BASE + (cp - Byte.LOWER_A + 1)
+        }
+        if ctrl and cp >= Byte.UPPER_A and cp <= Byte.UPPER_Z {
+            return KEY_CTRL_BASE + (cp - Byte.UPPER_A + 1)
+        }
+        if alt {
+            return KEY_ALT_BASE + cp
+        }
+        if cp >= Byte.SPACE {
+            return cp
+        }
+        return KEY_UNKNOWN
+    }
+}
+
+class Suspend {
+    """Cooked mode for the duration of a `with` block, raw mode again after.
+
+    A cell that calls `input()` needs echo and ISIG back, and Ctrl+C during a
+    long-running cell should reach the process group as a real signal.
+    """
+
+    owner: RawMode
+
+    def(owner: RawMode) {
+        self.owner = owner
+    }
+
+    def __enter__() -> Suspend {
+        dragon_term_raw_disable()
+        return self
+    }
+
+    def __exit__() -> None {
+        self.owner.reenter()
+    }
+}
+
+class RawMode {
+    """Raw mode for the duration of a `with` block.
+
+    A scope that ends frees what it held: leaving the block restores the
+    terminal, and so does an abnormal exit, via the shim's atexit and signal
+    handlers.
+    """
+
+    active: bool
+    kitty: bool
+
+    def() {
+        self.active = False
+        self.kitty = False
+    }
+
+    def __enter__() -> RawMode {
+        dragon_term_raw_enable()
+        self.active = True
+        return self
+    }
+
+    def __exit__() -> None {
+        dragon_term_raw_disable()
+        self.active = False
+        self.kitty = False
+    }
+
+    def reenter() -> None {
+        """Re-enter raw mode after a `suspend()` block, restoring kitty mode."""
+        dragon_term_raw_enable()
+        if self.kitty {
+            dragon_term_kitty_push(KITTY_DISAMBIGUATE)
+        }
+    }
+
+    def suspend() -> Suspend {
+        return Suspend(self)
+    }
+
+    def keys() -> KeyDecoder {
+        const decoder: KeyDecoder = KeyDecoder(TtyBytes())
+        decoder.kitty = self.kitty
+        return decoder
+    }
+
+    def enable_kitty(decoder: KeyDecoder) -> bool {
+        """Ask the terminal whether it speaks the kitty keyboard protocol.
+
+        The query is paired with a primary device-attributes request, which
+        every terminal in existence answers. That is what stops the handshake
+        hanging on a terminal that ignores the kitty query: the DA1 reply
+        arrives either way and ends the read. Bytes that are not part of a
+        reply are pushed back, so a keystroke typed during startup is not lost.
+        """
+        if not self.active {
+            return False
+        }
+        dragon_term_write(KITTY_QUERY + DA1_QUERY)
+        dragon_term_flush()
+
+        supported: bool = False
+        pending: list[int] = []
+        deadline: int = _HANDSHAKE_READS
+
+        while deadline > 0 {
+            deadline = deadline - 1
+            const b: int = dragon_term_read_byte(_HANDSHAKE_TIMEOUT_MS)
+            if b < 0 {
+                break
+            }
+            pending.append(b)
+            const final: int = _csi_final_of(pending)
+            if final == Byte.KITTY_FINAL {
+                supported = True
+                pending = []
+            } else if final == Byte.DA1_FINAL {
+                pending = []
+                break
+            }
+        }
+
+        for leftover in pending {
+            decoder.push_back(leftover)
+        }
+
+        if not supported {
+            return False
+        }
+        if dragon_term_kitty_push(KITTY_DISAMBIGUATE) != 0 {
+            return False
+        }
+        self.kitty = True
+        decoder.kitty = True
+        return True
+    }
+
+    def write(s: str) -> int {
+        return dragon_term_write(s)
+    }
+
+    def flush() -> int {
+        return dragon_term_flush()
+    }
+
+    def width() -> int {
+        return dragon_term_width()
+    }
+
+    def height() -> int {
+        return dragon_term_height()
+    }
+}
+
+def is_terminal() -> bool {
+    """True when standard input is a terminal, so an editor can run."""
+    return dragon_term_isatty_stdin() != 0
+}
+
+def width() -> int {
+    return dragon_term_width()
+}
+
+def height() -> int {
+    return dragon_term_height()
+}
+
+def hide_cursor() -> str { return "\x1b[?25l" }
+
+def show_cursor() -> str { return "\x1b[?25h" }
+
+def erase_line() -> str { return "\x1b[2K" }
+
+def erase_below() -> str { return "\x1b[J" }
+
+def clear_screen() -> str { return "\x1b[2J\x1b[H" }
+
+def cursor_up(n: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return "\x1b[" + str(n) + "A"
+}
+
+def cursor_down(n: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return "\x1b[" + str(n) + "B"
+}
+
+def cursor_right(n: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return "\x1b[" + str(n) + "C"
+}
+
+def cursor_left(n: int) -> str {
+    if n <= 0 {
+        return ""
+    }
+    return "\x1b[" + str(n) + "D"
+}
+
+def dim(s: str) -> str { return "\x1b[2m" + s + "\x1b[0m" }
+
+def reset_style() -> str { return "\x1b[0m" }
