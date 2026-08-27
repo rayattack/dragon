@@ -1,0 +1,1476 @@
+# Dragon: Complete LLM Language Reference
+
+Dragon is a statically typed, compiled language that reads like Python and compiles
+through LLVM to a self-contained native binary. You write `.dr` files with braces
+(or typed `.py` files with indentation), annotate every binding, and get C-class
+machine code: no interpreter, no VM, no JIT warm-up, no boxing of known types.
+
+This file is the one-stop language reference for LLMs and tools. It covers the
+language surface, semantics, build/CLI, ownership, concurrency, templates, FFI,
+and testing. It does NOT catalog the standard library (look modules up separately
+in `stdlib/*.dr` or the docs site); the stdlib types that are part of how the
+language is used (Task, Lock, TestCase, HTML, SQL) appear here only as far as the
+language story needs them.
+
+This file describes the language as designed. Its claims were checked by
+compiling and running probe programs against the compiler (2026-08-27), so the
+examples are real code, not aspiration.
+
+## 1. Design rules (why the language is shaped this way)
+
+1. **Speed is king.** The hot path is sacred; if it is interpreted, it is not
+   sacred. Values whose type is known flow AT that type, in registers, never boxed.
+2. **No workarounds; fix at the root.** A silent fallback is a silent lie. You
+   should know it is broken when you compile.
+3. **Types must be honest.** `Any` is a last resort, never a fallback. Ambiguity
+   is a compile error to annotate, not a box the compiler picks for you.
+
+Dragon borrows Python's surface only where it compiles cleanly to fast static
+code. It rejects the dynamic crutches outright: `eval`/`exec`, `getattr`/`setattr`/
+`hasattr`, `__dict__`, monkey-patching, metaclasses, runtime module loading,
+untyped `*args`/`**kwargs`. These are refused by design, not gaps to be filled.
+
+## 2. Toolchain: the `dragon` CLI
+
+`dragon` (alias `dr`) is the single entry point.
+
+```
+dragon run   <file|dir> [-- args]   # compile to a temp binary, run it, clean up
+dragon build <file|dir> -o app      # compile to a native executable
+dragon check <file>                 # lex + parse + type check only (no codegen)
+dragon repl                         # interactive JIT session (no linker); -f for the .py surface
+dragon migrate <file.py>            # emit a typed .dr draft next to the input
+dragon ffi sync <file> [--check]    # (re)generate foreign stubs for process externs
+```
+
+Egg / package verbs (D022): `dragon init` scaffolds a `dragon.drs` manifest in the
+current directory (works today); `grab <name>`, `sync`, `drop <name>` are wired as
+verbs but marked in progress. Until the egg manager is complete, you vendor
+dependencies: copy the `.dr` files into your tree or point `-I` at them.
+
+A `<dir>` argument to run/build resolves the `entry` field of that directory's
+`dragon.drs`.
+
+Flags:
+
+| Flag | Meaning |
+|---|---|
+| `-o <file>` | output path (default: source name with `.dr` stripped) |
+| `-O0`..`-O3` | optimization level (default `-O0`) |
+| `--release` | optimize aggressively (use for anything you measure or ship) |
+| `-g` | debug info |
+| `-f` | force Python-surface parsing (for `.py` content) |
+| `-I <dir>` | add a module search path (repeatable) |
+| `--site-packages` | search Python site-packages for typed `.py` modules (last resort) |
+| `--gc=rc` | refcounting + cycle collector (the default) |
+| `--gc=none` | no refcount emission; OS reclaims at exit. Short-lived programs only, never services |
+| `-l<name>` / `-L<dir>` | link `lib<name>` / add a library search dir (FFI) |
+| `--cc-source <file>` | compile and link a C/C++ shim (repeatable; a `.cpp` switches the link driver to `c++`) |
+| `--dump-ast` / `--dump-tokens` | print the parser/lexer output and exit |
+| `--backend <llvm>` | accepted for compatibility and ignored (LLVM is the only backend) |
+| `-v, --verbose` | verbose output |
+
+Environment: `DRAGON_STDLIB_PATH` overrides the bundled stdlib root (for working
+on the stdlib itself).
+
+The REPL accepts multi-line cells (Alt+Enter or Esc,Enter runs a cell), echoes
+the value of a bare expression, and has `:help`, `:reset`, `:quit`/`:q`. It is
+itself written in Dragon (`tools/repl/*.dr`) and JIT-compiles cells.
+
+`dragon migrate` output is a DRAFT: untyped parameters come out as `Any` and the
+inferred return types can be wrong; you are expected to fix the annotations.
+
+### Compilation model
+
+Pipeline: `Lexer -> Parser -> [TypeHintEnforcer, .py only] -> Sema -> TypeChecker
+-> CodeGen (LLVM IR) -> cc/c++ link`. The module resolver walks the whole import
+graph and lowers everything into ONE LLVM module: whole-program optimization,
+direct cross-module calls, no separate compilation. The binary statically links
+the Dragon runtime and depends only on libc/libm.
+
+Value representation: `int` is `i64`, `float` is `f64`, `bool` is `i1`; `str`,
+`bytes`, containers and instances are pointers; only `Union[...]` and `Any` are a
+16-byte `{tag, payload}` box. Generics monomorphize: each distinct type argument
+stamps out a separate native specialization (`Box[int]` and `Box[str]` are two
+concrete types in the binary).
+
+## 3. Program model: the file IS the program
+
+- The file you hand to `dragon run`/`build` is the program; its top-level
+  statements execute top to bottom. There is no `main`, no entry function, and no
+  `__name__` (writing `__name__` is a compile error). A function named `main` is
+  ordinary and runs only if called.
+- Every other file is an import. An imported module contributes its definitions
+  (functions, classes, consts, module globals with their initializers). The
+  initializers run once at program start, in dependency order, BEFORE the entry
+  file's body. A bare side-effecting statement at a dependency's top level (a
+  loose `print(...)`) is silently skipped: a module is a bag of definitions, not
+  a script.
+- Forward references work: top-level code may call a function defined later in
+  the file; the whole module's names resolve before codegen.
+
+## 4. Two surfaces, one language
+
+| | `.dr` (canonical) | `.py` (adoption ramp) |
+|---|---|---|
+| Blocks | braces `{ }` | indentation |
+| Constructor | nameless `def(params) { ... }` | `def __init__(self, ...) -> None:` |
+| `self` in methods | implicit (do NOT declare it) | explicit parameter, as in Python |
+| `super` | `super(args)` / `super.method()` | `super().__init__(args)` / `super().method()` |
+| `static` module vars | `static x: T = ...` | plain module var (same lifetime) |
+| Types | mandatory | mandatory (PEP 484, enforced by a dedicated pass) |
+
+Semantics are identical: block scoping, `:`-declares/`=`-reassigns, fixed types.
+The constructor spellings are mode-exclusive and enforced: `def __init__` inside
+a `.dr` class is a compile error ("The constructor is a nameless def"), and
+`def area(self)` in `.dr` is a compile error telling you to drop `self`.
+`.py` mode is for porting an individually typed Python file; it is NOT a promise
+that arbitrary Python runs (numpy/pandas/Flask/CPython extensions never will).
+
+In `.dr` source, `true`, `false`, and `none` are accepted aliases for `True`,
+`False`, `None` (both spellings work).
+
+## 5. Bindings: declare with `:`, reassign with `=`
+
+```dragon
+total: int = 0      # declares total, type fixed as int forever in this scope
+total = total + 5   # reassigns; bare = requires the name to already exist
+```
+
+- A bare `=` to an undeclared name is a compile error (not a silent new
+  variable). A misspelled assignment target cannot silently create a fresh local.
+- A variable's type is fixed at declaration; assigning an incompatible type is a
+  compile error.
+- Redeclaring the same name twice in one scope is an error; reassign instead.
+- Statement-level walrus declaration works and infers the type:
+  `xs := [1, 2, 3]` declares `xs: list[int]`; `n := 5` declares `n: int`.
+  (Inside an expression, `:=` is the usual walrus: `while (w := f()) != "stop"`.)
+- Tuple unpacking is an implicit typed declaration: `lo, hi = minmax(xs)`.
+
+### `const` and `static`
+
+```dragon
+const port: int = 2018          # single assignment; reassignment is a compile error
+static cache: dict[str, str] = {}   # module-level, program lifetime, shared everywhere
+```
+
+`const` is a binding modifier, not deep immutability: a `const lst: list[int]`
+still allows `lst.append(1)`; only rebinding `lst` is forbidden. `static` is
+`.dr`-only (a `.py` module-level var already has that lifetime). `static const`
+combines on class members for class constants.
+
+### Definite assignment (enforced)
+
+The compiler performs flow-sensitive definite-assignment analysis:
+
+```dragon
+result: int
+if cond { result = 1 } else { result = 2 }
+print(result)                   # ok: assigned on every path
+
+result2: int
+if cond { result2 = 1 }
+print(result2)                  # COMPILE ERROR: may be read before it is assigned
+```
+
+The same analysis covers constructors: every field without a default must be
+assigned on every path through the constructor, or the class does not compile
+("constructor of 'A' may return without assigning field 'x'").
+
+## 6. Scoping
+
+- Dragon scopes by BLOCK, not by function: every `{ }` body (and every indented
+  suite in `.py` mode) is its own scope: `if`, `elif`, `else`, `while`, `for`,
+  `with`, `try`, `except`, `case` bodies included. A name declared inside a block
+  vanishes at the closing brace. Sibling blocks can reuse a name freely.
+- Shadowing across scopes is legal (an inner block may redeclare an outer name,
+  even at a different type; the outer binding is untouched after the block).
+- The block rule stops at the FUNCTION boundary:
+  - Writing a module global from inside a function requires `global name`
+    (a bare `=`/`+=` without it is a compile error). Reading needs no keyword.
+  - Rebinding an ENCLOSING FUNCTION's local from a nested function/lambda
+    requires `nonlocal name`; without it the assignment is a compile error that
+    names both fixes. Reading captures freely.
+  - Blocks inside the same function need no keyword; they are not a boundary.
+- Only a top-level declaration is a module global; a declaration nested in a
+  top-level `if`/`for` is block-local.
+
+## 7. The type system
+
+### Core annotations
+
+```dragon
+count:   int              = 42        # 64-bit signed; WRAPS on overflow, no OverflowError
+ratio:   float            = 3.14      # IEEE 754 double
+ok:      bool             = True      # its own type, not an int alias
+label:   str              = "Dragon"  # immutable Unicode, len() counts code points
+data:    bytes            = b"\x00"   # immutable byte sequence; b[i] is an int 0-255
+ints:    list[int]        = [1, 2, 3]
+prices:  dict[str, float] = {"pen": 1.5}
+pair:    tuple[int, str]  = (1, "x")
+tags:    set[str]         = {"a", "b"}
+maybe:   int | None       = none
+either:  int | str        = 42
+anything: Any             = 42
+f:       Callable[[int], int]         # a function value; [] arg list, then return
+```
+
+Type conversions are explicit: `int(x)`, `float(x)`, `str(x)`, `bool(x)`.
+`int(s)`/`float(s)` raise `ValueError` on a bad string. `/` on ints yields
+`float`; storing it into an `int` is a compile error (use `//`).
+
+Type aliases: `type UserId = int` is a zero-cost compile-time synonym.
+`type Handler = Callable[[Request], Response]` is the idiom for long signatures.
+
+### Containers are monomorphized (layout is part of the type)
+
+`list[int]` is a flat `int64[]`; `list[float]` a `double[]`; `list[str]` an array
+of refcounted pointers; `list[Any]` an array of 16-byte boxes. These are different
+memory layouts, so a NAMED concrete list never converts to `list[Any]` (or back)
+by annotation; the compiler refuses the assignment and the call-site. Cross the
+boundary with a fresh literal (built in the right layout from birth) or an
+element-wise copy. A bare `Any` parameter, by contrast, accepts ANY list and
+dispatches per element at runtime; that is the right shape for "takes any list".
+
+Empty/mixed literals cannot infer an element type: `ys: list[int] = []` (annotate)
+or `zs: list[Any] = [1, "a"]` (opt into the box explicitly).
+
+Dicts are monomorphic in their key type: `dict[str, V]` and `dict[int, V]` are
+distinct; one dict cannot hold both `1` and `"1"` as keys. Integer keys hash as
+native `i64`.
+
+### `T | None` is free; `Union` is a box; narrowing recovers the type
+
+- For pointer-shaped `T` (str, bytes, containers, instances), `T | None` compiles
+  to one nullable pointer: zero cost. Test with `is none` / `is not none`.
+- `Optional[T]` (from `from typing import Optional`) is the same type; the bare
+  `T | None` form is canonical and needs no import.
+- A union of two non-None types (`int | str`) is a 16-byte tagged box. You cannot
+  use it as either type directly; you narrow first:
+
+```dragon
+def describe(x: int | str) -> str {
+    if isinstance(x, int) {
+        return f"number: {x + 1}"       # x is a native int here
+    } else {
+        return f"text: {x.upper()}"     # else-branch narrows to the complement
+    }
+}
+```
+
+- `match` narrows the same way, and DOES narrow the subject inside the case body:
+
+```dragon
+match v {                       # v: int | str
+    case int() { return f"num {v + 1}" }
+    case str() { return f"text {v.upper()}" }
+}
+```
+
+- `isinstance` is the narrowing tool: it narrows union-typed and Any-typed
+  values by runtime tag, and it walks class hierarchies (`isinstance(dog,
+  Animal)` is True). Use it to narrow unions/Any and to test class ancestry,
+  not to interrogate values whose type is already statically known (the
+  compiler already knows; there is nothing to ask).
+
+### `Any`: the bounded dynamic tier
+
+`Any` holds anything (16-byte box), reassignable across types. To do anything
+with it you must narrow via `isinstance` (or `match`). The headline use is
+`dict[str, Any]` for genuinely heterogeneous data (JSON-shaped). Never widen a
+knowable type to `Any`: a spurious `Any` boxes, allocates, and hides bugs; in
+this codebase it is treated as a defect. There is no `type(x)`-returning-class,
+no `getattr`, no attribute discovery; `type(x)` returns the type NAME as a `str`
+(e.g. `"int"`).
+
+### `TypedDict`: a dict with a fixed schema
+
+```dragon
+class User(TypedDict) {
+    name: str
+    age:  int
+}
+u: User = User(name="Ada", age=36)
+print(u.name)      # dot access, typed str
+print(u["age"])    # subscript also works
+```
+
+A TypedDict IS a dict underneath (spread, `.items()`, passing where a dict is
+expected all work); use it when the key set is fixed, a plain `dict[K, V]` when
+keys are dynamic. `list[User]` composes; `users[0].name` is typed.
+
+### FFI boundary types
+
+`intc` lowers to C's 32-bit `int`; use it ONLY in `extern "C"` signatures (it
+widens back to `int` in Dragon code). `ptr` is a raw `void*` for opaque handles;
+the GC never touches a bare `ptr`. See section 25.
+
+## 8. Operators
+
+| Category | Operators | Notes |
+|---|---|---|
+| Arithmetic | `+ - * / // % **`, unary `-` `+` | `/` ALWAYS yields float; `//` floors toward -inf; `%` takes the divisor's sign; `**` right-assoc, `-2 ** 2` is `-4`; int wraps silently at 64 bits |
+| Comparison | `== != < > <= >=` | chainable: `1 < x < 10` (middle evaluated once) |
+| Boolean | `and` `or` `not` | short-circuit; `and`/`or` evaluate to the OPERAND they stop on, not a bool |
+| Bitwise | `& \| ^ ~ << >>` | ints only; C precedence (`&` > `^` > `\|`) |
+| Membership | `in` / `not in` | value membership; substring test on str (the only way, no `.contains()`) |
+| Identity | `is` / `is not` | for `none` tests |
+| Bind-in-expr | `:=` | walrus; parenthesize inside larger expressions |
+| Ternary | `x if cond else y` | right-associative |
+| Augmented | `+= -= *= /= //= %= **= &= \|= ^= <<= >>=` | statement level |
+
+`+` also concatenates str/list/bytes; `*` repeats str/list (`[0] * 4`). Set
+algebra works both as operators and methods: `a | b`, `a & b`, `a - b`,
+`a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.symmetric_difference(b)`;
+`< <= > >=` on sets test (proper) subset/superset.
+
+`and`/`or` operand-typing: both operands same type -> that type; int with float
+promotes to float; unrelated types produce the union you must annotate
+(`either: int | str = 0 or "x"`). `or` drops `None` from the left type, so
+`label: str = lookup(k) or "default"` needs no narrowing. Falsy values: `0`,
+`0.0`, `False`, `""`, empty list/dict/set, `None`.
+
+`@` is ONLY the decorator sigil (no matmul). `not` binds looser than comparison
+(`not a == b` is `not (a == b)`).
+
+Precedence, loosest to tightest: ternary; `or`; `and`; `not`; comparisons
+(chained); `|`; `^`; `&`; `<< >>`; `+ -`; `* / // %`; unary `- + ~`; `**`;
+call/subscript/attribute.
+
+## 9. Control flow
+
+- `if` / `elif` / `else`. Conditions must be `bool`: truthiness is NOT automatic
+  in statement conditions (`if 0 { }` is a type error; write `if n != 0`).
+- `while cond { }`, `for x in iterable { }`, `break`, `continue`, and the Python
+  `else` clause on loops (runs only when no `break` fired).
+- `for` iterates lists, tuples, sets, dicts (keys, insertion order), strings
+  (one-char strings), bytes (each byte as an `int`), generators, `range`, and
+  any `__iter__`/`__next__` object. `for k, v in d.items()` unpacks;
+  `enumerate(xs)` and `zip(a, b)` drive loops.
+- `pass` is the explicit empty statement.
+
+### `match` (statement)
+
+```dragon
+match value {
+    case 0 { print("zero") }
+    case "" { print("empty") }
+    case int() { print("some other int") }        # type test; narrows the subject in the body
+    case int() | bool() { print("numberish") }    # OR pattern
+    case [a, b] { print(a + b) }                  # sequence (list or tuple form)
+    case Point(x, y) { print(f"{x},{y}") }        # class positional destructuring (works)
+    case n if n > 100 { print("big") }            # capture + guard
+    case _ { print("anything else") }             # wildcard
+}
+```
+
+Verified: literals, type tests (runtime tag for Union/Any subjects; non-null
+check for `Class | None`; subclass matches its base), OR patterns, sequence
+patterns, capture, wildcard, guards (`case x if cond`), and class positional
+destructuring `case Point(x, y)` all work. NOT supported: dict/mapping patterns
+(`case {"a": v}` is a parse error). `.dr` arms use braces with no colon.
+First match wins; no fall-through.
+
+## 10. Strings, f-strings, bytes
+
+`str` is immutable Unicode; `len`, indexing, and slicing work in code points
+(`len("café")` is 4). Single, double, and triple quotes; the usual escapes.
+Indexing yields a one-character `str`; negative indices and `[a:b]`, `[a:b:c]`,
+`[::-1]` slices as in Python.
+
+Method set (Python-shaped): `upper lower title strip lstrip rstrip find rfind
+count startswith endswith split rsplit splitlines join partition replace rjust
+ljust center zfill isalpha isdigit isalnum isspace isupper islower encode
+capitalize`. `find` returns `-1` for no match. `split()` with no argument splits
+on whitespace runs. `s.encode("utf-8")` <-> `b.decode("utf-8")`; codecs are
+deliberately just `utf-8` (aliases `utf8`, `u8`) and `ascii` (`us-ascii`), other
+names raise `LookupError`; pass `"replace"` as error handler to avoid raising
+(`UnicodeDecodeError`/`UnicodeEncodeError` otherwise).
+
+F-strings implement Python's full format mini-language:
+`{value:[[fill]align][sign][#][0][width][grouping][.precision][type]}`.
+
+```dragon
+f"{pi:.2f}"    # 3.14        f"{n:08b}"   # 11111111    f"{n:#x}"   # 0xff
+f"{x:*^6}"     # **42**      f"{big:,}"   # 1,234,567   f"{r:.1%}"  # 25.0%
+```
+
+Quote rule: inside a double-quoted f-string use single-quoted dict keys
+(`f"{ages['Ada']}"`) or dot access (`f"{ages.Ada}"`).
+
+`bytes`: literals `b"..."`/`b"\xde\xad"`; `len` is byte count; `b[i]` is an int;
+slices are bytes; `+` concatenates; `.hex()` and `bytes.fromhex(s)` round-trip.
+Keep text as `str`; drop to `bytes` only at the I/O edge.
+
+## 11. Collections
+
+### list[T]
+
+`append extend insert remove pop index count sort reverse clear copy`; slicing,
+`+` concatenation, `[v] * n` prefill, `in` by value, nesting with full type
+checking. `sort`/`reverse` in place; `sorted(xs)`/`reversed(xs)` return new
+lists; `pop()` removes and returns the last element.
+
+### dict[K, V]
+
+Insertion-ordered. `d[k]` and dot-access `d.key` (sugar for string keys that are
+identifiers) both raise `KeyError` when absent; `get(k)` returns `V | None`
+(narrow it, or use `or` for a default); `get(k, default)` returns plain `V`.
+`setdefault(k, default)` requires the default (the one-arg Python form would
+smuggle in None; if you need absence, type the value `V | None`); for heap values
+the inserted default IS the returned object, so
+`groups.setdefault(k, []).append(x)` buckets correctly. Also: `pop popitem update
+clear keys values items`, `del d[k]`, `in` tests keys, iteration yields keys.
+`keys()`/`values()` return lists.
+
+### set[T], tuple, deque
+
+Set literals `{1, 2}`; `{}` is an empty DICT, the empty set is `set()`; `set(xs)`
+dedupes a list. `add remove discard pop union intersection difference
+symmetric_difference issubset issuperset` plus the operator forms (section 8).
+
+Tuples are fixed-size, heterogeneous, immutable: `t: tuple[int, str] = (1, "a")`;
+index or unpack (`x, y = point`). The natural multi-value return type.
+
+`from collections import deque`: `appendleft append popleft pop`, O(1) both ends.
+(Stdlib, listed here because it completes the container story.)
+
+### Comprehensions
+
+```dragon
+squares: list[int]      = [n * n for n in range(10) if n % 2 == 0]
+flat:    list[int]      = [x for row in rows for x in row]
+lengths: dict[str, int] = {w: len(w) for w in words}
+uniq:    set[int]       = {n % 4 for n in nums}
+```
+
+A comprehension is an expression; it fills a monomorphized container directly
+(no boxing) and goes anywhere a value goes.
+
+## 12. Functions
+
+```dragon
+def greet(name: str) -> str {
+    return f"Hello, {name}!"
+}
+```
+
+- Every parameter and the return type are annotated. A function with no result
+  is `-> None`; a bare `return` (exit early) is legal only in `-> None`
+  functions.
+- Multiple values: return a `tuple[...]` and unpack at the call site.
+- Defaults: `def connect(host: str = "localhost", port: int = 5432)`. A default
+  may be any expression of the parameter type and is re-evaluated ON EACH CALL
+  that omits it, so Python's shared-mutable-default trap does not exist.
+- Keyword calls: any parameter may be passed by name, reordered, or skipped.
+  Unknown keyword names and duplicate positional+keyword bindings are compile
+  errors.
+- Variadics REQUIRE the element type: `def f(*nums: int)` (a `list[int]` in the
+  body), `def g(**opts: str)` (a `dict[str, str]` in the body). An unannotated
+  `*args` is a compile error. Order: fixed params, `*args`, `**kwargs`.
+- Call-site spread: `f(*list_or_tuple)`, `f(**dict)`, mixes allowed
+  (`f(1, *[2, 3])`); a spread feeds a variadic (`inner(*nums)` relays).
+- Functions are first-class values typed `Callable[[ArgTs], R]`
+  (`Callable[[], None]` for no-arg). Store them in fields, pass them, return
+  them, put them in `dict[str, Callable[...]]` dispatch tables.
+
+### Lambdas and closures
+
+```dragon
+double: Callable[[int], int] = lambda (n: int) -> int { return n * 2 }
+```
+
+Lambda syntax is a typed parameter list, `->` return type, and a BRACED BODY
+(full statements allowed, not just one expression). The enclosing binding must
+carry the `Callable` type. A non-capturing lambda compiles to a bare function
+pointer; a capturing one costs one small environment allocation.
+
+Closures capture enclosing locals by reference. Reading needs nothing; REBINDING
+needs `nonlocal` (compile error otherwise). Closures escape correctly: return
+them, store them, call them inline (`make_adder(5)(10)`).
+
+## 13. Classes
+
+```dragon
+class Counter {
+    total: int = 0                  # per-instance field with default
+    def(start: int) {               # THE CONSTRUCTOR: a nameless def
+        self.total = start
+    }
+    def bump() -> None {            # method: self is implicit, not declared
+        self.total = self.total + 1
+    }
+}
+c: Counter = Counter(10)
+```
+
+- **The constructor is `def()`, not `__init__`** in `.dr` (mode-enforced both
+  ways; `.py` files use `def __init__(self, ...)`).
+- **`self` is implicit in `.dr` methods**: never in the parameter list, always
+  available in the body.
+- **The field set is fixed at compile time.** Fields are declared (typed,
+  optional default) in the class body. Accessing an undeclared member is a
+  compile error, not a runtime AttributeError. No runtime attribute creation.
+- Non-static field defaults are evaluated FRESH PER INSTANCE (`items: list[str]
+  = []` gives every instance its own list; Python's shared class-body mutable
+  default trap does not exist).
+- Every field without a default must be definitely assigned in the constructor
+  (compile-checked, flow-aware).
+- A class with no constructor is constructed with NO arguments (fields keep
+  defaults); passing arguments is a compile error. Exceptions to this rule are
+  the synthesized families: `@dataclass` (field constructor), `TypedDict` (named
+  fields), `NamedTuple` (positional fields), exception subclasses (a message),
+  and `Enum` (member lookup by value).
+- Classes are compile-time entities, not values: you cannot bind a class and
+  construct through the binding. But `type` exists as an annotation for
+  class-decorator plumbing (`def reg(cls: type) -> type`, `registry: list[type]`)
+  and as the parameter type of `assertRaises(exc_type: type, ...)`.
+
+### Class-level state and statics
+
+```dragon
+class Circle {
+    static total: int = 0             # one value, shared, reached as Circle.total
+    static const PI: float = 3.14159  # class constant
+    r: float = 0.0
+
+    def(r: float) { self.r = r }
+
+    static def unit() -> Circle {     # factory / alternate constructor
+        return Circle(1.0)
+    }
+    @staticmethod
+    def area_of(r: float) -> float {  # same thing, Python spelling
+        return Circle.PI * r * r
+    }
+}
+```
+
+`static def` and `@staticmethod` are equivalent (no `self`, called on the
+class). `@classmethod` exists and is called on the class (`Widget.create()`);
+Dragon resolves classes statically so it is effectively a static factory
+(a `@classmethod` GENERATOR is rejected; `async` on `@classmethod` is refused).
+
+### Properties
+
+```dragon
+class Temp {
+    _c: float = 0.0
+    @property
+    def celsius() -> float { return self._c }
+    @celsius.setter
+    def celsius(v: float) -> None { self._c = v }
+}
+t.celsius = 25.0      # setter; reading t.celsius calls the getter, no parens
+```
+
+### Inheritance and dispatch
+
+```dragon
+class Dog(Animal) {                  # single inheritance
+    def(name: str, breed: str) {
+        super(name)                  # delegate to Animal's constructor (opt-in!)
+        self.breed = breed
+    }
+    def speak() -> str {             # override
+        return self.name + " barks"
+    }
+}
+```
+
+- `super(args)` calls the parent constructor; `super.method()` calls a parent
+  method (`.py`: `super().__init__(...)`, `super().method()`).
+- Constructor chaining is OPT-IN: if a subclass constructor never calls
+  `super(...)`, the parent constructor does not run. A subclass with no
+  constructor is constructed with no arguments (it does not inherit the parent
+  signature).
+- Virtual dispatch is Python-semantics at C++ cost: a base-typed variable calls
+  the most-derived override through one vtable pointer; calls the compiler can
+  prove monomorphic are direct. `list[Shape]` of mixed subclasses dispatches per
+  element. Prefer overriding over `isinstance` chains.
+- `isinstance(obj, Base)` walks the ancestor chain.
+
+### Dunder methods (one parameter shorter than Python: self is implicit)
+
+| To support | Define |
+|---|---|
+| `print(x)` / `str(x)` / f-strings | `__str__() -> str` (default prints `<Class instance>`) |
+| `repr(x)` | `__repr__() -> str` |
+| `==` / `!=` | `__eq__(other: T) -> bool` (`!=` derives) |
+| `< <= > >=` | `__lt__`, `__le__`, `__gt__`, `__ge__` |
+| `+ - *` etc. | `__add__(o: T) -> R`, `__sub__`, `__mul__`, ... |
+| `len(x)` | `__len__() -> int` |
+| `x[i]` / `x[i] = v` | `__getitem__(i) -> T` / `__setitem__(i, v)` |
+| `v in x` | `__contains__(v) -> bool` |
+| `for` loops | `__iter__()` + `__next__()` (raise `StopIteration()`) |
+| `with` | `__enter__() -> T` + `__exit__() -> None` (see section 19) |
+| conversions | `__int__`, `__float__` |
+
+### Member privacy (compile-time enforced, zero runtime cost)
+
+| Prefix | Class member | Module-level name |
+|---|---|---|
+| `name` | public | public |
+| `_name` | protected: declaring class, subclasses, same package | package-internal |
+| `__name` | private: the declaring class ONLY (not subclasses) | file-private |
+| `__name__` | reserved protocol namespace, public | reserved metadata, public |
+
+Violations are compile errors naming the tier. Defining an unrecognized `__x__`
+is a compile error (you cannot fake a reserved name).
+
+### Synthesized class families
+
+```dragon
+@dataclass
+class Config {
+    name: str
+    timeout: int = 30
+}
+c: Config = Config("server")        # field-order constructor, defaults fill
+# ==/!= compare by fields; repr(c) formats fields; a user def() overrides synthesis
+
+class Vec(NamedTuple) {
+    x: int
+    y: int
+}
+v: Vec = Vec(1, 2)                  # positional construction; v.x, repr work
+
+from enum import Enum, IntEnum, StrEnum, auto
+class Color(Enum) {
+    RED:   int = 1
+    GREEN: int = auto()             # auto() numbers from the previous value
+}
+Color.RED.name                      # "RED"
+Color.GREEN.value                   # 2
+Color(2)                            # member lookup by value; ValueError if absent
+for c in Color { ... }              # iterates members in definition order
+str(Color.RED)                      # "Color.RED"
+# Enum compares by identity; IntEnum members compare/order with ints
+# (Priority.LOW == 1); StrEnum members compare with strs (FileMode.READ == "r").
+
+enum Token { LPAREN, RPAREN, COMMA }   # native enum: fast int constants
+Token.RPAREN                            # 1 (0-based)
+```
+
+### Custom exceptions
+
+```dragon
+class AppError(Exception) {
+    def(message: str) { self.message = message }
+}
+class NotFoundError(AppError) {
+    def(message: str) { self.message = message }
+}
+```
+
+Subclass `Exception` (or any tree type); catching a base catches the subtypes.
+Store structured data in fields and read `e.message` / `e.status` in handlers;
+`str(e)` always yields printable text.
+
+## 14. Generics (monomorphized, PEP 695 syntax)
+
+```dragon
+def first[T](items: list[T]) -> T { return items[0] }
+
+class Box[T] {
+    item: T
+    def(x: T) { self.item = x }
+    def get() -> T { return self.item }
+    def labeled[U](tag: U) -> str { return f"{tag}={self.item}" }   # generic method
+}
+
+class Pair[A, B] { ... }                      # multiple parameters
+
+def describe[T: Animal](x: T) -> str {        # class bound: methods of the bound usable,
+    return x.speak()                          # dispatches to the concrete override
+}
+def show[T: Amazing](x: T) -> str { ... }     # contract bound: checked structurally at stamp
+def both[T: {Amazing, Speaker}](x: T) { ... } # braced set: must satisfy all
+```
+
+- Type arguments infer from the call (`first([10])` solves `T = int`); pin
+  explicitly when ambiguous: `first[int](xs)`.
+- Each distinct instantiation is stamped as separate native code (visible as
+  `first[int]`, `first[str]` symbols). No boxing, no runtime dispatch, no
+  erasure.
+- **Cross-module generics work**: define a generic function or class in one
+  module, import and instantiate it in another.
+- Current limits (clean compile errors, never miscompiles):
+  - Subclassing a generic instantiation (`class L(Box[str])`) is not supported
+    yet.
+  - A generic function whose parameter is itself a generic instantiation
+    (`def swap[A, B](p: Pair[A, B])`) cannot infer its arguments from the call;
+    pin them explicitly (`swap[int, str](p)`).
+
+## 15. Contracts (structural shape, written down)
+
+```dragon
+type Amazing {
+    def amazing_method() -> str
+    def rating() -> int
+}
+type Performer(Amazing, Speaker) {}      # composition unions the signature sets
+```
+
+A contract is a block of bodiless method signatures: no fields, no constructors,
+no bodies, no parameter defaults, no empty contracts (each is a compile error).
+Conformance is always DECLARED, never inferred from a matching method set:
+
+```dragon
+class Dog(Animal) -> Amazing, Speaker { ... }        # producer promise, checked on the class
+a: Amazing = robot as Amazing                        # consumer cast, checked at the use site
+m: {Amazing, Speaker} = robot as {Amazing, Speaker}  # braced set where a comma would mislead
+def duo(x: {Amazing, Speaker}) -> str { ... }        # multi-contract parameter
+pack: list[Amazing] = [dog, robot as Amazing]
+```
+
+`as` is compile-time only and free (same pointer in and out). A call through a
+contract value is one vtable load (the conforming set is closed at whole-program
+compile, so there is no Go-style runtime interface conversion cost). A class
+with the right methods but no promise/cast is refused with an error offering
+both remedies.
+
+Current limits:
+- Contracts move upward only: there is no narrowing from a contract-typed
+  value back down to its concrete class.
+- Keyword arguments on a contract-typed call are refused ("pass positionally").
+- Parameterized contracts (`type Iterable[T]`) do not exist; contract BOUNDS on
+  generics (`[T: Amazing]`) are the workhorse and monomorphize to direct calls.
+
+## 16. Decorators
+
+`@dec` above a `def` means `f = dec(f)`, run once at definition time. All of the
+following are verified working:
+
+```dragon
+# Identity/registration decorator
+commands: list[Callable[[], None]] = []
+def command(f: Callable[[], None]) -> Callable[[], None] {
+    commands.append(f)
+    return f
+}
+@command
+def deploy() -> None { print("deploying") }
+
+# WRAPPING decorator (returns a new closure around the original)
+def timed(f: Callable[[], None]) -> Callable[[], None] {
+    return lambda () -> None {
+        print("before")
+        f()
+        print("after")
+    }
+}
+
+# Decorator FACTORY (parameterized decorator)
+def route(path: str) -> Callable[[Callable[[], None]], Callable[[], None]] {
+    return lambda (f: Callable[[], None]) -> Callable[[], None] {
+        print(f"registered {path}")
+        return f
+    }
+}
+@route("/home")
+def home() -> None { ... }
+
+# Class decorator (takes and returns `type`); stacks with @dataclass
+def reg(cls: type) -> type {
+    registry.append(cls)
+    return cls
+}
+@reg
+@dataclass
+class Item { name: str }
+```
+
+A decorator's parameter/return may be spelled as the precise `Callable[...]` or
+as bare `ptr` when the shape does not matter. Method decorators: `@property`,
+`@name.setter`, `@staticmethod`, `@classmethod` (section 13).
+
+## 17. Iterators and generators
+
+A function containing `yield` is a generator; calling it returns a lazy object
+consumed by `for`:
+
+```dragon
+def count_up(limit: int) {          # note: no return annotation on generators
+    i: int = 0
+    while i < limit {
+        yield i
+        i = i + 1
+    }
+}
+for v in count_up(4) { print(v) }   # 0 1 2 3
+```
+
+- State persists across yields; `yield` accepts any expression; generators work
+  as methods (instance and `@staticmethod`), not as `@classmethod`.
+- There is NO `next()` builtin; the supported consumption is `for`. A generator
+  object can only be bound to an `Any`-typed variable; idiomatic use iterates
+  the call directly.
+- Implement `__iter__() -> Self` and `__next__() -> T` (raising
+  `StopIteration()` when done) to make any class for-loopable.
+
+## 18. Exceptions
+
+```dragon
+try {
+    n: int = int(s)
+} except ValueError as e {          # `catch` is an accepted synonym for `except`
+    print("bad: " + str(e))
+} except (TypeError, KeyError) as e {   # tuple groups types
+    ...
+} except Exception as e {           # broad net last; matching is hierarchy-based
+    ...
+} else {
+    print("parsed")                 # runs only when the try did not raise
+} finally {
+    print("done")                   # always runs
+}
+```
+
+- `raise ValueError("message")` throws; a bare `raise` inside a handler
+  re-throws. `raise X from Y` is REFUSED at compile time (no traceback exists to
+  chain; the error says to raise without `from`).
+- Built-in hierarchy (abridged): `BaseException > Exception >` `ArithmeticError`
+  (`ZeroDivisionError`, `OverflowError`, `FloatingPointError`), `LookupError`
+  (`IndexError`, `KeyError`), `OSError` (`FileNotFoundError`, `PermissionError`,
+  `ConnectionError`...), `RuntimeError` (`NotImplementedError`,
+  `RecursionError`), `TypeError`, `ValueError` (`UnicodeError`), `MemoryError`,
+  `StopIteration`, `AssertionError`.
+- Runtime checks raise catchably: `10 // 0` -> ZeroDivisionError, bad index ->
+  IndexError, `d[missing]` -> KeyError, failed allocation -> MemoryError (so a
+  server can catch OOM per request and keep serving).
+- `assert cond, "msg"` raises a catchable `AssertionError`; uncaught it exits 1
+  printing `Unhandled exception: msg`.
+- There is no traceback capture (no stack-frame list, no `traceback` module
+  render); exceptions are caught and inspected via `except E as e`.
+- Exceptions lower to setjmp/longjmp: the throwing path pays, the normal path is
+  free. Guarding (`d.get(k, dflt)`, `if b != 0`) still beats catching when
+  absence is a normal outcome.
+
+## 19. Context managers (`with`)
+
+```dragon
+class Resource {
+    def() {}
+    def __enter__() -> Resource { print("acquire")  return self }
+    def __exit__() -> None { print("release") }
+}
+with Resource() as r {
+    ...                             # __exit__ runs on normal exit AND on raise
+}
+```
+
+`__exit__` takes no arguments and returns nothing: it is a guaranteed cleanup
+hook, not an exception handler. It cannot see or suppress the in-flight
+exception; handle errors with `try`/`except` around the `with`.
+Locks are context managers: `with lock { ... }` acquires/releases exception-safely.
+A `defer` registered inside a `with` body runs before `__exit__`.
+
+## 20. `defer`: scope-exit calls
+
+`fire f(x)` runs f NOW on another green thread; `defer f(x)` runs f LATER on
+this thread, when the current BLOCK exits, on every exit path (fall-through,
+`return`, `break`, `continue`, exception unwind).
+
+```dragon
+def load_index(path: str) -> Index {
+    f: Reader = open(path)
+    defer f.close()                 # runs on return, raise, every exit
+    if bad { raise CorruptionError("bad magic") }   # close still runs
+    return parse_index(f)           # close runs after the return value is built
+}
+```
+
+- **Block-scoped, not function-scoped** (deliberately not Go): a defer in an
+  `if` body runs at that `if`'s closing brace; a defer in a loop body runs at
+  the end of EVERY iteration. Every defer site is known at compile time and the
+  calls are emitted into each exit edge: no runtime defer stack, no allocation.
+- Within one scope, defers run LIFO, and before the scope's own memory cleanup.
+- **Arguments are snapshots**: arguments (and a method defer's receiver)
+  evaluate AT THE DEFER STATEMENT; only the call runs at exit. `defer log(i)`
+  then `i = 9` still logs the old value. To see the latest state, defer a call
+  that reads a borrowed container (`defer report(stats)`); mutations to the
+  SAME object are visible, rebinding the NAME is not.
+- Ownership composes: `defer archive(own log)` moves at the statement (later
+  uses are use-after-move errors); `defer send(dub items)` snapshots a copy. A
+  plain borrowed argument is PINNED: you may read/mutate it, but `own`-moving or
+  `del`-ing it while a defer holds it is a compile error.
+- Defers run during unwind, before the handler sees the exception. If NO handler
+  exists and the process dies on an uncaught exception, pending defers are
+  skipped (defer is a scope tool, not a shutdown hook).
+- Current limits (loud compile errors): no `defer` at module top level
+  ("'defer' outside function"); the operand must BE a direct function/method
+  call (bare names refuse; computed/closure callees refuse); no keyword
+  arguments in the deferred call (pass positionally); `Any`/union-typed
+  arguments refuse (annotate concretely); no `defer fire f(x)` fusion.
+
+## 21. Ownership: `del`, `own`, `dub`
+
+All three resolve at compile time; every misuse is a line-numbered compile
+error, never a runtime behavior change. A program using none of them compiles
+exactly as before. One rule underneath: every heap value has exactly one OWNER;
+every other name is a borrow that must not outlive it.
+
+Binding states: `Owned` (sole owner) -> `Owned*` (still sole owner but aliased/
+escaped; del and move refuse, naming the escape site) -> `Moved` / `Deleted`
+(name is dead; any use is an error naming where it died). Fresh values (literals,
+constructors, concat results, `dub` copies) are Owned; element/field reads and
+plain parameters are Borrowed. A plain call argument stays a borrow (calls do
+not consume).
+
+### `del x` (proven early free)
+
+Frees the value ON THAT LINE, compiling only when the compiler proves `x` is the
+sole owner (nothing aliased, stored, or captured it; otherwise the error names
+the escape). Use it to cut peak memory and as a lifetime probe: every refusal
+reveals an alias you did not know about. Debug builds lower it to
+`assert(rc == 1); free` (a leak trips loudly); release builds emit exactly the
+scope-exit release, earlier. v1 scope: LOCALS inside functions only; `del` or
+`own`-moves of module-level bindings refuse ("v1: locals only"). Fields cannot
+be `del`-ed (they release when their owner dies). `del d["key"]` (container
+entry) is a separate, ordinary operation.
+
+### `own` (sole ownership)
+
+- **On a field**: `own _ctx: TlsCtx` makes the instance the sole owner; the
+  generated cleanup releases the field when the instance dies (depth-first
+  through owned chains; no destructor methods, no finalizers). MANDATORY for
+  raw resource types: a plain `Lock` field is a compile error ("must be declared
+  own"), and containers of raw resources refuse (wrap the resource in a class).
+  `own` fields form a tree, so they are excluded from cycle-GC tracking.
+- **On a collection-typed field** it seals BOTH edges: a borrow cannot be stored
+  in, and the field cannot be returned/aliased out (`return self.headers` is a
+  compile error; expose methods, or `return dub self.headers`). `str`/`bytes`/
+  `tuple`/`ptr` fields are not sealed (immutable payloads are indistinguishable
+  from copies; `ptr` is already the on-your-own type).
+- **On a parameter AND at the call site** (both ends must say it):
+  `def set(own d: dict[str, str])` + `cfg.set(own headers)`. After the call the
+  source name is dead. `cfg.set(dub headers)` also satisfies an `own` parameter
+  (hands over a fresh copy, keeps yours). An UNMARKED binding at an own
+  parameter is an error; `own` at a borrowing parameter is an error; a nameless
+  fresh temp (`cfg.set({...})`) needs no keyword. Keyword position works:
+  `cfg.set(d=own headers)`.
+- **On returns**: inference reads the body; a function whose every return mints
+  a fresh value hands the caller sole ownership. `-> own T` pins the promise
+  (checked, never inserts a copy); returning a still-held value from a `-> own`
+  function is an error. `return own s` is refused (a return already hands over
+  its reference). Moving/`del`-ing a call result the callee still owns is an
+  error (declare the callee `-> own` or `dub`).
+
+### `dub` (the priced copy)
+
+The only way to mint a second independent owner; the cost sits on the line you
+wrote (grep `dub` to find every copy). Deep copy for list/dict/set (recursively,
+if every element is dubable); trivial for scalars; a free retain for str/bytes/
+tuple (immutable, indistinguishable from a copy). Non-dubable: `Lock`
+("a raw OS mutex cannot be copied"), handle-holding classes (composition rule:
+a class is dubable iff every field is), Task handles. `dub` copies a binding or
+a field, not an element (`dub xs[0]` refuses).
+
+### The three MANDATORY places
+
+1. `own` on a raw-resource field (E15/E16): without a static owner a Lock leaks.
+2. `del` to close a conditional move (E9): if one branch moves a value, every
+   path must consume it (move, or `del` where there is nothing to move into);
+   there are no runtime drop flags. Loops: a binding defined outside a loop
+   cannot be consumed inside it (E10); define it inside the loop.
+3. `dub` to iterate a container the loop body mutates (E17):
+   `for x in dub xs { xs.remove(x) }`. Mutating the iterated container without
+   the snapshot is a compile error (silent skipping refused). Works identically
+   for fields (`for n in dub self.names`).
+
+### The fire boundary and the task result
+
+Every heap value crossing INTO a green thread goes through one of five doors,
+else compile error E12 at the fire line:
+
+```dragon
+fire handle(own req)      # 1 moved: the thread is sole owner; req dead here; NON-ATOMIC refcounts by proof
+fire tally(dub counts)    # 2 copied: the thread gets its own
+fire banner(GREETING)     # 3 immortal const string literal
+fire record(router)       # 4 internally-locked type (own Lock field guards its storage)
+fire read_only(counts)    # 5 shared read-only: compiles ONLY if the callee provably never writes it
+```
+
+A plain `fire f(x)` that compiles is PROOF `f` only reads `x`; a `dub` at a fire
+site is a visible admission a copy was needed.
+
+Coming OUT: the result slot is an `own` field of the Task. `await t` / `t.join()`
+MOVE the result out exactly once (a second await/join is an error). An abandoned
+bound task detaches at scope exit and its unclaimed result is freed with the
+task. `del t` (inside a function) is the honest spelling of fire-and-forget for
+a held handle. A bare async call in statement position whose Task nobody binds
+is a compile error ("silently discarded; bind it, then await, join, or del
+it"); `fire fn()` in statement position stays legal (the keyword IS the visible
+detach). `dub t` on a task refuses (a second joiner would race the move).
+
+### Ownership error codes
+
+E1 use-after-move, E2 use-after-del, E3 del of a field, E4 del/move of a borrow,
+E5 del/move of an escaped value (names the escape site), E7 del/move of a
+closure-captured binding, E8 storing a borrow into an own field, E9 conditional
+move (consume on every path or none), E10 move inside a loop of an outer
+binding, E11 dub of a non-dubable type, E12 unproven value crossing a fire
+boundary, E13 plain call to an own parameter, E14 own at a borrowing parameter,
+E15 raw-resource field without own, E16 raw resource as container element, E17
+mutating a container while iterating it, E18 del/move of a call result the
+callee still owns, E19 a `-> own` function returning a still-held value, E20
+`own` on a returned expression, E21 returning an own field.
+
+## 22. Concurrency (colorless: no function coloring, ever)
+
+Three tiers share one scheduler and one suspension rule: a pause is visible at
+the call site, but never changes a function's signature.
+
+| Tier | Syntax | Backed by | For |
+|---|---|---|---|
+| Green thread | `fire fn()` / `fire { }` | M:N scheduler (~64KB each; spawn thousands) | tasks, I/O fan-out |
+| Scoped OS thread | `thread { }` | one OS thread, auto-joins at scope exit | CPU bursts |
+| Manual OS thread | `Thread(target=fn)` | one OS thread you start/join | daemons, custom lifecycles |
+
+### `fire` and `Task[T]`
+
+```dragon
+t: Task[int] = fire compute(9)     # the annotation is REQUIRED (a bare = or := binding refuses)
+r: int = t.join()                  # wait and take the result (consumes the task)
+alive: bool = t.is_alive()
+fire log_event("x", 7)             # fire-and-forget a call
+fire { cleanup()  notify() }       # fire-and-forget a block
+```
+
+`t: Task = fire f()` (bare Task) is accepted; the inner type is pinned for you.
+When a green thread does I/O the runtime parks it and runs another. Fan-out is
+several fires, then join each.
+
+### `async def` and `await`
+
+`async def f(...) -> T` changes only the RETURN: calling it yields a `Task[T]`
+running on a green thread. `await` unwraps a Task and is legal in ANY function
+(the caller does not become async; there is no event loop, no `asyncio.run`, one
+Lock/one read of everything):
+
+```dragon
+async def fetch(url: str) -> str { ... }
+
+def show() -> None {               # NOT async, and that is fine
+    data: str = await fetch("https://x.com")   # run and wait
+    t: Task[str] = fetch("...")                # no await: hold the handle
+    later: str = await t
+}
+```
+
+`await` on a non-Task is a compile error. `fire` reads as "run this in
+parallel"; `async`/`await` reads as "this does I/O, pause me here": same
+machinery. Async methods work; `async` on `@classmethod` is refused.
+
+### OS threads
+
+```dragon
+thread {                            # contextual keyword; real OS thread
+    heavy_work()
+}                                   # joined HERE, guaranteed (RAII for threads)
+
+from threading import Thread
+t: Thread = Thread(target=worker)
+t.start()  t.is_alive()  t.join()   # join returns an int status, NOT a value
+```
+
+You can `await` inside a `thread { }` block (a green thread on top of it). Want
+a typed result? That is what `fire`/`Task[T]` is for.
+
+### Synchronization (`from threading import ...`)
+
+All acquire the same way: `acquire()` blocks; `acquire(blocking=False)` tries
+once and returns bool; `acquire(blocking=True, timeout=T)` waits up to T
+seconds. All are context managers (`with lock { ... }` is acquire/release made
+exception-safe). Every primitive holds its OS state in an `own` field and
+releases when its holder dies; each also has an idempotent `destroy()`.
+
+| Primitive | Construct | Key methods | Use |
+|---|---|---|---|
+| `Lock` | `Lock()` | acquire/release/with | mutual exclusion |
+| `RWLock` | `RWLock()` | `acquire()` shared read; `acquire(write=True)` exclusive; with = write | many readers or one writer |
+| `Semaphore` | `Semaphore(n)` | acquire/release | bound concurrency to n |
+| `Barrier` | `Barrier(n)` | `wait()` | rendezvous n threads |
+| `Condition` | `Condition()` | acquire/wait/notify/notify_all/release | wait for a state change |
+| `Event` | `Event()` | set/clear/is_set/wait | broadcast flag |
+
+The idiomatic shape keeps data and its lock together, and the `own` is
+compiler-mandated:
+
+```dragon
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+    def bump() -> None {
+        with self.lock { self.value = self.value + 1 }
+    }
+}
+```
+
+Guarding a module global instead: declare `global counter` in the writer, then
+`with lock { counter = counter + 1 }`.
+
+`from collections.concurrent import ConcurrentList, ConcurrentDict`: minimal
+internally-locked containers (int elements / str->int; method access:
+append/get/set/len/pop). For other shapes, guard a normal container with a Lock.
+
+## 23. Templates and content types (compile-time, zero-cost)
+
+`template { ... }` is raw literal text with two sigils; it compiles to a chain
+of string concatenations (literals in .rodata + your values). No engine, no
+runtime parsing; a typo in `!{naem}` is a compile error.
+
+> `!{expr}` breaks OUT of content into Dragon code.
+> `:{ ... }` breaks BACK into content from inside that code.
+
+```dragon
+greeting: str = template {Hello !{name}, you are !{age}}     # untyped -> plain str
+```
+
+- **Bare `{ }` are literal text** (not an f-string): JSON/CSS/code emit without
+  escaping ceremony. The lexer tracks brace depth; for stray braces `!!}` is a
+  literal `}` and `!!{` a literal `!{` (the only escapes; a bare `!!` is plain
+  text). Unterminated `!{` or invalid Dragon inside it is a compile error.
+- Whitespace/newlines inside the block are preserved verbatim.
+
+### Typed templates auto-escape
+
+`template[HTML] { ... }` escapes every `!{}` through `HTML.escape()` and returns
+the type `HTML`, not `str`: XSS-safe by default, and the compiler refuses a SQL
+value where an HTML page belongs. Unwrap with `.to_str()` (or `str(x)`).
+
+Ship-in types: `HTML`, `CSS`, `XML` (`from html import ...`), `JSON`
+(`from json import JSON`), `SQL` (`from database import SQL`), `URL`
+(`from urllib.parse import URL`).
+
+Splice dispatch inside a typed template: same content type -> inserted RAW (no
+double-escape; this is why components compose); `str` -> escaped; other types ->
+`__str__()` then escaped; `!{x | raw}` -> verbatim (explicit opt-out).
+
+Components and layouts are just functions:
+
+```dragon
+def button(label: str) -> HTML {
+    return template[HTML] { <button>!{label}</button> }
+}
+ui: HTML = template[HTML] { <div>!{button("Save")}</div> }
+```
+
+Logic: full statements inside `!{ }`, `:{ }` to emit markup, nesting allowed,
+content type inherited:
+
+```dragon
+lst: HTML = template[HTML] {<ul>!{ for x in xs { :{<li>!{x}</li>} } }</ul>}
+```
+
+Inline shortcuts: `!{*xs}` spreads a list (empty separator); `!{xs | join(", ")}`.
+Filters: `html`/`sql`/`url` (context escapes), `raw`, `join`/`join(sep)`, or any
+in-scope TOP-LEVEL `(str) -> str` function (`!{title | shout}`); methods do not
+work as filters (wrap `upper` in a function).
+
+`template[HTML]("page.html")` is a compile-time include: the file is read during
+compilation, its `!{}` slots compile against the surrounding scope, zero runtime
+I/O. Path must be a string literal, relative to the source file.
+
+Custom content types: subclass `Template`, give it a `@staticmethod escape(s:
+str) -> str`, then `template[SHELL] { ... }` works like the built-ins.
+
+### `SQL` and `URL` are structural, not textual
+
+In `template[SQL]`, `!{}` does NOT paste text: it becomes a bound parameter
+(`$$0`, `$$1`, ...) with the value carried alongside, so injection is impossible
+by construction. Limits: each `!{}` must be a single bound expression (no
+`!{ for }` / `!{ if }` blocks in SQL), and splicing one SQL value into another
+is a compile error. In `template[URL]`, `!{}` percent-encodes the query-string
+characters (space, `&`, `=`, `?`, `#`, `+`); for full RFC 3986 encoding use
+`!{v | url}` or `urllib.parse.quote(v, "")`.
+
+Repo rule: never hand-build HTML/JSON/SQL by string concatenation; use the
+content-type system (parameterized `db.prepare(sql)` with `?` binds is fine).
+
+## 24. Modules, packages, eggs
+
+`import` is a compile-time directive (no runtime module objects, no
+`sys.modules`, no per-import cost):
+
+```dragon
+import math                    # math.gcd(12, 18)
+from math import gcd           # gcd(12, 18)
+import math as m               # alias a module
+from math import gcd as g     # alias a name
+```
+
+- A sibling file `shapes.dr` next to the entry file imports as `from shapes
+  import area`.
+- **Package rule**: a package is a directory whose root module is
+  `name/name.dr`; submodules are files beside it (`textkit/case.dr` imports as
+  `textkit.case`). Dots map to directory separators. No `__init__` files. A
+  flat `name.dr` AND a `name/` directory in the same place is a hard error
+  ("module conflict"), never a precedence guess.
+- Resolution order, first match wins: (1) the entry file's directory, (2) `-I`
+  dirs in order, (3) the stdlib (`DRAGON_STDLIB_PATH` overrides), (4) Python
+  site-packages if `--site-packages`. Your files shadow the stdlib (closest
+  wins), which is also how you stub a module in tests.
+- Module globals: a top-level declaration; functions read freely, writers must
+  declare `global name`. A dependency's loose statements do not run; its
+  initializers do (once, at startup, before the entry body): express import-time
+  setup as `const X = setup()`.
+- Module-level privacy: `_name` is package-internal, `__name` file-private,
+  enforced at import (`from bank import _rate` from outside the package is a
+  compile error).
+- There is no importlib/reload/`getattr`-on-module. Selecting behavior by a
+  runtime string is a typed dispatch table: `ops: dict[str, Callable[[int],
+  int]]`, populated at top level; plugins register themselves into it. Code
+  never compiled in cannot be loaded, by design.
+- **Eggs (D022)**: `dragon init` scaffolds `dragon.drs` (Dragon Script: `#`
+  comments, single quotes, nested `{ }` tables; fields: name, version, entry,
+  eggs = {}). The full manager (grab/sync/drop with inline SHA-256 pins in the
+  manifest, `.drx/` install dir, capability permissions) is designed and partly
+  wired but in progress: TODAY YOU VENDOR (copy sources, or `-I`). Lay shared
+  code out as `name/name.dr` so it is egg-shaped later. No install scripts
+  exist, ever: a task is a `.dr` file you `dragon run`.
+
+## 25. FFI
+
+### In-process lane: `extern "C"`
+
+```dragon
+extern "C" from "curl" {                 # binds a library; auto-links -lcurl
+    def curl_easy_init() -> ptr
+    def curl_easy_perform(h: ptr) -> intc
+    def curl_easy_cleanup(h: ptr)
+}
+extern "C" def sqrt(x: float) -> float   # a symbol the linker already sees
+print(sqrt(2.0))                         # called exactly like a Dragon function
+```
+
+Type map (a bound call is a DIRECT native call; nothing to marshal for the
+trivial core):
+
+| Dragon | C | Note |
+|---|---|---|
+| `int` | `int64_t` | if the C header says `long long`/`int64_t`, use `int` |
+| `intc` | `int` (32-bit) | if the C header says `int`/`unsigned`, use `intc`; auto-widens back in Dragon |
+| `float` | `double` | |
+| `bool` | `bool` | |
+| `ptr` | `void*` | opaque handles; GC never touches it; `none` passes NULL |
+| `str` | `const char*` | valid as a C string FOR ASCII ONLY (see below) |
+| `bytes` | `(uint8_t*, int64_t)` | the vehicle for binary and non-ASCII text |
+
+Strings: ASCII `str` passes straight through zero-copy. Non-ASCII `str` is
+stored UCS-4 internally: convert first via the runtime ABI, and mind the
+LIFETIME RULE: a pointer from `dragon_bytes_data(buf)` is valid only while `buf`
+is alive, so bind the bytes to a variable that outlives the call (never inline
+the conversion and stash the pointer).
+
+Runtime ABI (statically linked into every binary; a stability contract):
+
+```dragon
+extern "C" def dragon_string_alloc(src: ptr, length: int) -> str   # C string -> Dragon str (copies)
+extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes           # NUL-terminated UTF-8
+extern "C" def dragon_str_encode(s: str) -> bytes                  # str.encode(): UTF-8
+extern "C" def dragon_bytes_new(data: ptr, len: int) -> bytes
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+extern "C" def dragon_bytes_len(b: bytes) -> int
+extern "C" def dragon_raise_exc(code: int, msg: str)               # raise a Dragon exception from C
+```
+
+Out-parameters: Dragon has NO address-of operator, on purpose. Two patterns:
+(1) opaque C-filled state: `malloc` scratch, pass the `ptr`, never look inside,
+free at the end (how stdlib/threading.dr drives pthread mutexes); (2) scalar
+out-params: flatten in a one-line C shim that returns the value, compiled via
+`--cc-source shim.c`.
+
+C++: no direct binding (name mangling is not a stable ABI). Write a small
+`extern "C"` shim (.cpp) exposing plain C entry points over opaque pointers;
+pass it with `--cc-source cvshim.cpp` plus `-I`/`-l` flags; the presence of any
+`.cpp` automatically switches the final link driver from `cc` to `c++`.
+
+Ownership discipline at the boundary: scalars/`ptr` carry no ownership; a
+str/bytes passed into C is borrowed for that one call (C copies if it keeps
+it); values from the Dragon constructors above are Dragon-owned and scope-freed;
+a C library's own allocations are C-owned: hold the `ptr`, call the library's
+destructor yourself.
+
+Link troubleshooting: `undefined reference` -> missing `-l` or missing
+`--cc-source` shim; `std::...` undefined -> C++ shim not passed via --cc-source;
+header not found -> `-I`; `cannot find -l` -> `-L` or install the dev package;
+garbled text in C -> you passed non-ASCII `str` directly; crash after a call ->
+the backing str/bytes went out of scope.
+
+### Process lane: `extern "python" | "golang" | "rust"`
+
+```dragon
+extern "python" def score(batch: list[User]) -> list[Scored] from "ml/score.py"
+```
+
+Typed at compile time; `Any` appears nowhere unless you ask for it. Lowering:
+arguments encode as one JSON object via the box-free `encode[T]` (a `bytes`
+parameter rides as a raw blob, never base64); the child spawns ONCE from an
+argv list (never a shell) and stays warm (imports and state survive across
+calls); one length-prefixed frame per call on stdin/stdout; the reply decodes
+via `decode[T]` into the declared return type. The pipe wait parks the green
+thread, so plain calls cooperate and `fire score(users)` fans out; there is no
+async/await ceremony. A child that answers with an error keeps serving (you get
+its traceback); a dead child restarts for the NEXT call only (a crash never
+silently re-runs side effects). Python resolution: `DRAGON_PYTHON` env var or
+absolute candidates (`/usr/bin/python3`, ...), never a `$PATH` search. For
+golang/rust the `from` path IS the compiled binary, relative to the declaring
+`.dr` file.
+
+`dragon ffi sync file.dr` reads the extern declarations (the Dragon signature
+is the IDL) and generates per-language counterparts: `*_stub.py` (dataclasses +
+serve loop, always regenerated, do not edit) plus a skeleton written once that
+is yours. `dragon check` and every build fail when a stub's embedded signature
+no longer matches the declaration; `dragon ffi sync file.dr --check` verifies
+byte-exactly in CI. One script/binary per extern (a stub owned by another `.dr`
+file is never overwritten).
+
+Errors (`from ffi import FFIError, SpawnError, ForeignError, SchemaError`):
+SpawnError (could not start), ForeignError (child raised; carries the child's
+stderr/traceback verbatim), SchemaError (clean exit, output did not match the
+declared type). `except FFIError` catches all three. No decode is attempted
+after a non-zero exit.
+
+The kernel under the sugar is public: `runs[T](argv, input_bytes)` spawns a
+one-shot process, feeds stdin, decodes stdout into `T` with the same error
+taxonomy. `encode[T]`/`decode[T]` are the same public schema-directed
+serializer pair, usable directly on any class.
+
+Current limits: crossing types are scalars, `list` of scalars, classes, `list`
+of classes, `dict[str, scalar]`, `Optional` of those, and `bytes` as a
+parameter/return (not yet as a class field). `dict` with non-str keys or class
+values: not yet. Calls on one sidecar serialize in call order (no worker pools
+yet). A reply of unknown shape: declare `-> dict[str, Any]` and narrow (boxed
+tier, priced by the `Any` in the signature).
+
+Price model: serialize + pipe + deserialize per call; spawn and imports paid
+once. Right for batch-shaped calls; wrong for per-element calls in a hot loop
+(use the C lane against the underlying native library instead).
+
+## 26. Built-in functions (always in scope, no import)
+
+Available: `print(*values)` (space-separated, newline), `input(prompt="")`,
+`len`, `range(stop | start,stop[,step])` (iteration construct, not an
+annotation type), `enumerate`, `zip`, `int` `float` `str` `bool` (conversions),
+`bytes()` / `bytes(n)` / `bytes(list[int])`, `abs` `min` `max` `sum`, `sorted`
+`reversed` (return new lists), `any` `all`, `isinstance` (see the caveat in
+section 7), `issubclass(Sub, Base)`, `repr` `id` `hash`, `chr` `ord`, `hex`
+`oct` `bin`, `set()` / `set(xs)`, `dict()`, `list()` (empty -> `list[Any]`
+only) and `list(iterable)` (typed copy: `xs: list[int] = list([1, 2, 3])`
+works), `tuple(iterable)`, `pow(int, int)`, `round(x: float) -> int` (1-arg
+ONLY), `divmod(a, b) -> tuple[int, int]`, `map(fn, xs)` / `filter(fn, xs)`
+(EAGER, return lists; comprehensions are the idiomatic form), `type(x) -> str`
+(the type NAME, not a class object), `dir(obj) -> list[str]` (method names,
+including `__init__`; how the unittest runner finds `test_*` methods).
+
+Not part of the surface: 2-arg `round(x, n)`, `bytes("text", "utf-8")`
+(use `s.encode()`), `next`, `iter`, `callable`, `frozenset`, `format`, `slice`,
+`getattr`, `setattr`, `hasattr`, `delattr`, `vars`, `globals`, `locals`,
+`eval`, `exec`, `compile` (the reflection/eval family is rejected by design,
+not a gap).
+
+An empty `list()` is a `list[Any]` and so cannot initialize a concretely typed
+binding; the typed empty list is the literal: `xs: list[int] = []`.
+
+## 27. Testing
+
+A test file is an ordinary Dragon program run with `dragon run`; the framework
+is `stdlib/unittest.dr` (pure Dragon). No discovery harness, no magic naming,
+no test subcommand: the file's last line runs the suite, and the process exit
+code (0/1) is the whole contract for CI/CTest.
+
+```dragon
+from unittest import TestCase, main
+
+class MathTests(TestCase) {
+    def test_addition() {
+        self.assertEqual(2 + 2, 4)
+    }
+    def test_overdraw_raises() {
+        self.assertRaises(ValueError, overdraw)     # callable form only
+    }
+}
+
+main([MathTests()])          # INSTANCES, not classes; returns the exit status
+```
+
+- Tests are `test_*` methods (no parameters); they run in ALPHABETICAL order
+  (via `dir()`), so tests must not depend on sequence.
+- A missed assertion is a FAILURE; an uncaught exception in a test body is an
+  ERROR (reported, counted, the run continues). Summary: `Ran N test(s);
+  failures: F, errors: E` then `OK`/`FAILED`, exit 0/1.
+- Assertion catalog (each takes a trailing `msg: str = ""`):
+  `assertEqual[T](a, b)` and `assertNotEqual[T](a, b)`: GENERIC, so comparing
+  mismatched concrete types (`assertEqual(1, "x")`) is a COMPILE error, and
+  equality is deep for containers; `assertTrue/assertFalse(bool)`;
+  `assertIsNone/assertIsNotNone(Any)`; `assertIn/assertNotIn(needle, haystack)`
+  (substring on str); `assertGreater/Less/GreaterEqual/LessEqual(float)`;
+  `assertAlmostEqual(a, b, places=7)`; `assertRaises(exc_type, fn)` (pass a
+  zero-arg function or lambda; subclass matches count; there is NO
+  context-manager form).
+- No auto `setUp`/`tearDown`: write a helper method and call it at the top of
+  each test (explicit per-test isolation).
+- Project convention (this repo, and recommended): value-assertable runtime
+  behavior goes in dogfooded `.dr` unittests under `test/dr/test_*.dr` (CMake
+  auto-globs them into ctest as `dr_<name>`; run `ctest -R dr_`). C++
+  GoogleTest is reserved for compiler internals: stdout-capture assertions and
+  must-not-compile checks (`checkHasErrors`). Gtest source programs live in
+  `test/cases/<TestFileName>.md` case files (a `#### :snake_case` heading, then
+  a `dr`/`py`-tagged fence), pulled by `extractCode`: never hand-built from
+  glued C++ string literals.
+
+## 28. Memory model and performance
+
+- Scalars (`int`, `float`, `bool`) are register values; heap types (str, bytes,
+  containers, instances, closures) are references: assignment copies the
+  handle, both names see the same object.
+- Automatic reference counting with DETERMINISTIC frees: the count drops at
+  scope exit, reassignment, or last use, and the object frees immediately, on
+  that line. Every block is a scope, so a heap value declared in a block dies
+  at the closing brace. No pauses, no collector thread on the hot path.
+- Exceptions unwind and free owned locals as they go; error paths do not leak.
+- Cycles (A <-> B) are reclaimed by an incremental cycle collector backstop
+  (with adaptive back-off when it finds nothing); `own` fields form trees and
+  are excluded from cycle tracking.
+- `--gc=none` disables refcount emission for one-shot programs (benchmarks,
+  short CLI filters); never ship a service with it.
+- Performance levers: build `--release` for anything measured; keep types
+  concrete (a value left `Any` is boxed; a knowable type in a register is not);
+  never build strings with `out = out + x` in a loop (O(n^2)): collect
+  `list[str]` and `"".join(parts)`; `del` big buffers early to cut peak memory;
+  `fire f(own x)` keeps refcounts non-atomic by proof.
+- Measured reality: compute-bound code (recursion, float loops) runs at parity
+  with Rust at `-O2`; current known gaps are allocation-churn and str-keyed
+  dict workloads (runtime data structures, being driven down).
+
+## 29. What Dragon rejects (deltas from Python, one table)
+
+| Python habit | Dragon answer |
+|---|---|
+| gradual/optional typing | types are mandatory, both surfaces |
+| `x = 1` creates a variable | `x: int = 1` declares; bare `=` only reassigns |
+| function-scoped `if`/`for` locals | block scoping; hoist a declaration before the block |
+| forgot-`nonlocal` silently makes a local | compile error naming both fixes |
+| `if __name__ == "__main__"` | delete it; the file you run is the program |
+| arbitrary-precision int | 64-bit `int`, wraps silently |
+| truthy `if x:` on any value | conditions are `bool`; write `if x != 0`, `if len(s) > 0` |
+| mutable default evaluated once | defaults re-evaluate per call; trap gone |
+| `eval` / `exec` / `compile` | absent, by design |
+| `getattr`/`setattr`/`hasattr`/`__dict__`/metaclass/monkeypatch | absent; declare fields, or keep dynamism in a `dict[str, V]` value |
+| `type(x)` returns a class to compare/construct | `type(x)` is a name string; narrow with `isinstance`, dispatch via base class or generics |
+| duck typing | declare it: a base class, or a contract (`type Shape { ... }` + promise/cast) |
+| `importlib` / plugins from disk | typed `dict[str, Callable]` dispatch tables; the compiled-in set is the universe |
+| `async def` colors callers | colorless: `await` anywhere, `fire` spawns, no event loop |
+| pip / PyPI / C extensions | statically linked stdlib; FFI to C; vendor sources (eggs in progress) |
+| `raise X from Y` | refused; fold the cause into the new message |
+| tracebacks | none; exceptions carry your fields and `str(e)` |
+| `del x` unbinds a name | `del x` PROVES sole ownership and frees on that line |
+| implicit copies/aliases | copies are spelled `dub`, moves are spelled `own`, both greppable |
+
+Porting checklist for a `.py` file: annotate everything; first bindings get
+`:`; hoist names read after a block; replace dynamic features; drop the
+`__main__` guard; swap asyncio for `fire`/`await`; verify the imports exist in
+the Dragon stdlib. A file that leans on something with no equivalent is not
+portable, and that is the honest answer.
