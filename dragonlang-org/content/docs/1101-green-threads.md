@@ -47,7 +47,9 @@ pool of OS threads (an "M:N" scheduler), so each costs about 64 KB instead of th
 ~1 MB an OS thread needs - spawning ten thousand is normal. And when a green thread
 waits - a socket read, a database query, a `sleep_ms`, a contended `Lock`, an unset
 `Event`, a `join()`/`await` on another task - the runtime quietly parks it and runs
-another, instead of blocking the underlying OS thread.
+another, instead of blocking the underlying OS thread. Even a
+[C call that blocks](/docs/1501-ffi) cannot take the scheduler down: a carrier
+stuck inside C is detected and replaced within microseconds.
 
 ## What may cross into a green thread
 

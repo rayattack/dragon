@@ -779,6 +779,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_osthread_is_alive",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
 
+    getOrDeclareRuntime("dragon_extern_enter",
+        llvm::FunctionType::get(voidType, {}, false));
+    getOrDeclareRuntime("dragon_extern_exit",
+        llvm::FunctionType::get(voidType, {}, false));
     getOrDeclareRuntime("dragon_lock_new",
         llvm::FunctionType::get(i8PtrType, {}, false));
     getOrDeclareRuntime("dragon_lock_acquire",
@@ -1006,6 +1010,7 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                         ptrReturn = (rn->name == "ptr");
                     if (!ptrReturn) externDrainableFuncs.insert(llvmName);
                 }
+                if (func->isExtern) externDeclaredFuncs.insert(llvmName);
                 continue;
             }
             std::vector<llvm::Type*> paramTypes;
@@ -1085,6 +1090,7 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                     if (!ptrReturn) externDrainableFuncs.insert(llvmName);
                 }
             }
+            if (func->isExtern) externDeclaredFuncs.insert(llvmName);
             {
                 std::vector<Expr*> defaults;
                 for (auto& p : func->params)

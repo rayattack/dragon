@@ -706,12 +706,12 @@ void CodeGen::visit(CallExpr& node) {
             impl_->fillDefaultArgs(func->getName().str(), func, args, *this, &argTemps);
             auto argTempBases = impl_->pushArgTempCleanups(argTemps);
             if (func->getReturnType() == impl_->voidType) {
-                impl_->builder->CreateCall(func, args);
+                impl_->emitExternAwareCall(func, args, "");
                 impl_->lastValue = llvm::ConstantPointerNull::get(
                     llvm::PointerType::getUnqual(*impl_->context));
             } else {
                 impl_->lastValue = impl_->normalizeIntC(
-                    impl_->builder->CreateCall(func, args, "call"));
+                    impl_->emitExternAwareCall(func, args, "call"));
             }
             impl_->popArgTempCleanups(argTempBases);
             impl_->drainBorrowTemps(argTemps);
@@ -1112,12 +1112,12 @@ void CodeGen::visit(CallExpr& node) {
                 impl_->fillDefaultArgs(func->getName().str(), func, args, *this, &argTemps);
                 auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                 if (func->getReturnType() == impl_->voidType) {
-                    impl_->builder->CreateCall(func, args);
+                    impl_->emitExternAwareCall(func, args, "");
                     impl_->lastValue = llvm::ConstantPointerNull::get(
                         llvm::PointerType::getUnqual(*impl_->context));
                 } else {
                     impl_->lastValue = impl_->normalizeIntC(
-                        impl_->builder->CreateCall(func, args, "modcall"));
+                        impl_->emitExternAwareCall(func, args, "modcall"));
                 }
                 impl_->popArgTempCleanups(argTempBases);
                 impl_->drainBorrowTemps(argTemps);
@@ -1558,12 +1558,12 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
     impl_->fillDefaultArgs(func->getName().str(), func, args, *this);
 
     if (func->getReturnType() == impl_->voidType) {
-        impl_->builder->CreateCall(func, args);
+        impl_->emitExternAwareCall(func, args, "");
         impl_->lastValue = llvm::ConstantPointerNull::get(
             llvm::PointerType::getUnqual(*impl_->context));
     } else {
         impl_->lastValue = impl_->normalizeIntC(
-            impl_->builder->CreateCall(func, args, "call"));
+            impl_->emitExternAwareCall(func, args, "call"));
     }
 
     impl_->emitMoveOutSlots(node);
@@ -2045,12 +2045,12 @@ void CodeGen::emitSpreadCall(llvm::Function* func, CallExpr& node,
     impl_->fillDefaultArgs(func->getName().str(), func, args, *this, &argTemps);
     auto argTempBases = impl_->pushArgTempCleanups(argTemps);
     if (func->getReturnType() == impl_->voidType) {
-        impl_->builder->CreateCall(func, args);
+        impl_->emitExternAwareCall(func, args, "");
         impl_->lastValue = llvm::ConstantPointerNull::get(
             llvm::PointerType::getUnqual(*impl_->context));
     } else {
         impl_->lastValue = impl_->normalizeIntC(
-            impl_->builder->CreateCall(func, args, "spreadcall"));
+            impl_->emitExternAwareCall(func, args, "spreadcall"));
     }
     impl_->popArgTempCleanups(argTempBases);
     impl_->drainBorrowTemps(argTemps);

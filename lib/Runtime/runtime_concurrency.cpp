@@ -245,6 +245,11 @@ typedef struct {
     DragonVThread*  tail;
     pthread_mutex_t lock;
     pthread_cond_t  not_empty;
+    pthread_cond_t  spare_cond;
+    int64_t         spares;
+    int64_t         spare_wakeups;
+    int64_t         total_carriers;
+    int64_t         carrier_cap;
     int             shutdown;
     int             num_workers;
     pthread_t*      workers;
@@ -376,6 +381,43 @@ static void osthread_green_join_wait(void** slot, volatile int8_t* done) {
     }
 }
 
+static void dragon__abs_deadline(double seconds, struct timespec* d) {
+    clock_gettime(CLOCK_REALTIME, d);
+    int64_t whole = (int64_t)seconds;
+    d->tv_sec += (time_t)whole;
+    d->tv_nsec += (long)((seconds - (double)whole) * 1e9);
+    if (d->tv_nsec >= 1000000000L) { d->tv_sec += 1; d->tv_nsec -= 1000000000L; }
+}
+
+static int dragon__deadline_passed(const struct timespec* d) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    return now.tv_sec > d->tv_sec ||
+           (now.tv_sec == d->tv_sec && now.tv_nsec >= d->tv_nsec);
+}
+
+typedef struct DragonCarrier {
+    volatile uint32_t tick;
+    volatile int8_t   retaken;
+    uint32_t          sysmon_last;
+    struct DragonCarrier* reg_next;
+} DragonCarrier;
+
+static __thread DragonCarrier* __current_carrier = NULL;
+static DragonCarrier* __carrier_list = NULL;
+
+void dragon_extern_enter(void) {
+    DragonCarrier* c = __current_carrier;
+    if (!c || !__current_vthread) return;
+    __atomic_store_n(&c->tick, c->tick + 1, __ATOMIC_RELEASE);
+}
+
+void dragon_extern_exit(void) {
+    DragonCarrier* c = __current_carrier;
+    if (!c || !__current_vthread) return;
+    __atomic_store_n(&c->tick, c->tick + 1, __ATOMIC_RELEASE);
+}
+
 static DragonVThread* scheduler_dequeue() {
     DragonVThread* vt = __scheduler->head;
     if (vt) {
@@ -433,9 +475,35 @@ static void vthread_mark_done_and_release(DragonVThread* vt) {
     vthread_release(vt);
 }
 
+static DragonCarrier* carrier_register(void) {
+    DragonCarrier* c = (DragonCarrier*)dragon_xcalloc_n(1, sizeof(DragonCarrier));
+    pthread_mutex_lock(&__scheduler->lock);
+    c->reg_next = __carrier_list;
+    __atomic_store_n(&__carrier_list, c, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&__scheduler->lock);
+    __current_carrier = c;
+    return c;
+}
+
+static void carrier_park_as_spare(DragonCarrier* c) {
+    pthread_mutex_lock(&__scheduler->lock);
+    __scheduler->spares++;
+    while (__scheduler->spare_wakeups == 0) {
+        pthread_cond_wait(&__scheduler->spare_cond, &__scheduler->lock);
+    }
+    __scheduler->spare_wakeups--;
+    __scheduler->spares--;
+    pthread_mutex_unlock(&__scheduler->lock);
+    __atomic_store_n(&c->retaken, 0, __ATOMIC_RELEASE);
+}
+
 static void* scheduler_worker(void* arg) {
     (void)arg;
+    DragonCarrier* carrier = carrier_register();
     while (1) {
+        if (__atomic_load_n(&carrier->retaken, __ATOMIC_ACQUIRE)) {
+            carrier_park_as_spare(carrier);
+        }
         pthread_mutex_lock(&__scheduler->lock);
         while (!__scheduler->head && !__scheduler->shutdown) {
             pthread_cond_wait(&__scheduler->not_empty, &__scheduler->lock);
@@ -481,11 +549,59 @@ static void* scheduler_worker(void* arg) {
     return NULL;
 }
 
+static void sysmon_retake(DragonCarrier* c) {
+    pthread_mutex_lock(&__scheduler->lock);
+    if (__scheduler->spares > __scheduler->spare_wakeups) {
+        __scheduler->spare_wakeups++;
+        __atomic_store_n(&c->retaken, 1, __ATOMIC_RELEASE);
+        pthread_cond_signal(&__scheduler->spare_cond);
+    } else if (__scheduler->total_carriers < __scheduler->carrier_cap) {
+        dragon_gc_go_concurrent();
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, scheduler_worker, NULL) == 0) {
+            pthread_detach(tid);
+            __scheduler->total_carriers++;
+            __atomic_store_n(&c->retaken, 1, __ATOMIC_RELEASE);
+        }
+    }
+    pthread_mutex_unlock(&__scheduler->lock);
+}
+
+static void* sysmon_thread(void* arg) {
+    (void)arg;
+    useconds_t interval = 1000;
+    while (1) {
+#ifdef _WIN32
+        Sleep(interval / 1000 > 0 ? interval / 1000 : 1);
+#else
+        usleep(interval);
+#endif
+        int in_extern = 0;
+        for (DragonCarrier* c = __atomic_load_n(&__carrier_list, __ATOMIC_ACQUIRE);
+             c; c = c->reg_next) {
+            const uint32_t t = __atomic_load_n(&c->tick, __ATOMIC_ACQUIRE);
+            if ((t & 1u) == 0) {
+                c->sysmon_last = t;
+                continue;
+            }
+            in_extern = 1;
+            if (t == c->sysmon_last &&
+                !__atomic_load_n(&c->retaken, __ATOMIC_ACQUIRE)) {
+                sysmon_retake(c);
+            }
+            c->sysmon_last = t;
+        }
+        interval = in_extern ? 100 : 1000;
+    }
+    return NULL;
+}
+
 static void scheduler_init() {
     dragon_gc_go_concurrent();
     __scheduler = (DragonScheduler*)dragon_xcalloc_n(1, sizeof(DragonScheduler));
     pthread_mutex_init(&__scheduler->lock, NULL);
     pthread_cond_init(&__scheduler->not_empty, NULL);
+    pthread_cond_init(&__scheduler->spare_cond, NULL);
     __scheduler->head = NULL;
     __scheduler->tail = NULL;
     __scheduler->shutdown = 0;
@@ -502,10 +618,20 @@ static void scheduler_init() {
         long n = atol(env);
         if (n > 0) ncpu = n;
     }
+    long cap = 256;
+    const char* capEnv = getenv("DRAGON_MAX_CARRIERS");
+    if (capEnv && atol(capEnv) > 0) cap = atol(capEnv);
+    if (cap < ncpu) cap = ncpu;
+    __scheduler->carrier_cap = cap;
+    __scheduler->total_carriers = ncpu;
     __scheduler->num_workers = (int)ncpu;
     __scheduler->workers = (pthread_t*)dragon_xcalloc_n_or_abort(ncpu, sizeof(pthread_t));
     for (int i = 0; i < __scheduler->num_workers; i++) {
         pthread_create(&__scheduler->workers[i], NULL, scheduler_worker, NULL);
+    }
+    pthread_t sysmon_tid;
+    if (pthread_create(&sysmon_tid, NULL, sysmon_thread, NULL) == 0) {
+        pthread_detach(sysmon_tid);
     }
 }
 
@@ -1127,27 +1253,6 @@ void dragon_vthread_yield() {
     }
 }
 
-static void dragon__abs_deadline(double seconds, struct timespec* d) {
-    clock_gettime(CLOCK_REALTIME, d);
-    int64_t whole = (int64_t)seconds;
-    d->tv_sec += (time_t)whole;
-    d->tv_nsec += (long)((seconds - (double)whole) * 1e9);
-    if (d->tv_nsec >= 1000000000L) { d->tv_sec += 1; d->tv_nsec -= 1000000000L; }
-}
-
-static int dragon__deadline_passed(const struct timespec* d) {
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    return now.tv_sec > d->tv_sec ||
-           (now.tv_sec == d->tv_sec && now.tv_nsec >= d->tv_nsec);
-}
-
-static int green_timed_wait_expired(const struct timespec* deadline) {
-    if (dragon__deadline_passed(deadline)) return 1;
-    dragon_vthread_sleep(1);
-    return 0;
-}
-
 typedef struct DragonLock {
     pthread_mutex_t m;
     pthread_cond_t  c;
@@ -1192,27 +1297,13 @@ int64_t dragon_lock_try_acquire(void* lock) {
     return got;
 }
 
-int64_t dragon_lock_acquire_ex(void* lock, int64_t blocking, double timeout) {
-    if (!blocking) return dragon_lock_try_acquire(lock);
-    if (timeout < 0) {
-        dragon_lock_acquire(lock);
-        return 1;
-    }
-    struct timespec deadline;
-    dragon__abs_deadline(timeout, &deadline);
-    if (dragon_green_self()) {
-        while (!dragon_lock_try_acquire(lock)) {
-            if (green_timed_wait_expired(&deadline)) return 0;
-        }
-        return 1;
-    }
-    DragonLock* l = (DragonLock*)lock;
+static int64_t lock_timed_wait_os(DragonLock* l, const struct timespec* deadline) {
     pthread_mutex_lock(&l->m);
     while (l->locked) {
         l->os_waiters++;
-        const int rc = pthread_cond_timedwait(&l->c, &l->m, &deadline);
+        const int rc = pthread_cond_timedwait(&l->c, &l->m, deadline);
         l->os_waiters--;
-        if (l->locked && (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+        if (l->locked && (rc == ETIMEDOUT || dragon__deadline_passed(deadline))) {
             pthread_mutex_unlock(&l->m);
             return 0;
         }
@@ -1220,6 +1311,21 @@ int64_t dragon_lock_acquire_ex(void* lock, int64_t blocking, double timeout) {
     l->locked = 1;
     pthread_mutex_unlock(&l->m);
     return 1;
+}
+
+int64_t dragon_lock_acquire_ex(void* lock, int64_t blocking, double timeout) {
+    if (!blocking) return dragon_lock_try_acquire(lock);
+    if (timeout < 0) {
+        dragon_lock_acquire(lock);
+        return 1;
+    }
+    if (dragon_lock_try_acquire(lock)) return 1;
+    struct timespec deadline;
+    dragon__abs_deadline(timeout, &deadline);
+    dragon_extern_enter();
+    const int64_t got = lock_timed_wait_os((DragonLock*)lock, &deadline);
+    dragon_extern_exit();
+    return got;
 }
 
 void dragon_lock_release(void* lock) {
@@ -1411,22 +1517,14 @@ void dragon_rwlock_unlock(void* rw) {
     vthread_wake_stolen(readers);
 }
 
-int dragon_rwlock_timedrdlock_sec(void* rw, double seconds) {
-    struct timespec deadline;
-    dragon__abs_deadline(seconds, &deadline);
-    if (dragon_green_self()) {
-        while (!dragon_rwlock_tryrdlock(rw)) {
-            if (green_timed_wait_expired(&deadline)) return 0;
-        }
-        return 1;
-    }
-    DragonRWLock* l = (DragonRWLock*)rw;
+static int64_t rwlock_timedrd_wait_os(DragonRWLock* l,
+                                      const struct timespec* deadline) {
     pthread_mutex_lock(&l->m);
     while (l->writer_active) {
         l->os_waiters++;
-        const int rc = pthread_cond_timedwait(&l->c, &l->m, &deadline);
+        const int rc = pthread_cond_timedwait(&l->c, &l->m, deadline);
         l->os_waiters--;
-        if (l->writer_active && (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+        if (l->writer_active && (rc == ETIMEDOUT || dragon__deadline_passed(deadline))) {
             pthread_mutex_unlock(&l->m);
             return 0;
         }
@@ -1436,23 +1534,15 @@ int dragon_rwlock_timedrdlock_sec(void* rw, double seconds) {
     return 1;
 }
 
-int dragon_rwlock_timedwrlock_sec(void* rw, double seconds) {
-    struct timespec deadline;
-    dragon__abs_deadline(seconds, &deadline);
-    if (dragon_green_self()) {
-        while (!dragon_rwlock_trywrlock(rw)) {
-            if (green_timed_wait_expired(&deadline)) return 0;
-        }
-        return 1;
-    }
-    DragonRWLock* l = (DragonRWLock*)rw;
+static int64_t rwlock_timedwr_wait_os(DragonRWLock* l,
+                                      const struct timespec* deadline) {
     pthread_mutex_lock(&l->m);
     while (l->writer_active || l->active_readers > 0) {
         l->os_waiters++;
-        const int rc = pthread_cond_timedwait(&l->c, &l->m, &deadline);
+        const int rc = pthread_cond_timedwait(&l->c, &l->m, deadline);
         l->os_waiters--;
         if ((l->writer_active || l->active_readers > 0) &&
-            (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+            (rc == ETIMEDOUT || dragon__deadline_passed(deadline))) {
             pthread_mutex_unlock(&l->m);
             return 0;
         }
@@ -1460,6 +1550,26 @@ int dragon_rwlock_timedwrlock_sec(void* rw, double seconds) {
     l->writer_active = 1;
     pthread_mutex_unlock(&l->m);
     return 1;
+}
+
+int dragon_rwlock_timedrdlock_sec(void* rw, double seconds) {
+    if (dragon_rwlock_tryrdlock(rw)) return 1;
+    struct timespec deadline;
+    dragon__abs_deadline(seconds, &deadline);
+    dragon_extern_enter();
+    const int64_t got = rwlock_timedrd_wait_os((DragonRWLock*)rw, &deadline);
+    dragon_extern_exit();
+    return (int)got;
+}
+
+int dragon_rwlock_timedwrlock_sec(void* rw, double seconds) {
+    if (dragon_rwlock_trywrlock(rw)) return 1;
+    struct timespec deadline;
+    dragon__abs_deadline(seconds, &deadline);
+    dragon_extern_enter();
+    const int64_t got = rwlock_timedwr_wait_os((DragonRWLock*)rw, &deadline);
+    dragon_extern_exit();
+    return (int)got;
 }
 
 typedef struct DragonSem {
@@ -1518,23 +1628,13 @@ int64_t dragon_sem_tryacquire(void* handle) {
     return taken;
 }
 
-int64_t dragon_sem_timedacquire_sec(void* handle, double seconds) {
-    DragonSem* s = (DragonSem*)handle;
-    if (!s) return 0;
-    struct timespec deadline;
-    dragon__abs_deadline(seconds, &deadline);
-    if (dragon_green_self()) {
-        while (!dragon_sem_tryacquire(handle)) {
-            if (green_timed_wait_expired(&deadline)) return 0;
-        }
-        return 1;
-    }
+static int64_t sem_timed_wait_os(DragonSem* s, const struct timespec* deadline) {
     pthread_mutex_lock(&s->m);
     while (s->permits == 0) {
         s->os_waiters++;
-        const int rc = pthread_cond_timedwait(&s->c, &s->m, &deadline);
+        const int rc = pthread_cond_timedwait(&s->c, &s->m, deadline);
         s->os_waiters--;
-        if (s->permits == 0 && (rc == ETIMEDOUT || dragon__deadline_passed(&deadline))) {
+        if (s->permits == 0 && (rc == ETIMEDOUT || dragon__deadline_passed(deadline))) {
             pthread_mutex_unlock(&s->m);
             return 0;
         }
@@ -1542,6 +1642,18 @@ int64_t dragon_sem_timedacquire_sec(void* handle, double seconds) {
     s->permits--;
     pthread_mutex_unlock(&s->m);
     return 1;
+}
+
+int64_t dragon_sem_timedacquire_sec(void* handle, double seconds) {
+    DragonSem* s = (DragonSem*)handle;
+    if (!s) return 0;
+    if (dragon_sem_tryacquire(handle)) return 1;
+    struct timespec deadline;
+    dragon__abs_deadline(seconds, &deadline);
+    dragon_extern_enter();
+    const int64_t got = sem_timed_wait_os(s, &deadline);
+    dragon_extern_exit();
+    return got;
 }
 
 int64_t dragon_sem_release(void* handle) {

@@ -570,6 +570,7 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, std::vector<bool>> funcCallableParam;
 
     std::unordered_set<std::string> externFuncNames;
+    std::unordered_set<std::string> externDeclaredFuncs;
     // FFI v0: extern "C" args are borrowed for the call, and a managed return is a fresh
     // +1, never aliasing an arg; owned temps passed to a managed-typed param drain like any borrow callee (stdlib http leaked one string per header without this). Declared `ptr` return opts out (may alias an arg: leak-over-UAF). Members: externs whose return isn't `ptr`.
     std::unordered_set<std::string> externDrainableFuncs;
@@ -642,6 +643,9 @@ struct CodeGen::Impl {
     }
 
     bool isLockExpr(Expr* e);
+    llvm::Value* emitExternAwareCall(llvm::Function* func,
+                                     const std::vector<llvm::Value*>& args,
+                                     const std::string& name);
 
     VarKind resolveExprVarKind(Expr* expr);
 

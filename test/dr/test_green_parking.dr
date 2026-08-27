@@ -3,6 +3,10 @@ from threading import Lock, RWLock, Semaphore, Barrier, Condition, Event, Thread
 import os
 import time
 
+extern "C" def usleep(usec: intc) -> intc
+extern "C" def pow(x: float, y: float) -> float
+extern "C" def strlen(s: str) -> int
+
 const _carriers_pinned: int = os.setenv("DRAGON_WORKER_THREADS", "2", 1)
 
 glock: Lock = Lock()
@@ -186,6 +190,19 @@ def timed_rw_try() -> int {
         return -2
     }
     return 1
+}
+
+def extern_napper() -> int {
+    usleep(600000)
+    return 1
+}
+
+def green_pow() -> float {
+    return pow(2.0, 10.0)
+}
+
+def green_strlen() -> int {
+    return strlen("dragons")
 }
 
 mx_lock: Lock = Lock()
@@ -485,6 +502,48 @@ class RWLockParkingTests(TestCase) {
 }
 
 
+class ExternDetachTests(TestCase) {
+    def test_blocked_extern_calls_release_their_carriers() {
+        n1: Task[int] = fire extern_napper()
+        n2: Task[int] = fire extern_napper()
+        n3: Task[int] = fire extern_napper()
+        time.sleep_ms(50)
+        p: Task[int] = fire probe()
+        const t0: float = time.monotonic()
+        while p.is_alive() and time.monotonic() - t0 < 0.45 {
+            time.sleep_ms(5)
+        }
+        const probe_ran: bool = not p.is_alive()
+        self.assertTrue(probe_ran, "probe starved: blocked externs kept their carriers")
+        if probe_ran {
+            self.assertEqual(p.join(), 7)
+        }
+        self.assertEqual(n1.join() + n2.join() + n3.join(), 3)
+    }
+
+    def test_extern_calls_stay_exact_after_detach() {
+        t: Task[float] = fire green_pow()
+        s: Task[int] = fire green_strlen()
+        self.assertEqual(t.join(), 1024.0)
+        self.assertEqual(s.join(), 7)
+        self.assertEqual(pow(3.0, 2.0), 9.0)
+        self.assertEqual(strlen("abc"), 3)
+    }
+
+    def test_scheduler_recovers_after_detach_storm() {
+        round: int = 0
+        while round < 3 {
+            w1: Task[int] = fire extern_napper()
+            w2: Task[int] = fire extern_napper()
+            self.assertEqual(w1.join() + w2.join(), 2)
+            round = round + 1
+        }
+        p: Task[int] = fire probe()
+        self.assertEqual(p.join(), 7)
+    }
+}
+
+
 main([LockParkingTests(), EventParkingTests(), ConditionParkingTests(),
       SemaphoreParkingTests(), BarrierParkingTests(), JoinParkingTests(),
-      RWLockParkingTests()])
+      RWLockParkingTests(), ExternDetachTests()])
