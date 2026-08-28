@@ -831,3 +831,17 @@ TEST(CodeGenTest, OwnFieldDefaultUnregisteredCalleeRejected) {
     auto ir = generateIR(code("own_field_default_unregistered_callee_rejected"));
     EXPECT_NE(ir.find("no registered releaser"), std::string::npos) << ir;
 }
+
+TEST(CodeGenTest, OwnReleaseInheritedBySubclassDealloc) {
+    auto ir = generateIR(code("own_release_inherited_by_subclass_dealloc"));
+    EXPECT_EQ(ir.find("<codegen failed"), std::string::npos) << ir;
+    EXPECT_EQ(countSubstring(ir, "call void @dragon_lock_destroy"), 2u)
+        << "base and child deallocs must each destroy the inherited resource";
+}
+
+TEST(CodeGenTest, OwnReleaseTransitiveThroughGrandparent) {
+    auto ir = generateIR(code("own_release_transitive_through_grandparent"));
+    EXPECT_EQ(ir.find("<codegen failed"), std::string::npos) << ir;
+    EXPECT_EQ(countSubstring(ir, "call void @dragon_lock_destroy"), 3u)
+        << "every class dealloc in the chain must destroy the grandparent's resource";
+}

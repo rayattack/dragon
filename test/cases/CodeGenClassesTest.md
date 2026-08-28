@@ -2119,3 +2119,47 @@ class Holder {
 
 h: Holder = Holder()
 ```
+
+#### :own_release_inherited_by_subclass_dealloc
+
+A subclass instance runs only its own dealloc, so the child dealloc must carry
+the parent's own raw-resource releasers: one destroy call in the base dealloc
+and one in the child dealloc.
+
+```dr
+extern "C" def dragon_lock_new() -> ptr
+
+class Base {
+    own h: ptr = dragon_lock_new()
+}
+
+class Child(Base) {
+    extra: int = 0
+}
+
+c: Child = Child()
+```
+
+#### :own_release_transitive_through_grandparent
+
+The stored releaser list is transitive through the parent chain: a grandchild
+whose grandparent owns the resource still destroys it, giving one destroy call
+per class dealloc.
+
+```dr
+extern "C" def dragon_lock_new() -> ptr
+
+class Base {
+    own h: ptr = dragon_lock_new()
+}
+
+class Mid(Base) {
+    a: int = 0
+}
+
+class Leaf(Mid) {
+    b: int = 0
+}
+
+l: Leaf = Leaf()
+```

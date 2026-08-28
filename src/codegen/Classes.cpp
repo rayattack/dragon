@@ -12,6 +12,22 @@ static std::string allocatorCalleeName(Expr* value) {
     return callee ? callee->name : std::string{};
 }
 
+using OwnReleaserList = std::vector<std::pair<std::string, std::string>>;
+
+static void appendInheritedOwnReleasers(
+    const std::unordered_map<std::string, std::string>& parentBySym,
+    const std::unordered_map<std::string, OwnReleaserList>& releasersBySym,
+    const std::string& clsSym, OwnReleaserList& releasers) {
+    auto parentIt = parentBySym.find(clsSym);
+    if (parentIt == parentBySym.end()) return;
+    auto inheritedIt = releasersBySym.find(parentIt->second);
+    if (inheritedIt == releasersBySym.end()) return;
+    std::unordered_set<std::string> declaredHere;
+    for (const auto& entry : releasers) declaredHere.insert(entry.first);
+    for (const auto& entry : inheritedIt->second)
+        if (!declaredHere.count(entry.first)) releasers.push_back(entry);
+}
+
 
 void CodeGen::visit(ClassDecl& node) {
     if (!node.typeParams.empty()) return;
@@ -1273,6 +1289,11 @@ void CodeGen::visit(ClassDecl& node) {
                 }
             }
         }
+
+        appendInheritedOwnReleasers(impl_->classParentNamesBySym,
+                                    impl_->classOwnRawReleasersBySym, clsSym,
+                                    ownRawReleasers);
+        impl_->classOwnRawReleasersBySym[clsSym] = ownRawReleasers;
 
         std::string deallocName = "__dragon_dealloc_" + clsSym;
         auto* deallocFnType = llvm::FunctionType::get(

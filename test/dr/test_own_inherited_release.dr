@@ -1,0 +1,107 @@
+from unittest import TestCase, main
+from threading import Lock
+
+class Base {
+    n: int = 0
+    own lock: Lock = Lock()
+    def tick() -> None {
+        with self.lock { self.n = self.n + 1 }
+    }
+}
+
+class Child(Base) {
+    extra: int = 0
+}
+
+class GrandChild(Child) {
+    more: int = 0
+}
+
+class CtorBase {
+    n: int = 0
+    own lock: Lock
+    def() {
+        self.lock = Lock()
+    }
+    def tick() -> None {
+        with self.lock { self.n = self.n + 1 }
+    }
+}
+
+class CtorChild(CtorBase) {
+    extra: int = 0
+}
+
+class DoubleLocked(Base) {
+    hits: int = 0
+    own mine: Lock = Lock()
+    def hit() -> None {
+        with self.mine { self.hits = self.hits + 1 }
+    }
+}
+
+class OwnInheritedReleaseTests(TestCase) {
+    def test_base_still_releases_its_own_lock() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            b: Base = Base()
+            b.tick()
+            total = total + b.n
+            i = i + 1
+        }
+        self.assertEqual(total, 3000)
+    }
+
+    def test_child_releases_inherited_default_lock() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            c: Child = Child()
+            c.tick()
+            total = total + c.n
+            i = i + 1
+        }
+        self.assertEqual(total, 3000)
+    }
+
+    def test_grandchild_releases_transitively() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            g: GrandChild = GrandChild()
+            g.tick()
+            g.tick()
+            total = total + g.n
+            i = i + 1
+        }
+        self.assertEqual(total, 6000)
+    }
+
+    def test_child_releases_inherited_ctor_lock() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            c: CtorChild = CtorChild()
+            c.tick()
+            total = total + c.n
+            i = i + 1
+        }
+        self.assertEqual(total, 3000)
+    }
+
+    def test_child_and_inherited_locks_both_release() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            d: DoubleLocked = DoubleLocked()
+            d.tick()
+            d.hit()
+            total = total + d.n + d.hits
+            i = i + 1
+        }
+        self.assertEqual(total, 6000)
+    }
+}
+
+main([OwnInheritedReleaseTests()])

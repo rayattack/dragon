@@ -304,6 +304,7 @@ struct CodeGen::Impl {
             classFieldCallableTypeBySym;
     std::unordered_map<std::string, std::string> classParentNamesBySym;
     std::unordered_map<std::string, std::vector<std::pair<std::string, Expr*>>> classPerInstanceDefaultsBySym;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> classOwnRawReleasersBySym;
     std::unordered_map<std::string, std::string> methodReturnClassNames;
     std::unordered_map<std::string, std::string> funcReturnClassNames;
     std::unordered_map<std::string, Type::Kind> methodReturnKinds;
