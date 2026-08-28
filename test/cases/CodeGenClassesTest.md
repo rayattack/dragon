@@ -2083,3 +2083,39 @@ const h: Holder = Holder(add5)
 const r: int = h.handler(10)
 print(r)
 ```
+
+#### :own_ptr_field_default_registered_allocator_releases
+
+An `own` field default whose initializer is a registered allocator call registers
+the matching releaser exactly as a constructor assignment does, so the class
+deallocator destroys the resource.
+
+```dr
+extern "C" def dragon_lock_new() -> ptr
+
+class Guard {
+    own h: ptr = dragon_lock_new()
+}
+
+g: Guard = Guard()
+```
+
+#### :own_field_default_unregistered_callee_rejected
+
+An `own` field default from a callee the releaser registry does not know must
+still be rejected: the compiler cannot generate the release, and accepting it
+would leak the resource silently.
+
+```dr
+extern "C" def dragon_lock_new() -> ptr
+
+def make_handle() -> ptr {
+    return dragon_lock_new()
+}
+
+class Holder {
+    own h: ptr = make_handle()
+}
+
+h: Holder = Holder()
+```

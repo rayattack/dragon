@@ -5,6 +5,13 @@
 
 namespace dragon {
 
+static std::string allocatorCalleeName(Expr* value) {
+    auto* call = dynamic_cast<CallExpr*>(value);
+    if (!call) return {};
+    auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
+    return callee ? callee->name : std::string{};
+}
+
 
 void CodeGen::visit(ClassDecl& node) {
     if (!node.typeParams.empty()) return;
@@ -1158,11 +1165,18 @@ void CodeGen::visit(ClassDecl& node) {
         std::vector<std::pair<std::string, std::string>> ownRawReleasers;
         {
             std::unordered_set<std::string> ownFieldNames;
-            for (auto& member : node.body)
-                if (auto* ann = dynamic_cast<AnnAssignStmt*>(member.get()))
-                    if (ann->isOwn)
-                        if (auto* nm = dynamic_cast<NameExpr*>(ann->target.get()))
-                            ownFieldNames.insert(nm->name);
+            std::unordered_map<std::string, std::string> fieldAllocCallee;
+            for (auto& member : node.body) {
+                auto* ann = dynamic_cast<AnnAssignStmt*>(member.get());
+                if (!ann || !ann->isOwn) continue;
+                auto* nm = dynamic_cast<NameExpr*>(ann->target.get());
+                if (!nm) continue;
+                ownFieldNames.insert(nm->name);
+                if (ann->isStatic) continue;
+                std::string defaultCallee = allocatorCalleeName(ann->value.get());
+                if (!defaultCallee.empty())
+                    fieldAllocCallee[nm->name] = std::move(defaultCallee);
+            }
             if (!ownFieldNames.empty()) {
                 static const std::unordered_map<std::string, std::string>
                     kOwnReleaserRegistry = {
@@ -1185,7 +1199,6 @@ void CodeGen::visit(ClassDecl& node) {
                          "dragon_subprocess_child_free"},
                         {"malloc", "free"},
                     };
-                std::unordered_map<std::string, std::string> fieldAllocCallee;
                 std::function<void(const std::vector<std::unique_ptr<Stmt>>&)>
                     scanBody = [&](const std::vector<std::unique_ptr<Stmt>>& body) {
                         for (auto& st : body) {
@@ -1211,10 +1224,10 @@ void CodeGen::visit(ClassDecl& node) {
                             auto* obj = dynamic_cast<NameExpr*>(at->object.get());
                             if (!obj || obj->name != "self") continue;
                             if (!ownFieldNames.count(at->attribute)) continue;
-                            if (auto* call = dynamic_cast<CallExpr*>(value))
-                                if (auto* callee =
-                                        dynamic_cast<NameExpr*>(call->callee.get()))
-                                    fieldAllocCallee[at->attribute] = callee->name;
+                            std::string ctorCallee = allocatorCalleeName(value);
+                            if (!ctorCallee.empty())
+                                fieldAllocCallee[at->attribute] =
+                                    std::move(ctorCallee);
                         }
                     };
                 for (auto& member : node.body)
@@ -1248,10 +1261,11 @@ void CodeGen::visit(ClassDecl& node) {
                     if (releaser.empty()) {
                         impl_->addError(
                             "own field '" + fname + "' of class '" + node.name +
-                                "' has no registered releaser: the constructor "
-                                "must assign it from a registered allocator "
-                                "(Lock(), dragon_tls_ctx_new, ...) so the "
-                                "compiler can generate the release",
+                                "' has no registered releaser: initialize it "
+                                "from a registered allocator (Lock(), "
+                                "dragon_tls_ctx_new, ...) in its field default "
+                                "or in the constructor so the compiler can "
+                                "generate the release",
                             node.location());
                         continue;
                     }

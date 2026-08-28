@@ -819,3 +819,15 @@ TEST(CodeGenE2E, BareFnPointerOnClassFieldInvokedThroughField) {
     auto out = compileAndRun(code("bare_fn_pointer_on_class_field_invoked_through_field"));
     EXPECT_EQ(out, "15\n");
 }
+
+TEST(CodeGenTest, OwnPtrFieldDefaultRegisteredAllocatorReleases) {
+    auto ir = generateIR(code("own_ptr_field_default_registered_allocator_releases"));
+    EXPECT_EQ(ir.find("<codegen failed"), std::string::npos) << ir;
+    EXPECT_NE(ir.find("dragon_lock_destroy"), std::string::npos)
+        << "field-default allocator must register its releaser in the dealloc";
+}
+
+TEST(CodeGenTest, OwnFieldDefaultUnregisteredCalleeRejected) {
+    auto ir = generateIR(code("own_field_default_unregistered_callee_rejected"));
+    EXPECT_NE(ir.find("no registered releaser"), std::string::npos) << ir;
+}

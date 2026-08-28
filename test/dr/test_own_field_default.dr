@@ -1,0 +1,104 @@
+from unittest import TestCase, main
+from threading import Lock
+
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+    def bump() -> None {
+        with self.lock { self.value = self.value + 1 }
+    }
+    def bump_other(other: Counter) -> None {
+        with self.lock { other.bump() }
+    }
+}
+
+class Tagged {
+    tag: str
+    own lock: Lock = Lock()
+    def(tag: str) {
+        self.tag = tag
+    }
+    def guarded_len() -> int {
+        n: int = 0
+        with self.lock { n = len(self.tag) }
+        return n
+    }
+}
+
+class Rebinder {
+    hits: int = 0
+    own lock: Lock = Lock()
+    def() {
+        self.lock = Lock()
+    }
+    def hit() -> int {
+        with self.lock { self.hits = self.hits + 1 }
+        return self.hits
+    }
+}
+
+class OwnFieldDefaultTests(TestCase) {
+    def test_docs_counter_shape_bumps() {
+        c: Counter = Counter()
+        c.bump()
+        c.bump()
+        c.bump()
+        self.assertEqual(c.value, 3)
+    }
+
+    def test_each_instance_gets_a_fresh_lock() {
+        a: Counter = Counter()
+        b: Counter = Counter()
+        a.bump()
+        a.bump_other(b)
+        self.assertEqual(a.value, 1)
+        self.assertEqual(b.value, 1)
+    }
+
+    def test_default_lock_released_per_instance() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            c: Counter = Counter()
+            c.bump()
+            total = total + c.value
+            i = i + 1
+        }
+        self.assertEqual(total, 3000)
+    }
+
+    def test_ctor_that_skips_the_lock_keeps_the_default() {
+        t: Tagged = Tagged("ingest")
+        self.assertEqual(t.guarded_len(), 6)
+    }
+
+    def test_ctor_skipping_lock_released_per_instance() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            t: Tagged = Tagged("row-" + str(i % 7))
+            total = total + t.guarded_len()
+            i = i + 1
+        }
+        self.assertEqual(total, 15000)
+    }
+
+    def test_ctor_assignment_overrides_the_default() {
+        r: Rebinder = Rebinder()
+        r.hit()
+        self.assertEqual(r.hit(), 2)
+    }
+
+    def test_ctor_override_released_once_per_instance() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            r: Rebinder = Rebinder()
+            total = total + r.hit()
+            i = i + 1
+        }
+        self.assertEqual(total, 3000)
+    }
+}
+
+main([OwnFieldDefaultTests()])
