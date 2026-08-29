@@ -1,5 +1,6 @@
 #include "dragon/TypeChecker.h"
 #include "dragon/Privacy.h"
+#include "dragon/RenderDiagnostics.h"
 #include "TypeCheckerImpl.h"
 #include "dragon/AstClone.h"
 #include "dragon/ExceptionNames.h"
@@ -114,6 +115,14 @@ void TypeChecker::visit(CallExpr& node) {
     }
     for (auto& [name, arg] : node.kwArgs) {
         inferType(arg.get());
+    }
+
+    if (auto* builtinName = dynamic_cast<NameExpr*>(node.callee.get())) {
+        const auto& bn = builtinName->name;
+        if ((bn == "str" || bn == "repr") && node.args.size() == 1)
+            checkRenderable(node.args[0].get(), bn + "()");
+        else if (bn == "print")
+            for (auto& arg : node.args) checkRenderable(arg.get(), "print()");
     }
 
     {

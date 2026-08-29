@@ -959,6 +959,125 @@ std::string CodeGen::Impl::containerReprFn(Expr* e) {
         return "";
     }
 
+std::string CodeGen::Impl::containerReprFnForType(const Type* t) {
+        if (!t) return "";
+        switch (t->kind()) {
+            case Type::Kind::Bytes: return "dragon_bytes_to_str";
+            case Type::Kind::List: {
+                auto* lt = static_cast<const ListType*>(t);
+                if (lt->elementType && isBoxedKind(lt->elementType->kind()))
+                    return "dragon_list_box_to_str";
+                return "dragon_list_to_str";
+            }
+            case Type::Kind::Set:   return "dragon_set_to_str";
+            case Type::Kind::Tuple: return "dragon_tuple_to_str";
+            case Type::Kind::Dict: {
+                auto* dt = static_cast<const DictType*>(t);
+                Type::Kind kk = dt->keyType ? dt->keyType->kind() : Type::Kind::Str;
+                return (kk == Type::Kind::Int || kk == Type::Kind::Float)
+                           ? "dragon_dict_int_to_str" : "dragon_dict_to_str";
+            }
+            default: return "";
+        }
+    }
+
+CodeGen::Impl::RenderedStr CodeGen::Impl::emitRenderToStr(
+    Expr* srcExpr, const Type* srcType, llvm::Value* val,
+    const std::string& className) {
+        RenderedStr out;
+        if (!val) return out;
+        llvm::Type* vt = val->getType();
+
+        if (vt == boxType) {
+            out.value = builder->CreateCall(
+                runtimeFuncs["dragon_box_to_str"], {val}, "btos.any");
+            out.owned = true;
+            out.consumedSource = true;
+            return out;
+        }
+        if (vt == i1Type) {
+            llvm::Value* ext = builder->CreateZExt(val, i64Type);
+            out.value = builder->CreateCall(
+                runtimeFuncs["dragon_bool_to_str"], {ext}, "btos");
+            out.owned = true;
+            return out;
+        }
+        if (vt == f64Type) {
+            out.value = builder->CreateCall(
+                runtimeFuncs["dragon_float_to_str"], {val}, "ftos");
+            out.owned = true;
+            return out;
+        }
+        if (!vt->isPointerTy()) {
+            out.value = builder->CreateCall(
+                runtimeFuncs["dragon_int_to_str"], {val}, "itos");
+            out.owned = true;
+            return out;
+        }
+
+        VarKind valueKind = srcExpr ? resolveExprVarKind(srcExpr) : VarKind::Other;
+        bool isStr = valueKind == VarKind::Str || valueKind == VarKind::StrLiteral ||
+                     (srcType && srcType->kind() == Type::Kind::Str) ||
+                     (srcExpr && srcExpr->type &&
+                      srcExpr->type->kind() == Type::Kind::Str);
+        if (isStr) {
+            out.value = val;
+            out.owned = isOwnedStrResult(val) &&
+                        !(srcExpr && isBorrowedHeapExpr(srcExpr));
+            return out;
+        }
+
+        std::string cls = className.empty() ? renderClassName(srcType) : className;
+        if (!cls.empty()) {
+            std::string dunder = hasDunder(cls, "__str__")    ? "__str__"
+                               : hasDunder(cls, "__repr__")   ? "__repr__"
+                                                              : "";
+            if (!dunder.empty()) {
+                out.value = callDunder(cls, dunder, val);
+                out.owned = true;
+                out.consumedSource = true;
+                return out;
+            }
+            if (userExcCodesBySym.count(classSym(cls)) > 0) {
+                auto* msg = builder->CreateCall(
+                    runtimeFuncs["dragon_exc_get_msg"], {}, "exc.msg");
+                out.value = builder->CreateCall(
+                    runtimeFuncs["dragon_string_dup"], {msg}, "exc.msg.dup");
+                out.owned = true;
+                out.consumedSource = true;
+                return out;
+            }
+            return out;
+        }
+
+        std::string creprFn = srcExpr ? containerReprFn(srcExpr) : "";
+        if (creprFn.empty()) creprFn = containerReprFnForType(srcType);
+        if (!creprFn.empty()) {
+            out.value = builder->CreateCall(runtimeFuncs[creprFn], {val}, "ctos");
+            out.owned = true;
+            out.consumedSource = true;
+            return out;
+        }
+
+        return out;
+    }
+
+llvm::Value* CodeGen::Impl::emitContentEscape(const std::string& contentType,
+                                              llvm::Value* strVal, bool& owned,
+                                              const std::string& valueClassName) {
+        if (contentType.empty()) return strVal;
+        if (!valueClassName.empty() && valueClassName == contentType) return strVal;
+        std::string ownMod = resolveClassOwningModule(contentType);
+        auto* escFunc = resolveMethodFunction(ownMod, contentType, "escape");
+        if (!escFunc) return strVal;
+        llvm::Value* prev = strVal;
+        llvm::Value* escaped = builder->CreateCall(escFunc, {strVal}, "auto_esc");
+        if (owned && options.gcMode == GCMode::RC)
+            builder->CreateCall(runtimeFuncs["dragon_decref_str"], {prev});
+        owned = true;
+        return escaped;
+    }
+
 CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
         switch (k) {
             case Type::Kind::Int:      return VarKind::Int;

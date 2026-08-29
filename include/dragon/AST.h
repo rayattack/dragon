@@ -118,6 +118,7 @@ struct TemplatePart {
     std::unique_ptr<Expr> expr;
     std::vector<std::unique_ptr<Stmt>> blockStmts;
     std::string filterName;
+    std::unique_ptr<Expr> separatorExpr;
     bool isSpread = false;
     std::string exprText;
     size_t bangPos = 0;

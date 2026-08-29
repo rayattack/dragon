@@ -1043,7 +1043,7 @@ void CodeGen::visit(DeleteStmt& node) {
                     continue;
                 }
                 bool isBox = impl_->getIterableElementKind(sub->object.get()) ==
-                             Type::Kind::Any;
+                             Type::Kind::Boxed;
                 sub->object->accept(*this);
                 llvm::Value* lst = impl_->lastValue;
                 sub->index->accept(*this);

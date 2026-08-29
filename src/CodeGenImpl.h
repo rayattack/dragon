@@ -5,6 +5,8 @@
 #include <execinfo.h>
 #include <limits>
 #include "dragon/CodeGen.h"
+#include "dragon/RenderDiagnostics.h"
+#include "dragon/TemplateSyntax.h"
 #include "dragon/TypeChecker.h"
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
@@ -795,6 +797,27 @@ struct CodeGen::Impl {
     }
 
     std::string containerReprFn(Expr* e);
+
+    std::string containerReprFnForType(const Type* t);
+
+    struct RenderedStr {
+        llvm::Value* value = nullptr;
+        bool owned = false;
+        bool consumedSource = false;
+    };
+
+    RenderedStr emitRenderToStr(Expr* srcExpr, const Type* srcType,
+                                llvm::Value* val, const std::string& className);
+
+    llvm::Value* emitContentEscape(const std::string& contentType,
+                                   llvm::Value* strVal, bool& owned,
+                                   const std::string& valueClassName);
+
+    std::string renderClassName(const Type* t) {
+        if (auto* inst = dynamic_cast<const InstanceType*>(t))
+            if (inst->classType) return inst->classType->name;
+        return "";
+    }
 
     std::string recordVarClassFromValue(const std::string& varName, Expr* value);
 

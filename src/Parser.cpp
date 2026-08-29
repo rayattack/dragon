@@ -170,6 +170,30 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
             p.filterName = std::move(filterName);
             p.isSpread = isSpread;
 
+            if (p.filterName.rfind("join(", 0) == 0) {
+                auto closeParen = p.filterName.rfind(')');
+                std::string sepText;
+                if (closeParen != std::string::npos && closeParen > 5)
+                    sepText = p.filterName.substr(5, closeParen - 5);
+                if (sepText.find_first_not_of(" \t\n\r") != std::string::npos) {
+                    LexerOptions sepLexOpts;
+                    sepLexOpts.filename = fLexOpts.filename;
+                    sepLexOpts.inTemplateInterpolation = true;
+                    sepLexOpts.startLine = fLexOpts.startLine;
+                    Lexer sepLexer(sepText, sepLexOpts);
+                    ParserOptions sepOpts;
+                    sepOpts.isDragonFile = isDragonFile;
+                    Parser sepParser(sepLexer.tokenize(), sepOpts);
+                    auto sepExpr = sepParser.parseExpression();
+                    if (sepExpr && !sepParser.hasErrors())
+                        p.separatorExpr = std::move(sepExpr);
+                    else
+                        reportError("template `| join(...)` separator at line " +
+                                    std::to_string(lineOf(bangPos)) +
+                                    " must be a valid Dragon expression");
+                }
+            }
+
             if (fModule && !fParser.hasErrors()) {
                 if (fModule->body.size() == 1) {
                     if (auto* es = dynamic_cast<ExprStmt*>(fModule->body[0].get())) {

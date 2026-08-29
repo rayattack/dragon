@@ -1,5 +1,7 @@
 #include "dragon/TypeChecker.h"
 #include "dragon/Privacy.h"
+#include "dragon/RenderDiagnostics.h"
+#include "dragon/TemplateSyntax.h"
 #include "TypeCheckerImpl.h"
 #include "dragon/AstClone.h"
 #include <algorithm>
@@ -1187,6 +1189,7 @@ void TypeChecker::visit(StringLiteral& node) {
     for (auto& part : node.fstringParts) {
         if (part.kind == FStringPart::Kind::Expression && part.expr) {
             part.expr->accept(*this);
+            checkRenderable(part.expr.get(), "f-string interpolation");
         }
     }
 }
@@ -1195,13 +1198,130 @@ void TypeChecker::visit(TemplateExpr& node) {
     node.type = resolveTemplateContentType(node.contentType, node.location());
     for (auto& part : node.templateParts) {
         if (part.kind == TemplatePart::Kind::Interpolation) {
-            if (part.expr) part.expr->accept(*this);
+            if (!part.expr) continue;
+            part.expr->accept(*this);
+            if (part.separatorExpr) part.separatorExpr->accept(*this);
+            checkTemplateSplice(part, node);
         } else if (part.kind == TemplatePart::Kind::Block) {
             for (auto& stmt : part.blockStmts) {
                 if (stmt) stmt->accept(*this);
             }
         }
     }
+}
+
+bool TypeChecker::typeIsRenderable(const Type* t, std::string& what) {
+    if (!t) return true;
+    switch (t->kind()) {
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bool:
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+        case Type::Kind::None_:
+        case Type::Kind::List:
+        case Type::Kind::Dict:
+        case Type::Kind::Set:
+        case Type::Kind::Tuple:
+        case Type::Kind::Boxed:
+        case Type::Kind::Optional:
+        case Type::Kind::TypeVar:
+        case Type::Kind::Never:
+        case Type::Kind::Unknown:
+        case Type::Kind::Class:
+        case Type::Kind::Module:
+            return true;
+        case Type::Kind::Union: {
+            auto& u = static_cast<const UnionType&>(*t);
+            for (const auto& member : u.types)
+                if (!typeIsRenderable(member.get(), what)) return false;
+            return true;
+        }
+        case Type::Kind::Instance: {
+            const ClassType* cls =
+                static_cast<const InstanceType&>(*t).classType.get();
+            if (!cls) return true;
+            if (findMethodOwner(cls, "__str__") || findMethodOwner(cls, "__repr__"))
+                return true;
+            if (derivesFromBuiltinException(cls)) return true;
+            if (cls->isEnum || hasDataclassDecorator(*cls) ||
+                hasDeclaredBase(*cls, "NamedTuple"))
+                return true;
+            what = cls->name;
+            return false;
+        }
+        case Type::Kind::Contract:
+            what = static_cast<const ContractType&>(*t).display;
+            return false;
+        default:
+            what = t->toString();
+            return false;
+    }
+}
+
+void TypeChecker::checkRenderable(Expr* expr, const std::string& site) {
+    if (!expr || !expr->type) return;
+    std::string what;
+    if (typeIsRenderable(expr->type.get(), what)) return;
+    if (expr->type->kind() == Type::Kind::Contract)
+        error(expr->location(), unrenderableContractMessage(site, what));
+    else if (expr->type->kind() == Type::Kind::Instance)
+        error(expr->location(), unrenderableClassMessage(site, what));
+    else
+        error(expr->location(), unrenderableTypeMessage(site, what));
+}
+
+void TypeChecker::checkTemplateSplice(TemplatePart& part,
+                                      const TemplateExpr& node) {
+    const bool isJoin = part.filterName == "join" ||
+                        part.filterName.rfind("join(", 0) == 0;
+    const std::string site = "template splice `!{" + part.exprText + "}`";
+    if (!part.isSpread && !isJoin) {
+        if (isEventAttrContext(node.body, part.bangPos) && part.expr->type &&
+            part.expr->type->kind() == Type::Kind::Function)
+            return;
+        checkRenderable(part.expr.get(), site);
+        return;
+    }
+
+    if (part.separatorExpr)
+        checkRenderable(part.separatorExpr.get(), site + " separator");
+
+    const auto& operand = part.expr->type;
+    if (!operand || operand->kind() == Type::Kind::Unknown) return;
+    if (operand->kind() != Type::Kind::List) {
+        error(part.expr->location(),
+              site + ": " + (part.isSpread ? "spread" : "`| join`") +
+              " needs a list; this is a " + operand->toString() +
+              ". Render it as a single value instead.");
+        return;
+    }
+
+    const auto& elem = static_cast<const ListType&>(*operand).elementType;
+    if (!elem || elem->kind() == Type::Kind::Unknown) return;
+    if (elem->kind() == Type::Kind::Boxed) {
+        error(part.expr->location(),
+              site + ": a list of boxed values cannot be rendered element by element. "
+              "Annotate the list with its concrete element type.");
+        return;
+    }
+    switch (elem->kind()) {
+        case Type::Kind::List:
+        case Type::Kind::Dict:
+        case Type::Kind::Set:
+        case Type::Kind::Tuple:
+        case Type::Kind::Bytes:
+            error(part.expr->location(),
+                  site + ": a list of " + elem->toString() + " cannot be "
+                  "rendered element by element. Render each element yourself "
+                  "with a `!{ for ... }` block.");
+            return;
+        default:
+            break;
+    }
+    std::string what;
+    if (!typeIsRenderable(elem.get(), what))
+        error(part.expr->location(), unrenderableClassMessage(site, what));
 }
 
 void TypeChecker::visit(TemplateFileExpr& node) {

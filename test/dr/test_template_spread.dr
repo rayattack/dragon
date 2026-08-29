@@ -1,0 +1,210 @@
+from unittest import TestCase, main
+from html import HTML
+
+extern "C" def dragon_str_join_ptr(sep: str, parts: list[int]) -> str
+
+
+class Money {
+    amount: int
+
+    def(amount: int) {
+        self.amount = amount
+    }
+
+    def __str__() -> str {
+        return "<" + str(self.amount) + ">"
+    }
+}
+
+
+def row(text: str) -> HTML {
+    return template[HTML] {<li>!{text}</li>}
+}
+
+
+def spread_rows(rows: list[HTML]) -> str {
+    page: HTML = template[HTML] {<ul>!{*rows}</ul>}
+    return page.to_str()
+}
+
+
+def loop_rows(rows: list[HTML]) -> str {
+    page: HTML = template[HTML] {<ul>!{ for r in rows { :{!{r}} } }</ul>}
+    return page.to_str()
+}
+
+
+separator_calls: list[str] = []
+
+
+def counted_separator() -> str {
+    separator_calls.append("-")
+    return "-"
+}
+
+
+class TemplateSpreadTests(TestCase) {
+    """`!{*rows}` rendered raw heap memory instead of the rows.
+
+    You write ordinary, correct-looking Dragon:
+
+        rows: list[HTML] = [row("a"), row("b")]
+        page: HTML = template[HTML] {<ul>!{*rows}</ul>}
+
+    You did nothing wrong. The spread is documented as sugar for the loop form,
+    and the loop form renders correctly. But the spread lowered to a single
+    `join` over the list, and `join` reads every element as a C string. An HTML
+    element is an instance pointer, so `join` read the first byte of its object
+    header (refcount 1) and pasted that 0x01 byte into the page. The output
+    looked empty because 0x01 is invisible in a browser; an element whose
+    refcount had reached 10 would have injected a newline instead.
+
+    On `list[int]` the same read dereferenced the integer 1 as a pointer and the
+    program died with SIGSEGV. On `list[str]` it "worked", by skipping the HTML
+    escaping that the `HTML` type promises, so a script tag rendered verbatim.
+
+    Now every spread renders each element at its static type and pushes it
+    through the same escape dispatch a single `!{x}` splice uses, so the spread
+    and the loop form are byte-identical and a str element is escaped.
+    """
+
+    def test_spread_of_html_matches_loop_form() {
+        rows: list[HTML] = [row("a"), row("b")]
+        self.assertEqual(spread_rows(rows), loop_rows(rows))
+    }
+
+    def test_spread_of_html_renders_the_rows() {
+        rows: list[HTML] = [row("a"), row("b")]
+        self.assertEqual(spread_rows(rows), "<ul><li>a</li><li>b</li></ul>")
+    }
+
+    def test_spread_of_str_escapes_each_element() {
+        evil: list[str] = ["<script>alert(1)</script>", "a&b"]
+        page: HTML = template[HTML] {<p>!{*evil}</p>}
+        self.assertEqual(
+            page.to_str(),
+            "<p>&lt;script&gt;alert(1)&lt;/script&gt;a&amp;b</p>")
+    }
+
+    def test_spread_of_int_renders_digits() {
+        ns: list[int] = [1, 2, 3]
+        page: HTML = template[HTML] {<p>!{*ns}</p>}
+        self.assertEqual(page.to_str(), "<p>123</p>")
+    }
+
+    def test_spread_of_float_renders_values() {
+        fs: list[float] = [1.5, 2.5]
+        page: HTML = template[HTML] {<p>!{*fs}</p>}
+        self.assertEqual(page.to_str(), "<p>1.52.5</p>")
+    }
+
+    def test_spread_of_bool_renders_values() {
+        bs: list[bool] = [True, False]
+        page: HTML = template[HTML] {<p>!{*bs}</p>}
+        self.assertEqual(page.to_str(), "<p>TrueFalse</p>")
+    }
+
+    def test_spread_of_class_with_str_escapes_its_output() {
+        prices: list[Money] = [Money(3), Money(4)]
+        page: HTML = template[HTML] {<p>!{*prices}</p>}
+        self.assertEqual(page.to_str(), "<p>&lt;3&gt;&lt;4&gt;</p>")
+    }
+
+    def test_spread_of_empty_list_renders_nothing() {
+        rows: list[HTML] = []
+        self.assertEqual(spread_rows(rows), "<ul></ul>")
+    }
+
+    def test_raw_spread_joins_without_escaping() {
+        markup: list[str] = ["<b>", "</b>"]
+        page: HTML = template[HTML] {<p>!{*markup | raw}</p>}
+        self.assertEqual(page.to_str(), "<p><b></b></p>")
+    }
+
+    def test_untyped_template_spread_of_str() {
+        parts: list[str] = ["a", "<b>"]
+        text: str = template {[!{*parts}]}
+        self.assertEqual(text, "[a<b>]")
+    }
+}
+
+
+class TemplateJoinFilterTests(TestCase) {
+    """`| join(sep)` shared the spread's defect, plus one of its own.
+
+    You write:
+
+        page: HTML = template[HTML] {<p>!{rows | join(", ")}</p>}
+
+    You did nothing wrong: the filter is documented as "concatenate a list,
+    optionally with a separator". But taking any filter branch skipped the
+    content type's auto-escape, so elements went out unescaped, and the
+    separator itself was pasted without escaping too.
+
+    Now the separator and every element travel the same dispatch: a `str`
+    separator is escaped, an `HTML` separator is inserted raw, and the separator
+    expression is still evaluated exactly once for the whole join.
+    """
+
+    def test_join_escapes_elements_and_separator() {
+        parts: list[str] = ["a", "b"]
+        page: HTML = template[HTML] {<p>!{parts | join(" & ")}</p>}
+        self.assertEqual(page.to_str(), "<p>a &amp; b</p>")
+    }
+
+    def test_join_with_html_separator_inserts_it_raw() {
+        parts: list[str] = ["a", "b"]
+        page: HTML = template[HTML] {<p>!{parts | join(row("x"))}</p>}
+        self.assertEqual(page.to_str(), "<p>a<li>x</li>b</p>")
+    }
+
+    def test_join_of_html_elements_is_not_double_escaped() {
+        rows: list[HTML] = [row("a"), row("b")]
+        page: HTML = template[HTML] {<ul>!{rows | join("")}</ul>}
+        self.assertEqual(page.to_str(), "<ul><li>a</li><li>b</li></ul>")
+    }
+
+    def test_separator_expression_is_evaluated_once() {
+        separator_calls.clear()
+        parts: list[str] = ["a", "b", "c"]
+        page: HTML = template[HTML] {<p>!{parts | join(counted_separator())}</p>}
+        self.assertEqual(page.to_str(), "<p>a-b-c</p>")
+        self.assertEqual(len(separator_calls), 1)
+    }
+
+    def test_join_of_int_list_renders_digits() {
+        ns: list[int] = [1, 2, 3]
+        page: HTML = template[HTML] {<p>!{ns | join(",")}</p>}
+        self.assertEqual(page.to_str(), "<p>1,2,3</p>")
+    }
+}
+
+
+def join_a_list_of_ints() -> None {
+    ns: list[int] = [1, 2, 3]
+    dragon_str_join_ptr("", ns)
+}
+
+
+class JoinTagGuardTests(TestCase) {
+    """The runtime refuses to read a non-str list as strings.
+
+    No Dragon program can reach this through the template surface any more: the
+    type checker refuses an unrenderable spread and codegen renders each element
+    before joining. This test reaches past both by declaring the join entry point
+    with a lying signature, which is exactly the shape a future codegen
+    regression would take.
+
+    Before, the join read each i64 element as a `const char*` and dereferenced
+    it, so the program died with SIGSEGV (or worse, pasted heap bytes into an
+    HTTP response). Now the tag check on the list raises TypeError, which a
+    program can catch and a test can assert.
+    """
+
+    def test_join_of_non_str_list_raises() {
+        self.assertRaises(TypeError, join_a_list_of_ints)
+    }
+}
+
+
+main([TemplateSpreadTests(), TemplateJoinFilterTests(), JoinTagGuardTests()])

@@ -142,6 +142,10 @@ public:
     void visit(TemplateExpr& node) override;
     void visit(TemplateFileExpr& node) override;
     void emitSqlTemplate(TemplateExpr& node, const std::string& contentType);
+    llvm::Value* emitTemplateJoin(TemplateExpr& node, const TemplatePart& part,
+                                  Expr* listExpr, llvm::Value* listVal,
+                                  const std::string& contentType,
+                                  bool elementsRaw);
     void visit(ExprStmt& node) override;
     void visit(AssignStmt& node) override;
     void visit(AugAssignStmt& node) override;

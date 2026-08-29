@@ -594,7 +594,7 @@ class Dog(Animal) {                  # single inheritance
 
 | To support | Define |
 |---|---|
-| `print(x)` / `str(x)` / f-strings | `__str__() -> str` (default prints `<Class instance>`) |
+| `print(x)` / `str(x)` / f-strings / `!{x}` | `__str__() -> str` (REQUIRED: a class with neither `__str__` nor `__repr__` cannot be rendered, and every one of these is a compile error naming the class) |
 | `repr(x)` | `__repr__() -> str` |
 | `==` / `!=` | `__eq__(other: T) -> bool` (`!=` derives) |
 | `< <= > >=` | `__lt__`, `__le__`, `__gt__`, `__ge__` |
@@ -605,6 +605,16 @@ class Dog(Animal) {                  # single inheritance
 | `for` loops | `__iter__()` + `__next__()` (raise `StopIteration()`) |
 | `with` | `__enter__() -> T` + `__exit__() -> None` (see section 19) |
 | conversions | `__int__`, `__float__` |
+
+Rendering is one rule, checked at compile time: `__str__`, else `__repr__`, else
+the value has no text form and `print` / `str()` / f-strings / template splices
+all refuse it by name. `@dataclass`, `NamedTuple`, `Enum`, and exception classes
+get their text form synthesized, so they render without you writing one.
+`<Class instance>` survives only where no static type exists at the point of
+rendering: an instance sitting inside a container (`f"{[p]}"` is a structural
+walk over tagged data, so it prints `[<Point instance>]`) and a boxed `Any`
+rendered at runtime. Rendering a container prints the same text everywhere:
+`str(xs)`, `f"{xs}"`, and `!{xs}` agree, with the template's escaping on top.
 
 ### Member privacy (compile-time enforced, zero runtime cost)
 
@@ -1169,6 +1179,14 @@ lst: HTML = template[HTML] {<ul>!{ for x in xs { :{<li>!{x}</li>} } }</ul>}
 ```
 
 Inline shortcuts: `!{*xs}` spreads a list (empty separator); `!{xs | join(", ")}`.
+Both render EACH element through the splice dispatch above, so a spread and the
+`!{ for }` loop form produce byte-identical output: `list[str]` elements are
+escaped, `HTML` elements are inserted raw, `list[int]` renders digits. The
+separator travels the same rule (a `str` separator is escaped, an `HTML`
+separator is raw) and is evaluated once per join. `!{*xs | raw}` joins without
+escaping. The operand must be a list whose element type is renderable:
+`list[Any]`, a list of containers, a list of classes without `__str__`, and
+non-list operands are compile errors.
 Filters: `html`/`sql`/`url` (context escapes), `raw`, `join`/`join(sep)`, or any
 in-scope TOP-LEVEL `(str) -> str` function (`!{title | shout}`); methods do not
 work as filters (wrap `upper` in a function).

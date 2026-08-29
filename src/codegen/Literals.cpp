@@ -101,41 +101,26 @@ void CodeGen::visit(StringLiteral& node) {
                     strVal = impl_->builder->CreateCall(fn, {exprVal, widthV, fillV},
                                                         "strpad");
                 }
-            } else if (!fClassName.empty() && impl_->hasDunder(fClassName, "__str__") &&
-                       (exprVal->getType() == impl_->i8PtrType ||
-                        exprVal->getType()->isPointerTy())) {
-                strVal = impl_->callDunder(fClassName, "__str__", exprVal);
-                impl_->emitDecrefByKind(
-                    exprVal, impl_->ownedTempDrainKind(part.expr.get(), exprVal));
-            } else if (!fClassName.empty() && impl_->hasDunder(fClassName, "__repr__") &&
-                       (exprVal->getType() == impl_->i8PtrType ||
-                        exprVal->getType()->isPointerTy())) {
-                strVal = impl_->callDunder(fClassName, "__repr__", exprVal);
-                impl_->emitDecrefByKind(
-                    exprVal, impl_->ownedTempDrainKind(part.expr.get(), exprVal));
-            } else if (exprVal->getType() == impl_->i8PtrType ||
-                       exprVal->getType()->isPointerTy()) {
-                std::string creprFn = impl_->containerReprFn(part.expr.get());
-                if (!creprFn.empty()) {
-                    strVal = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs[creprFn], {exprVal}, "ctos");
-                } else {
-                    strVal = exprVal;
-                    lastPartBorrowedStr = partBorrows(exprVal);
-                }
-            } else if (exprVal->getType() == impl_->i1Type) {
-                llvm::Value* ext = impl_->builder->CreateZExt(exprVal, impl_->i64Type);
-                strVal = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_bool_to_str"], {ext}, "btos");
-            } else if (exprVal->getType() == impl_->f64Type) {
-                strVal = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_float_to_str"], {exprVal}, "ftos");
-            } else if (exprVal->getType() == impl_->boxType) {
-                strVal = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_box_to_str"], {exprVal}, "btos.any");
             } else {
-                strVal = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_int_to_str"], {exprVal}, "itos");
+                auto rendered = impl_->emitRenderToStr(
+                    part.expr.get(), part.expr->type.get(), exprVal, fClassName);
+                if (!rendered.value) {
+                    impl_->addError(
+                        fClassName.empty()
+                            ? unknownRenderTypeMessage("f-string interpolation")
+                            : unrenderableClassMessage("f-string interpolation",
+                                                       fClassName),
+                        node.location());
+                    strVal = impl_->emitStringLiteralBytes("");
+                } else {
+                    strVal = rendered.value;
+                    if (rendered.value == exprVal)
+                        lastPartBorrowedStr = partBorrows(exprVal);
+                    if (rendered.consumedSource)
+                        impl_->emitDecrefByKind(
+                            exprVal,
+                            impl_->ownedTempDrainKind(part.expr.get(), exprVal));
+                }
             }
             parts.push_back(strVal);
         }
@@ -188,27 +173,15 @@ void CodeGen::visit(StringLiteral& node) {
     impl_->lastValue = impl_->emitStringLiteralBytes(processed);
 }
 
-static std::string precedingAttrName(const std::string& val, size_t bangPos) {
-    auto isNameChar = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-               (c >= '0' && c <= '9') || c == '-' || c == '_';
-    };
-    auto isWs = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
-    size_t k = bangPos;
-    if (k > 0 && (val[k-1] == '"' || val[k-1] == '\'')) k--;
-    while (k > 0 && isWs(val[k-1])) k--;
-    if (k == 0 || val[k-1] != '=') return "";
-    k--;
-    while (k > 0 && isWs(val[k-1])) k--;
-    size_t nameEnd = k;
-    while (k > 0 && isNameChar(val[k-1])) k--;
-    return val.substr(k, nameEnd - k);
+static std::string spliceSite(const std::string& exprText) {
+    return "template splice `!{" + exprText + "}`";
 }
 
-static bool isEventAttrContext(const std::string& val, size_t bangPos) {
-    std::string attr = precedingAttrName(val, bangPos);
-    return attr.size() > 2 && (attr[0] == 'o' || attr[0] == 'O') &&
-           (attr[1] == 'n' || attr[1] == 'N');
+static std::string templateRenderError(const std::string& exprText,
+                                       const std::string& className) {
+    if (!className.empty())
+        return unrenderableClassMessage(spliceSite(exprText), className);
+    return unknownRenderTypeMessage(spliceSite(exprText));
 }
 
 void CodeGen::visit(TemplateExpr& node) {
@@ -227,28 +200,24 @@ void CodeGen::visit(TemplateExpr& node) {
     }
     impl_->templateContextStack.push_back(effContent);
 
-    auto emitStringify = [&](llvm::Value* v, const std::string& cls,
+    auto emitStringify = [&](Expr* src, llvm::Value* v, const std::string& cls,
                              bool wantOwned) -> llvm::Value* {
-        llvm::Value* s;
-        bool owned = true;
-        if (!cls.empty() && impl_->hasDunder(cls, "__str__") && v->getType()->isPointerTy()) {
-            s = impl_->callDunder(cls, "__str__", v);
-        } else if (!cls.empty() && impl_->hasDunder(cls, "__repr__") && v->getType()->isPointerTy()) {
-            s = impl_->callDunder(cls, "__repr__", v);
-        } else if (v->getType()->isPointerTy()) {
-            s = v; owned = false;
-        } else if (v->getType() == impl_->i1Type) {
-            s = impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_bool_to_str"],
-                {impl_->builder->CreateZExt(v, impl_->i64Type)}, "btos");
-        } else if (v->getType() == impl_->f64Type) {
-            s = impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_float_to_str"], {v}, "ftos");
-        } else {
-            s = impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_int_to_str"], {v}, "itos");
+        auto rendered = impl_->emitRenderToStr(
+            src, src ? src->type.get() : nullptr, v, cls);
+        if (!rendered.value) {
+            impl_->addError(cls.empty()
+                                ? unknownRenderTypeMessage("reactive interpolation")
+                                : unrenderableClassMessage("reactive interpolation",
+                                                           cls),
+                            node.location());
+            return impl_->emitStringLiteralBytes("");
         }
-        if (wantOwned && !owned && impl_->options.gcMode == GCMode::RC) {
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_incref_str"], {s});
-        }
-        return s;
+        if (rendered.consumedSource)
+            impl_->emitDecrefByKind(v, impl_->ownedTempDrainKind(src, v));
+        if (wantOwned && !rendered.owned && impl_->options.gcMode == GCMode::RC)
+            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_incref_str"],
+                                       {rendered.value});
+        return rendered.value;
     };
 
     auto isSignalReceiver = [&](Expr* recv) -> bool {
@@ -420,7 +389,7 @@ void CodeGen::visit(TemplateExpr& node) {
                         }
 
                         llvm::Value* staticStr =
-                            emitStringify(exprVal, fClassName, false);
+                            emitStringify(fExpr, exprVal, fClassName, false);
 
                         std::string fnName =
                             "__dragon_reactive_" + std::to_string(impl_->lambdaCounter++);
@@ -445,7 +414,7 @@ void CodeGen::visit(TemplateExpr& node) {
                             std::string rcls = impl_->resolveExprClassName(fExpr);
                             fExpr->accept(*this);
                             llvm::Value* rval = impl_->lastValue;
-                            llvm::Value* rstr = emitStringify(rval, rcls, true);
+                            llvm::Value* rstr = emitStringify(fExpr, rval, rcls, true);
                             impl_->emitScopeCleanup();
                             impl_->builder->CreateRet(rstr);
 
@@ -478,32 +447,28 @@ void CodeGen::visit(TemplateExpr& node) {
                     }
                 }
 
-                llvm::Value* strVal;
-                bool strValOwned = true;
-                if (!fClassName.empty() && impl_->hasDunder(fClassName, "__str__") &&
-                    (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy())) {
-                    strVal = impl_->callDunder(fClassName, "__str__", exprVal);
-                    impl_->emitDecrefByKind(exprVal,
-                                            impl_->ownedTempDrainKind(fExpr, exprVal));
-                } else if (!fClassName.empty() && impl_->hasDunder(fClassName, "__repr__") &&
-                           (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy())) {
-                    strVal = impl_->callDunder(fClassName, "__repr__", exprVal);
-                    impl_->emitDecrefByKind(exprVal,
-                                            impl_->ownedTempDrainKind(fExpr, exprVal));
-                } else if (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy()) {
-                    strVal = exprVal;
-                    strValOwned = impl_->isOwnedStrResult(exprVal);
-                } else if (exprVal->getType() == impl_->i1Type) {
-                    llvm::Value* ext = impl_->builder->CreateZExt(exprVal, impl_->i64Type);
-                    strVal = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_bool_to_str"], {ext}, "btos");
-                } else if (exprVal->getType() == impl_->f64Type) {
-                    strVal = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_float_to_str"], {exprVal}, "ftos");
-                } else {
-                    strVal = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_int_to_str"], {exprVal}, "itos");
+                bool isJoinFilter = (filterName == "join" ||
+                                     filterName.rfind("join(", 0) == 0);
+                if (isJoinFilter || (tp.isSpread && filterName == "raw")) {
+                    parts.push_back(emitTemplateJoin(node, tp, fExpr, exprVal,
+                                                     effContent,
+                                                     filterName == "raw"));
+                    continue;
                 }
+
+                auto rendered = impl_->emitRenderToStr(
+                    fExpr, fExpr->type.get(), exprVal, fClassName);
+                if (!rendered.value) {
+                    impl_->addError(templateRenderError(exprText, fClassName),
+                                    node.location());
+                    parts.push_back(impl_->emitStringLiteralBytes(""));
+                    continue;
+                }
+                llvm::Value* strVal = rendered.value;
+                bool strValOwned = rendered.owned;
+                if (rendered.consumedSource)
+                    impl_->emitDecrefByKind(exprVal,
+                                            impl_->ownedTempDrainKind(fExpr, exprVal));
 
                 auto applyFilter = [&](const std::string& fnKey, const std::string& twine) {
                     llvm::Value* prev = strVal;
@@ -524,43 +489,6 @@ void CodeGen::visit(TemplateExpr& node) {
                         applyFilter("dragon_template_escape_sql", "esc_sql");
                     } else if (filterName == "url") {
                         applyFilter("dragon_template_escape_url", "esc_url");
-                    } else if (filterName == "join" ||
-                               filterName.rfind("join(", 0) == 0) {
-                        std::string sepText;
-                        if (filterName.size() > 5 && filterName[4] == '(') {
-                            auto closeParen = filterName.rfind(')');
-                            if (closeParen != std::string::npos && closeParen > 5) {
-                                sepText = filterName.substr(5, closeParen - 5);
-                            }
-                        }
-                        llvm::Value* sepVal;
-                        if (sepText.find_first_not_of(" \t\n\r") == std::string::npos) {
-                            sepVal = impl_->builder->CreateGlobalString("");
-                        } else {
-                            LexerOptions sLexOpts;
-                            sLexOpts.filename = "<template-join-sep>";
-                            Lexer sLexer(sepText, sLexOpts);
-                            auto sTokens = sLexer.tokenize();
-                            ParserOptions sOpts;
-                            sOpts.isDragonFile = true;
-                            Parser sParser(std::move(sTokens), sOpts);
-                            auto sExpr = sParser.parseExpression();
-                            if (sExpr && !sParser.hasErrors()) {
-                                sExpr->accept(*this);
-                                sepVal = impl_->lastValue;
-                            } else {
-                                impl_->addError(
-                                    "Template `| join(...)` separator must be a "
-                                    "valid Dragon expression",
-                                    node.location());
-                                sepVal = impl_->builder->CreateGlobalString("");
-                            }
-                        }
-                        llvm::Value* joined = impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_str_join_ptr"],
-                            {sepVal, strVal}, "tpl_join");
-                        strVal = joined;
-                        strValOwned = true;
                     } else {
                         auto* filterFunc = impl_->module->getFunction(filterName);
                         if (filterFunc) {
@@ -577,24 +505,9 @@ void CodeGen::visit(TemplateExpr& node) {
                                             node.location());
                         }
                     }
-                } else if (!effContent.empty()) {
-                    bool sameType = (!fClassName.empty() &&
-                                     fClassName == effContent);
-                    if (!sameType) {
-                        std::string ownMod = impl_->resolveClassOwningModule(effContent);
-                        auto* escFunc = impl_->resolveMethodFunction(
-                            ownMod, effContent, "escape");
-                        if (escFunc) {
-                            llvm::Value* prev = strVal;
-                            strVal = impl_->builder->CreateCall(
-                                escFunc, {strVal}, "auto_esc");
-                            if (strValOwned && impl_->options.gcMode == GCMode::RC) {
-                                impl_->builder->CreateCall(
-                                    impl_->runtimeFuncs["dragon_decref_str"], {prev});
-                            }
-                            strValOwned = true;
-                        }
-                    }
+                } else {
+                    strVal = impl_->emitContentEscape(effContent, strVal,
+                                                      strValOwned, fClassName);
                 }
 
                 parts.push_back(strVal);
@@ -655,6 +568,130 @@ void CodeGen::visit(TemplateExpr& node) {
     if (!impl_->templateContextStack.empty()) {
         impl_->templateContextStack.pop_back();
     }
+}
+
+llvm::Value* CodeGen::emitTemplateJoin(TemplateExpr& node, const TemplatePart& part,
+                                       Expr* listExpr, llvm::Value* listVal,
+                                       const std::string& contentType,
+                                       bool elementsRaw) {
+    auto& b = *impl_->builder;
+    const std::string site = spliceSite(part.exprText);
+
+    llvm::Value* sepVal = nullptr;
+    bool sepOwned = false;
+    Expr* sepExpr = part.separatorExpr.get();
+    if (!sepExpr) {
+        sepVal = b.CreateGlobalString("");
+    } else {
+        std::string sepClass = impl_->resolveExprClassName(sepExpr);
+        sepExpr->accept(*this);
+        llvm::Value* sepSource = impl_->lastValue;
+        auto sepRendered = impl_->emitRenderToStr(sepExpr, sepExpr->type.get(),
+                                                  sepSource, sepClass);
+        if (!sepRendered.value) {
+            impl_->addError(templateRenderError(part.exprText, sepClass),
+                            node.location());
+            sepVal = b.CreateGlobalString("");
+        } else {
+            sepVal = sepRendered.value;
+            sepOwned = sepRendered.owned;
+            if (sepRendered.consumedSource)
+                impl_->emitDecrefByKind(
+                    sepSource, impl_->ownedTempDrainKind(sepExpr, sepSource));
+            if (!elementsRaw)
+                sepVal = impl_->emitContentEscape(contentType, sepVal, sepOwned,
+                                                  sepClass);
+        }
+    }
+
+    const Type* elemType = nullptr;
+    if (listExpr->type)
+        if (auto* listType = dynamic_cast<ListType*>(listExpr->type.get()))
+            elemType = listType->elementType.get();
+    Type::Kind elemKind = elemType ? elemType->kind() : Type::Kind::Unknown;
+    std::string elemClass = elemType ? impl_->renderClassName(elemType) : "";
+    if (!elemType) {
+        if (auto* listName = dynamic_cast<NameExpr*>(listExpr)) {
+            auto kindIt = impl_->varListElemKinds.find(listName->name);
+            if (kindIt != impl_->varListElemKinds.end()) elemKind = kindIt->second;
+            auto classIt = impl_->varListElemClassName.find(listName->name);
+            if (classIt != impl_->varListElemClassName.end()) {
+                elemClass = classIt->second;
+                elemKind = Type::Kind::Instance;
+            }
+        }
+    }
+
+    bool sameContentType = !elemClass.empty() && elemClass == contentType;
+    bool needsEscape = !contentType.empty() && !elementsRaw && !sameContentType;
+
+    if (elemKind == Type::Kind::Str && !needsEscape) {
+        llvm::Value* joined = b.CreateCall(
+            impl_->runtimeFuncs["dragon_str_join_ptr"], {sepVal, listVal}, "tpl_join");
+        if (sepOwned && impl_->options.gcMode == GCMode::RC)
+            b.CreateCall(impl_->runtimeFuncs["dragon_decref_str"], {sepVal});
+        impl_->emitDecrefByKind(listVal, impl_->ownedTempDrainKind(listExpr, listVal));
+        return joined;
+    }
+
+    if (elemKind == Type::Kind::Unknown) {
+        impl_->addError(unknownRenderTypeMessage(site), node.location());
+        return impl_->emitStringLiteralBytes("");
+    }
+
+    llvm::Function* func = impl_->currentFunction;
+    llvm::Value* buf = b.CreateCall(
+        impl_->runtimeFuncs["dragon_list_new_ptr"],
+        {llvm::ConstantInt::get(impl_->i64Type, 0),
+         llvm::ConstantInt::get(impl_->i64Type, TAG_STR)}, "tpl_join_buf");
+    auto* idxSlot = impl_->createEntryAlloca(func, "tpl.join.i", impl_->i64Type);
+    b.CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxSlot);
+    llvm::Value* count = b.CreateCall(
+        impl_->runtimeFuncs["dragon_list_len"], {listVal}, "tpl.join.n");
+
+    auto* condBB = llvm::BasicBlock::Create(*impl_->context, "tpl.join.cond", func);
+    auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "tpl.join.body", func);
+    auto* endBB = llvm::BasicBlock::Create(*impl_->context, "tpl.join.end", func);
+
+    b.CreateBr(condBB);
+    b.SetInsertPoint(condBB);
+    llvm::Value* idx = b.CreateLoad(impl_->i64Type, idxSlot, "tpl.join.idx");
+    b.CreateCondBr(b.CreateICmpSLT(idx, count, "tpl.join.more"), bodyBB, endBB);
+
+    b.SetInsertPoint(bodyBB);
+    auto* elemSlot = impl_->bindListElemByTypeKind(func, listVal, idx,
+                                                   "tpl.join.elem", elemKind);
+    llvm::Value* elem = b.CreateLoad(elemSlot->getAllocatedType(), elemSlot,
+                                     "tpl.join.e");
+    auto rendered = impl_->emitRenderToStr(nullptr, elemType, elem, elemClass);
+    if (!rendered.value) {
+        impl_->addError(elemClass.empty()
+                            ? unrenderableTypeMessage(site, "list element")
+                            : unrenderableClassMessage(site, elemClass),
+                        node.location());
+        b.CreateBr(endBB);
+        b.SetInsertPoint(endBB);
+        return impl_->emitStringLiteralBytes("");
+    }
+    llvm::Value* elemStr = rendered.value;
+    bool elemOwned = rendered.owned;
+    if (!elementsRaw)
+        elemStr = impl_->emitContentEscape(contentType, elemStr, elemOwned, elemClass);
+    if (!elemOwned && impl_->options.gcMode == GCMode::RC)
+        b.CreateCall(impl_->runtimeFuncs["dragon_incref_str"], {elemStr});
+    b.CreateCall(impl_->runtimeFuncs["dragon_list_append_ptr"], {buf, elemStr});
+    b.CreateStore(b.CreateAdd(idx, llvm::ConstantInt::get(impl_->i64Type, 1),
+                              "tpl.join.next"), idxSlot);
+    b.CreateBr(condBB);
+
+    b.SetInsertPoint(endBB);
+    llvm::Value* joined = b.CreateCall(
+        impl_->runtimeFuncs["dragon_str_join_ptr"], {sepVal, buf}, "tpl_join");
+    impl_->emitDecrefByKind(buf, Impl::VarKind::List);
+    if (sepOwned && impl_->options.gcMode == GCMode::RC)
+        b.CreateCall(impl_->runtimeFuncs["dragon_decref_str"], {sepVal});
+    impl_->emitDecrefByKind(listVal, impl_->ownedTempDrainKind(listExpr, listVal));
+    return joined;
 }
 
 void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType) {

@@ -440,6 +440,7 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
             for (auto& s : part.blockStmts)
                 tp.blockStmts.push_back(cloneStmt(s.get(), subst));
             tp.filterName = part.filterName;
+            tp.separatorExpr = cloneExpr(part.separatorExpr.get(), subst);
             tp.isSpread = part.isSpread;
             tp.exprText = part.exprText;
             tp.bangPos = part.bangPos;

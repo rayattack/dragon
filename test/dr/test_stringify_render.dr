@@ -1,0 +1,143 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
+from unittest import TestCase, main
+from html import HTML
+
+
+class Money {
+    amount: int
+
+    def(amount: int) {
+        self.amount = amount
+    }
+
+    def __str__() -> str {
+        return "<" + str(self.amount) + ">"
+    }
+}
+
+
+def row(text: str) -> HTML {
+    return template[HTML] {<li>!{text}</li>}
+}
+
+
+class ScalarSpliceMatchesFStringTests(TestCase) {
+    """`!{xs}` pasted heap memory where `f"{xs}"` rendered the value.
+
+    You write ordinary, correct-looking Dragon:
+
+        xs: list[int] = [1, 2, 3]
+        page: HTML = template[HTML] {<p>!{xs}</p>}
+
+    You did nothing wrong. `f"{xs}"` renders `[1, 2, 3]`, and the template
+    splice reads like the same operation. But the template splice had no rule
+    for a container, so it fell through to "this pointer must already be a
+    string" and pasted the first byte of the list's object header into the
+    page. Forgetting the star in `!{*xs}` therefore produced silent, invisible
+    output instead of something you could see and fix.
+
+    Now one stringify helper serves f-strings, `str()`, and template splices, so
+    a splice renders exactly what an f-string renders, with the content type's
+    escaping applied on top.
+    """
+
+    def test_list_splice_matches_fstring() {
+        xs: list[int] = [1, 2, 3]
+        page: HTML = template[HTML] {<p>!{xs}</p>}
+        self.assertEqual(page.to_str(), "<p>" + HTML.escape(f"{xs}") + "</p>")
+        self.assertEqual(page.to_str(), "<p>[1, 2, 3]</p>")
+    }
+
+    def test_dict_splice_matches_fstring_and_is_escaped() {
+        d: dict[str, int] = {"a": 1}
+        page: HTML = template[HTML] {<p>!{d}</p>}
+        self.assertEqual(page.to_str(), "<p>" + HTML.escape(f"{d}") + "</p>")
+        self.assertEqual(page.to_str(), "<p>{&#x27;a&#x27;: 1}</p>")
+    }
+
+    def test_tuple_splice_matches_fstring() {
+        t: tuple[int, str] = (1, "x")
+        page: HTML = template[HTML] {<p>!{t}</p>}
+        self.assertEqual(page.to_str(), "<p>" + HTML.escape(f"{t}") + "</p>")
+    }
+
+    def test_set_splice_matches_fstring() {
+        s: set[int] = {7}
+        page: HTML = template[HTML] {<p>!{s}</p>}
+        self.assertEqual(page.to_str(), "<p>" + HTML.escape(f"{s}") + "</p>")
+    }
+
+    def test_bytes_splice_matches_fstring() {
+        b: bytes = b"hi"
+        page: HTML = template[HTML] {<p>!{b}</p>}
+        self.assertEqual(page.to_str(), "<p>" + HTML.escape(f"{b}") + "</p>")
+    }
+
+    def test_list_of_instances_reprs_each_element() {
+        rows: list[HTML] = [row("a"), row("b")]
+        self.assertEqual(f"{rows}", "[<HTML instance>, <HTML instance>]")
+        page: HTML = template[HTML] {<p>!{rows}</p>}
+        self.assertEqual(page.to_str(), "<p>" + HTML.escape(f"{rows}") + "</p>")
+    }
+
+    def test_str_of_container_matches_fstring() {
+        xs: list[int] = [1, 2]
+        d: dict[str, int] = {"a": 1}
+        self.assertEqual(str(xs), f"{xs}")
+        self.assertEqual(str(d), f"{d}")
+    }
+}
+
+
+class AnySpliceTests(TestCase) {
+    """An `Boxed` splice crashed the compiler instead of dispatching.
+
+    You write:
+
+        value: Boxed = 5
+        page: HTML = template[HTML] {<p>!{value}</p>}
+
+    You did nothing wrong: `Boxed` is a boxed value that already knows how to
+    render itself at runtime, and `f"{value}"` renders it. The template splice
+    had no branch for a box, so it handed the box to the integer formatter and
+    the build died in LLVM verification.
+
+    Now a boxed value dispatches at runtime, exactly as the f-string does, and
+    whatever it renders is escaped by the content type.
+    """
+
+    def test_any_int_renders() {
+        value: Boxed = 5
+        page: HTML = template[HTML] {<p>!{value}</p>}
+        self.assertEqual(page.to_str(), "<p>5</p>")
+    }
+
+    def test_any_str_is_escaped() {
+        value: Boxed = "<b>"
+        page: HTML = template[HTML] {<p>!{value}</p>}
+        self.assertEqual(page.to_str(), "<p>&lt;b&gt;</p>")
+    }
+}
+
+
+class ClassStringifyTests(TestCase) {
+    """One rendering rule for a class, wherever it is stringified."""
+
+    def test_str_fstring_and_splice_agree() {
+        m: Money = Money(5)
+        page: HTML = template[HTML] {<p>!{m}</p>}
+        self.assertEqual(str(m), "<5>")
+        self.assertEqual(f"{m}", "<5>")
+        self.assertEqual(page.to_str(), "<p>&lt;5&gt;</p>")
+    }
+
+    def test_str_of_str_is_unchanged() {
+        s: str = "<b>"
+        self.assertEqual(str(s), "<b>")
+        self.assertEqual(f"{s}", "<b>")
+    }
+}
+
+
+main([ScalarSpliceMatchesFStringTests(), AnySpliceTests(), ClassStringifyTests()])

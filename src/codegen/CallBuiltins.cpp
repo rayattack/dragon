@@ -288,10 +288,8 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_print_str_raw"], {msg});
         } else {
-            std::string repr = "<" + printClassName + " instance>";
-            auto* reprStr = impl_->builder->CreateGlobalString(repr, "class_repr");
-            impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_print_str_raw"], {reprStr});
+            impl_->addError(unrenderableClassMessage("print()", printClassName),
+                            argExpr->location());
         }
     } else if (argType == impl_->i64Type) {
         impl_->builder->CreateCall(
@@ -918,42 +916,20 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
         std::string strClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
         llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
-        if (!strClassName.empty() && impl_->hasDunder(strClassName, "__str__")) {
-            impl_->lastValue = impl_->callDunder(strClassName, "__str__", arg);
-        } else if (!strClassName.empty() && impl_->hasDunder(strClassName, "__repr__")) {
-            impl_->lastValue = impl_->callDunder(strClassName, "__repr__", arg);
-        } else if (arg->getType() == impl_->i64Type) {
+        auto rendered = impl_->emitRenderToStr(node.args[0].get(),
+                                               node.args[0]->type.get(), arg,
+                                               strClassName);
+        if (!rendered.value) {
+            impl_->addError(strClassName.empty()
+                                ? unknownRenderTypeMessage("str()")
+                                : unrenderableClassMessage("str()", strClassName),
+                            node.location());
+            impl_->lastValue = impl_->emitStringLiteralBytes("");
+        } else if (rendered.value == arg && impl_->options.gcMode == GCMode::RC) {
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_int_to_str"], {arg}, "itos");
-        } else if (arg->getType() == impl_->f64Type) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_float_to_str"], {arg}, "ftos");
-        } else if (arg->getType() == impl_->i1Type) {
-            auto* ext = impl_->builder->CreateZExt(arg, impl_->i64Type);
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bool_to_str"], {ext}, "btos");
-        } else if (arg->getType() == impl_->boxType) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_box_to_str"], {arg}, "btos.any");
-        } else if (!strClassName.empty() &&
-                   impl_->userExcCodesBySym.count(impl_->classSym(strClassName)) > 0) {
-            auto* slotMsg = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_exc_get_msg"], {}, "exc.msg.b");
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_string_dup"], {slotMsg}, "exc.msg");
-        } else if (arg->getType()->isPointerTy()) {
-            std::string creprFn = impl_->containerReprFn(node.args[0].get());
-            if (!creprFn.empty()) {
-                impl_->lastValue = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs[creprFn], {arg}, "ctos");
-            } else if (impl_->options.gcMode == GCMode::RC &&
-                       (impl_->resolveExprVarKind(node.args[0].get()) ==
-                            Impl::VarKind::Str ||
-                        (node.args[0]->type &&
-                         node.args[0]->type->kind() == Type::Kind::Str))) {
-                impl_->lastValue = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_str_retain"], {arg}, "stos");
-            }
+                impl_->runtimeFuncs["dragon_str_retain"], {arg}, "stos");
+        } else {
+            impl_->lastValue = rendered.value;
         }
         return true;
     }
@@ -1200,6 +1176,30 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(reprClassName, "__repr__", arg);
             return true;
+        }
+        if (arg->getType()->isPointerTy()) {
+            bool argIsStr =
+                impl_->resolveExprVarKind(node.args[0].get()) == Impl::VarKind::Str ||
+                impl_->resolveExprVarKind(node.args[0].get()) ==
+                    Impl::VarKind::StrLiteral ||
+                (node.args[0]->type &&
+                 node.args[0]->type->kind() == Type::Kind::Str);
+            if (!argIsStr) {
+                auto rendered = impl_->emitRenderToStr(
+                    node.args[0].get(), node.args[0]->type.get(), arg,
+                    reprClassName);
+                if (!rendered.value) {
+                    impl_->addError(
+                        reprClassName.empty()
+                            ? unknownRenderTypeMessage("repr()")
+                            : unrenderableClassMessage("repr()", reprClassName),
+                        node.location());
+                    impl_->lastValue = impl_->emitStringLiteralBytes("");
+                } else {
+                    impl_->lastValue = rendered.value;
+                }
+                return true;
+            }
         }
         if (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy()) {
             impl_->lastValue = impl_->builder->CreateCall(

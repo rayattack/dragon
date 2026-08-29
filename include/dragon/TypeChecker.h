@@ -287,6 +287,8 @@ public:
     void visit(NoneLiteral& node) override;
     void visit(NameExpr& node) override;
     bool typeIsDubable(const Type* t, std::string& why);
+    bool typeIsRenderable(const Type* t, std::string& what);
+    void checkRenderable(Expr* expr, const std::string& site);
     void visit(BinaryExpr& node) override;
     void visit(ChainedCompExpr& node) override;
     void visit(WalrusExpr& node) override;
