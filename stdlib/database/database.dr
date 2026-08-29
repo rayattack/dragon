@@ -7,10 +7,10 @@ bare `str` is rejected by the type system, so the injection-prone path does not
 exist at any call site. The one explicit escape hatch is `db.raw` (no params,
 verbatim text for DDL / maintenance).
 
-Result rows are `dict[str, Any]` (column name -> native value). The read verbs
+Result rows are `dict[str, Value]` (column name -> native value). The read verbs
 take an optional `[T]` (Decision 049): `db.all[Customer](sql)` / `db.one(sql)`
 materialize via the compiler's bulk `**`-spread (D047) - `T` explicit or inferred
-from the binding annotation; a bare `dict[str, Any]` annotation yields raw rows.
+from the binding annotation; a bare `dict[str, Value]` annotation yields raw rows.
 
 This is the package root. It re-exports the shared core from `database.base`
 (so `from database import SQL, Connection, Results, ...` keeps working) and

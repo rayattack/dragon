@@ -1,3 +1,4 @@
+from json import Data
 from unittest import TestCase, main
 from http.server import Router, Request, Response, Context
 from http.server import MemoryReader, RequestReader, FramedRequest, ConnReader
@@ -104,9 +105,9 @@ def _req(path: str, accept_gzip: bool) -> bytes {
 }
 
 def _greet(req: Request, res: Response, ctx: Context) -> None {
-    const body: Any = req.json()
+    const body: Data = req.json()
     if isinstance(body, dict) {
-        const m: dict[str, Any] = body
+        const m: dict[str, Data] = body
         const name: str = m["name"]
         const age: int = m["age"]
         res.text("hello:" + name + ":" + str(age))
@@ -484,9 +485,9 @@ class JsonBodyTests(TestCase) {
         const app: Router = Router()
 
         def _sum(req: Request, res: Response, ctx: Context) -> None {
-            const body: Any = req.json()
-            const m: dict[str, Any] = body
-            const items: list[Any] = m["items"]
+            const body: Data = req.json()
+            const m: dict[str, Data] = body
+            const items: list[Data] = m["items"]
             total: int = 0
             for it in items {
                 const n: int = it

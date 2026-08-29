@@ -1,3 +1,4 @@
+from json import Data
 from http.server import Router, Request, Response, Context
 from base64 import b64decode, b64encode
 from json import dumps
@@ -17,7 +18,7 @@ def _bearer(req: Request) -> str {
 
 def _fail(res: Response, status: int, msg: str) -> None {
     res.status = status
-    err: dict[str, Any] = {}
+    err: dict[str, Data] = {}
     err["ok"] = false
     err["error"] = msg
     res.json(dumps(err))
@@ -41,7 +42,7 @@ def api_publish(req: Request, res: Response, ctx: Context) -> None {
         return
     }
     res.status = 201
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["name"] = name
     out["version"] = version
@@ -99,7 +100,7 @@ def api_search(req: Request, res: Response, ctx: Context) -> None {
         rows.append(row)
         i = i + 1
     }
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["results"] = rows
     res.json(dumps(out))
 }
@@ -117,7 +118,7 @@ def api_yank(req: Request, res: Response, ctx: Context) -> None {
     if sev_str == "security" { sev = 2 }
     const reason: str = req.query_str("reason", "")
     if REG.yank(uid, name, version, sev, reason) {
-        out: dict[str, Any] = {}
+        out: dict[str, Data] = {}
         out["ok"] = true
         res.json(dumps(out))
     } else {
@@ -132,12 +133,12 @@ def api_eggs(req: Request, res: Response, ctx: Context) -> None {
         _fail(res, 404, "no such package")
         return
     }
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Data]] = []
     latest: str = ""
     i: int = 0
     while i < len(vers) {
         const v: Version = vers[i]
-        row: dict[str, Any] = {}
+        row: dict[str, Data] = {}
         row["version"] = v.version
         row["hash"] = v.hash
         row["yanked"] = v.yanked
@@ -147,7 +148,7 @@ def api_eggs(req: Request, res: Response, ctx: Context) -> None {
         }
         i = i + 1
     }
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["name"] = name
     out["latest"] = latest
@@ -170,7 +171,7 @@ def api_fetch(req: Request, res: Response, ctx: Context) -> None {
             return
         }
     }
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["name"] = name
     out["version"] = version
@@ -190,7 +191,7 @@ def api_fetch(req: Request, res: Response, ctx: Context) -> None {
     const leaves: list[LogEntry] = TLOG.leaf_for(name, version)
     if len(leaves) > 0 {
         const lf: LogEntry = leaves[0]
-        log: dict[str, Any] = {}
+        log: dict[str, Data] = {}
         log["seq"] = lf.seq
         log["ts"] = lf.ts
         log["published_by"] = lf.published_by
@@ -206,7 +207,7 @@ def api_fetch(req: Request, res: Response, ctx: Context) -> None {
 
 def api_log_checkpoint(req: Request, res: Response, ctx: Context) -> None {
     const cp: Checkpoint = TLOG.checkpoint()
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["size"] = cp.size
     out["root"] = cp.root
@@ -227,7 +228,7 @@ def api_log_inclusion(req: Request, res: Response, ctx: Context) -> None {
         _fail(res, 404, "no such package version in the log")
         return
     }
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["index"] = ip[0]
     out["size"] = ts
@@ -241,7 +242,7 @@ def api_log_consistency(req: Request, res: Response, ctx: Context) -> None {
     n: int = sz
     const toq: str = req.query_str("to", "")
     if len(toq) > 0 { n = int(toq) }
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["from"] = m
     out["to"] = n
@@ -250,7 +251,7 @@ def api_log_consistency(req: Request, res: Response, ctx: Context) -> None {
 }
 
 def api_log_pubkey(req: Request, res: Response, ctx: Context) -> None {
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["pubkey"] = TLOG.public_key_hex()
     out["key_id"] = TLOG.key_id()
@@ -259,11 +260,11 @@ def api_log_pubkey(req: Request, res: Response, ctx: Context) -> None {
 
 def api_log(req: Request, res: Response, ctx: Context) -> None {
     const entries: list[LogEntry] = TLOG.entries()
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Data]] = []
     i: int = 0
     while i < len(entries) {
         const e: LogEntry = entries[i]
-        row: dict[str, Any] = {}
+        row: dict[str, Data] = {}
         row["seq"] = e.seq
         row["name"] = e.name
         row["version"] = e.version
@@ -275,7 +276,7 @@ def api_log(req: Request, res: Response, ctx: Context) -> None {
         rows.append(row)
         i = i + 1
     }
-    out: dict[str, Any] = {}
+    out: dict[str, Data] = {}
     out["ok"] = true
     out["entries"] = rows
     res.json(dumps(out))

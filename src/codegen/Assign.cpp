@@ -272,7 +272,7 @@ bool CodeGen::tryEmitListSubscriptStore(SubscriptExpr& sub, AssignStmt& node,
             setElemKind = astElemKind;
     }
 
-    if (impl_->getIterableElementKind(sub.object.get()) == Type::Kind::Any) {
+    if (Impl::isBoxedKind(impl_->getIterableElementKind(sub.object.get()))) {
         auto tp = impl_->boxArgTagPayload(node.value.get(), val, true);
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_list_box_set"],
@@ -738,6 +738,7 @@ void CodeGen::emitTupleUnpackAssign(TupleExpr& tupleTarget, AssignStmt& node,
 }
 
 void CodeGen::Impl::storeUnpackedI64Elem(NameExpr* nameTarget, llvm::Value* elem) {
+    if (tryNarrowShadowWriteThrough(nameTarget->name, elem, true)) return;
     auto* alloca = lookupVar(nameTarget->name);
     bool hadSlot = (alloca != nullptr);
     if (!alloca) {
@@ -793,6 +794,11 @@ void CodeGen::Impl::storeUnpackedElemToName(NameExpr* nameTarget, llvm::Value* e
         }
         return;
     }
+    if (tryNarrowShadowWriteThrough(nameTarget->name, elem, true)) {
+        if (!elemClassName.empty())
+            varClassNames[nameTarget->name] = elemClassName;
+        return;
+    }
     auto* alloca = lookupVar(nameTarget->name);
     bool hadSlot = (alloca != nullptr);
     if (!alloca) {
@@ -808,6 +814,10 @@ void CodeGen::Impl::storeUnpackedElemToName(NameExpr* nameTarget, llvm::Value* e
 }
 
 void CodeGen::emitNameAssign(NameExpr& name, AssignStmt& node, llvm::Value* val) {
+    bool rhsBorrowed = (val->getType() == impl_->boxType)
+        ? !impl_->isOwnedBoxResult(val)
+        : Impl::isBorrowedHeapExpr(node.value.get());
+    if (impl_->tryNarrowShadowWriteThrough(name.name, val, rhsBorrowed)) return;
     if (impl_->isCellBacked(name.name)) {
         auto* alloca = impl_->lookupVar(name.name);
         Impl::VarKind cellKind = impl_->lookupVarKind(name.name);

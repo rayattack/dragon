@@ -732,7 +732,7 @@ void dragon_list_view_check(void* p, int64_t want_elem_tag) {
     if (want_elem_tag < 0) {
         if (h->type_tag == DRAGON_TAG_LIST_BOX) return;
         dragon_raise_exc_cstr(80,
-            "TypeError: expected a boxed-element list (list[Any]) but the "
+            "TypeError: expected a boxed-element list (list of a union type) but the "
             "value holds a monomorphized list (e.g. list[str]); build it with "
             "element type Any at its declaration, or copy it element-wise");
         return;

@@ -123,7 +123,7 @@ TEST(CodeGenTest, TuplePrint) {
 }
 
 TEST(CodeGenTest, TupleEmpty) {
-    auto ir = generateIR("t: Any = ()");
+    auto ir = generateIR("t: int | tuple[] = ()");
     EXPECT_NE(ir.find("dragon_tuple_new"), std::string::npos);
 }
 

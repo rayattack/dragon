@@ -143,8 +143,14 @@ an `HTML` template is inserted **raw** (no double-escape), while a `str` is esca
 |------------------------------|--------------|
 | the **same** content type (`HTML` in `HTML`) | inserted raw - no double-escape |
 | a `str` | escaped via the content type's `escape()` |
-| any other type | `__str__()` then escaped |
+| a class with `__str__` / `__repr__` | that method, then escaped |
+| a list, dict, set, tuple, or bytes | the same text `f"{x}"` gives, then escaped |
+| a `Data` | dispatched at runtime, then escaped |
 | piped through `\| raw` | inserted raw (explicit opt-out) |
+
+A class with neither `__str__` nor `__repr__` has no text form, so splicing one
+is a compile error that names the class - the same error `print(x)`, `str(x)`,
+and `f"{x}"` give for that value.
 
 That's why components compose without ever double-escaping - the type system tracks
 which strings are already safe. **Layouts** fall out of the same idea: a base page is
@@ -175,6 +181,17 @@ fragment auto-escapes as HTML. Conditionals work identically
 block. For a single value, a conditional *expression* is cleaner than a block:
 `!{"Hi " + name if logged_in else "Sign in"}`. And two inline shortcuts render a
 list without a full loop: `!{*xs}` (spread, empty separator) and `!{xs | join(", ")}`.
+
+Both are exactly the loop above, written short: each element travels the same
+dispatch table, so `!{*rows}` on a `list[HTML]` is byte-identical to the loop
+form, `!{*names}` on a `list[str]` escapes every element, and `!{*ns}` on a
+`list[int]` renders digits. The separator follows the same rule (a `str`
+separator is escaped, an `HTML` separator is inserted raw) and is evaluated once
+per join, not once per element. `!{*xs | raw}` joins without escaping.
+
+The operand must be a list the compiler can render element by element. A
+`list[Data]`, a list of containers, a list of classes with no `__str__`, and
+non-list operands are compile errors that name the operand.
 
 ## Filters
 

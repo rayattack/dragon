@@ -15,7 +15,7 @@ What it implements:
   - Binary result-row decoding via `struct` (the f64<->bytes reinterpret
     primitive): MySQL sends prepared-statement rows in binary, so FLOAT/DOUBLE
     columns arrive as raw little-endian IEEE-754 - there is no text option.
-  - column-type -> Dragon type mapping into `dict[str, Any]` rows.
+  - column-type -> Dragon type mapping into `dict[str, Value]` rows.
 
 Auth note: `caching_sha2_password` *full* auth (cold server-side cache) requires
 either RSA (not exposed in Dragon's crypto surface) or a TLS channel; this
@@ -23,7 +23,7 @@ driver does the fast path and the `mysql_native_password` switch. A cold
 caching_sha2 account raises a clear ConnectionError pointing at TLS as the fix.
 """
 
-from database.base import Connection, SQL, Results, QueryError, ConnectionError
+from database.base import Connection, SQL, Results, QueryError, ConnectionError, Value
 from socket import TcpStream
 from hashlib import sha1, sha256
 import struct
@@ -291,7 +291,7 @@ class MySqlConnection(Connection) {
         return sql
     }
 
-    def _parse_column_def(p: bytes) -> dict[str, Any] {
+    def _parse_column_def(p: bytes) -> dict[str, Value] {
         o: int = 0
         f: int = 0
         name: str = ""
@@ -311,7 +311,7 @@ class MySqlConnection(Connection) {
         o = o + fl[1]
         ctype: int = p[o + 6]
         flags: int = struct.unpack_u16_le(p, o + 7)
-        col: dict[str, Any] = {}
+        col: dict[str, Value] = {}
         col["name"] = name
         col["type"] = ctype
         col["unsigned"] = (flags & 0x20) != 0
@@ -322,7 +322,7 @@ class MySqlConnection(Connection) {
         return p[0] == 0xFE and len(p) < 9
     }
 
-    def _bind_param(p: Any, types: list[int], values: list[int], null_bitmap: list[int], idx: int) {
+    def _bind_param(p: Value, types: list[int], values: list[int], null_bitmap: list[int], idx: int) {
         if isinstance(p, bool) {
             types.append(MT_TINY)
             types.append(0)
@@ -374,8 +374,8 @@ class MySqlConnection(Connection) {
         }
     }
 
-    def _decode_value(data: bytes, o: int, ctype: int) -> dict[str, Any] {
-        r: dict[str, Any] = {}
+    def _decode_value(data: bytes, o: int, ctype: int) -> dict[str, Value] {
+        r: dict[str, Value] = {}
         if ctype == MT_TINY {
             r["v"] = struct.unpack_i8(data, o)
             r["n"] = o + 1
@@ -395,7 +395,7 @@ class MySqlConnection(Connection) {
             r["v"] = struct.unpack_f64_le(data, o)
             r["n"] = o + 8
         } else if ctype == MT_DATE or ctype == MT_DATETIME or ctype == MT_TIMESTAMP {
-            r2: dict[str, Any] = self._decode_datetime(data, o)
+            r2: dict[str, Value] = self._decode_datetime(data, o)
             r["v"] = r2["v"]
             r["n"] = r2["n"]
         } else {
@@ -420,9 +420,9 @@ class MySqlConnection(Connection) {
         return str(v)
     }
 
-    def _decode_datetime(data: bytes, o: int) -> dict[str, Any] {
+    def _decode_datetime(data: bytes, o: int) -> dict[str, Value] {
         ln: int = data[o]
-        r: dict[str, Any] = {}
+        r: dict[str, Value] = {}
         if ln == 0 {
             r["v"] = ""
             r["n"] = o + 1
@@ -475,7 +475,7 @@ class MySqlConnection(Connection) {
         return sid
     }
 
-    def _run(canonical: str, params: list[Any]) -> list[dict[str, Any]] {
+    def _run(canonical: str, params: list[Value]) -> list[dict[str, Value]] {
         nparams: int = len(params)
         stmt_id: int = self._get_stmt(canonical, nparams)
 
@@ -505,7 +505,7 @@ class MySqlConnection(Connection) {
         }
         self._command(COM_STMT_EXECUTE, bytes(body))
 
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Value]] = []
         self._affected = 0
         first: bytes = self._read_packet()
         if first[0] == 0xFF {
@@ -523,7 +523,7 @@ class MySqlConnection(Connection) {
             rcc: list[int] = _lenenc(first, 0)
             rcount: int = rcc[0]
             while rci < rcount {
-                rdef: dict[str, Any] = self._parse_column_def(self._read_packet())
+                rdef: dict[str, Value] = self._parse_column_def(self._read_packet())
                 rname: str = rdef["name"]
                 rtype: int = rdef["type"]
                 rnames.append(rname)
@@ -545,11 +545,11 @@ class MySqlConnection(Connection) {
         return rows
     }
 
-    def _decode_binary_row(pkt: bytes, names: list[str], ctypes: list[int]) -> dict[str, Any] {
+    def _decode_binary_row(pkt: bytes, names: list[str], ctypes: list[int]) -> dict[str, Value] {
         ncol: int = len(names)
         nb_len: int = (ncol + 9) >> 3
         o: int = 1 + nb_len
-        row: dict[str, Any] = {}
+        row: dict[str, Value] = {}
         c: int = 0
         while c < ncol {
             nm: str = names[c]
@@ -558,7 +558,7 @@ class MySqlConnection(Connection) {
             if isnull {
                 row[nm] = none
             } else {
-                dv: dict[str, Any] = self._decode_value(pkt, o, ctypes[c])
+                dv: dict[str, Value] = self._decode_value(pkt, o, ctypes[c])
                 row[nm] = dv["v"]
                 no: int = dv["n"]
                 o = no
@@ -569,7 +569,7 @@ class MySqlConnection(Connection) {
     }
 
     def run(sql: SQL) -> Results {
-        rows: list[dict[str, Any]] = self._run(sql.canonical, sql.params)
+        rows: list[dict[str, Value]] = self._run(sql.canonical, sql.params)
         aff: int = self._affected
         xid: int = 0
         if not self._had_resultset {
@@ -580,7 +580,7 @@ class MySqlConnection(Connection) {
 
     def raw(text: str) -> Results {
         self._command(COM_QUERY, text.encode("utf-8"))
-        empty: list[dict[str, Any]] = []
+        empty: list[dict[str, Value]] = []
         p: bytes = self._read_packet()
         if p[0] == 0xFF {
             raise QueryError(self._err_text(p))
@@ -610,7 +610,7 @@ class MySqlConnection(Connection) {
     }
 
     def _last_insert_id() -> int {
-        rows: list[dict[str, Any]] = self._run("select last_insert_id() as id", [])
+        rows: list[dict[str, Value]] = self._run("select last_insert_id() as id", [])
         if len(rows) == 0 {
             return 0
         }

@@ -1,3 +1,4 @@
+from json import Data
 from http.server import Request, Response, Context
 from io import open
 from os import listdir
@@ -277,7 +278,7 @@ def _first_paragraph(md: str) -> str {
 
 def _build_docs_index(chapters: list[Chapter], docs_dir: str) -> tuple[dict[str, list[Heading]], str] {
     headings_by_slug: dict[str, list[Heading]] = {}
-    entries: list[dict[str, Any]] = []
+    entries: list[dict[str, Data]] = []
     for c in chapters {
         if len(c.slug) == 0 {
             continue

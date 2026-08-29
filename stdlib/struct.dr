@@ -17,7 +17,7 @@ class in pure Dragon - msgpack (`>d`), BSON (`<d`), CBOR, protobuf, the MySQL
 binary wire rows, `.npy`, audio - without an FFI dependency.
 
 `unpack` returns a `list` (CPython returns a tuple; Dragon has no variadic-arity
-runtime tuple, so a `list[Any]` is the expressible analog - index access and
+runtime tuple, so a `list[Field]` is the expressible analog - index access and
 iteration are identical).
 
 Stage 1 (the `pack_*` / `unpack_*` monomorphic helpers below) is the branch-free
@@ -350,7 +350,7 @@ def _arg_count(body: str) -> int {
     return total
 }
 
-def pack(fmt: str, *args: Any) -> bytes {
+def pack(fmt: str, *args: Field) -> bytes {
     little: bool = _is_little(fmt)
     body: str = _body(fmt)
     const expected: int = _arg_count(body)
@@ -390,13 +390,15 @@ def pack(fmt: str, *args: Any) -> bytes {
                 width = count
             }
             raw: bytes = bytes()
-            sa: Any = args[ai]
+            sa: Field = args[ai]
             if isinstance(sa, str) {
                 sv: str = sa
                 raw = sv.encode("utf-8")
-            } else {
+            } else if isinstance(sa, bytes) {
                 bv: bytes = sa
                 raw = bv
+            } else {
+                raise error("argument for 's' must be str or bytes")
             }
             ai = ai + 1
             k: int = 0
@@ -411,7 +413,7 @@ def pack(fmt: str, *args: Any) -> bytes {
         } else if c == "c" {
             r: int = 0
             while r < count {
-                const ca: Any = args[ai]
+                const ca: Field = args[ai]
                 if not isinstance(ca, bytes) {
                     raise error("char format requires a bytes object of length 1")
                 }
@@ -439,7 +441,7 @@ def pack(fmt: str, *args: Any) -> bytes {
     return bytes(out)
 }
 
-def _read_one(data: bytes, o: int, c: str, little: bool) -> Any {
+def _read_one(data: bytes, o: int, c: str, little: bool) -> Field {
     """Read one numeric/bool field of code `c` from `data` at offset `o`."""
     if c == "c" {
         return data[o:o + 1]
@@ -488,11 +490,11 @@ def _read_one(data: bytes, o: int, c: str, little: bool) -> Any {
     raise error("bad char in struct format: " + c)
 }
 
-def unpack(fmt: str, data: bytes) -> list[Any] {
+def unpack(fmt: str, data: bytes) -> list[Field] {
     """unpack(fmt, data) -> list (CPython returns a tuple; see module docstring)."""
     little: bool = _is_little(fmt)
     body: str = _body(fmt)
-    result: list[Any] = []
+    result: list[Field] = []
     o: int = 0
     i: int = 0
     n: int = len(body)

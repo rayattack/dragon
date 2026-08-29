@@ -1,0 +1,53 @@
+"""Containers whose element type is a plain union store boxed values, so every
+read must take its tag from the value itself. Guessing a static tag here used to
+either corrupt the read or refuse to compile."""
+
+type Data = str | int | float | bool | none | list[Data] | dict[str, Data]
+
+# list: literal, append, index, iterate
+xs: list[int | str] = [1, "two"]
+xs.append(3)
+x0: int | str = xs[0]
+x1: int | str = xs[1]
+if not isinstance(x0, int) { print("FAIL: list int")  }
+if not isinstance(x1, str) { print("FAIL: list str")  }
+seen: int = 0
+for v in xs {
+    match v {
+        case int() { seen = seen + 1 }
+        case str() { seen = seen + 1 }
+        case _     { print("FAIL: iter arm") }
+    }
+}
+if seen != 3 { print("FAIL: iter count") }
+
+# dict: both value shapes must survive a round trip
+d: dict[str, int | str] = {"n": 1, "s": "text"}
+dn: int | str = d["n"]
+ds: int | str = d["s"]
+if not isinstance(dn, int) { print("FAIL: dict int") }
+if not isinstance(ds, str) { print("FAIL: dict str") }
+
+# recursive alias: nested literal, read back, narrow, descend
+doc: dict[str, Data] = {"user": {"name": "Ada"}, "id": 7}
+
+def walk(cur: Data, segs: list[str], i: int) -> list[Data] {
+    if i == len(segs) { return [cur] }
+    match cur {
+        case dict() { return walk(cur[segs[i]], segs, i + 1) }
+        case _      { return [] }
+    }
+    return []
+}
+
+hit: list[Data] = walk(doc, ["user", "name"], 0)
+if len(hit) != 1 { print("FAIL: walk len") }
+for v in hit {
+    match v {
+        case str() { if v != "Ada" { print("FAIL: walk value") } }
+        case _     { print("FAIL: walk arm") }
+    }
+}
+if len(walk(doc, ["id", "name"], 0)) != 0 { print("FAIL: leaf descent") }
+
+print("union containers ok")

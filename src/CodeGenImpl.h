@@ -1802,13 +1802,35 @@ struct CodeGen::Impl {
         return classNames.count(c) ? c : "";
     }
 
+    // Surviving `type` aliases (the recursive ones; canonicalization erased
+    // the rest). An annotation naming one behaves as its definition.
+    std::unordered_map<std::string, TypeExpr*> typeAliasDefs;
+
+    TypeExpr* resolveTypeAliasExpr(TypeExpr* t) {
+        int guard = 0;
+        while (t && guard++ < 16) {
+            auto* named = dynamic_cast<NamedTypeExpr*>(t);
+            if (!named) return t;
+            auto it = typeAliasDefs.find(named->name);
+            if (it == typeAliasDefs.end()) return t;
+            t = it->second;
+        }
+        return t;
+    }
+
+    // Kinds stored as a 16-byte {tag, payload} box, so their runtime tag comes
+    // from the value itself rather than from the annotation.
+    static bool isBoxedKind(Type::Kind k) {
+        return k == Type::Kind::Boxed || k == Type::Kind::Union;
+    }
+
     Type::Kind typeExprToTypeKind(TypeExpr* typeExpr);
 
     VarKind typeExprToKind(TypeExpr* typeExpr);
 
     std::vector<VarKind> typeExprToUnionMembers(TypeExpr* typeExpr) {
         std::vector<VarKind> members;
-        if (auto* ut = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
+        if (auto* ut = dynamic_cast<UnionTypeExpr*>(resolveTypeAliasExpr(typeExpr))) {
             for (auto& t : ut->types) {
                 members.push_back(typeExprToKind(t.get()));
             }
@@ -1817,7 +1839,7 @@ struct CodeGen::Impl {
     }
 
     std::string typeExprUnionClassName(TypeExpr* typeExpr) {
-        if (auto* ut = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
+        if (auto* ut = dynamic_cast<UnionTypeExpr*>(resolveTypeAliasExpr(typeExpr))) {
             for (auto& t : ut->types) {
                 if (auto* nm = dynamic_cast<NamedTypeExpr*>(t.get())) {
                     if (classNames.count(nm->name)) return nm->name;
@@ -1983,6 +2005,14 @@ struct CodeGen::Impl {
     }
 
     llvm::Value* emitTagForExprNoCG(Expr* expr);
+
+    llvm::Value* nicheOptionalTagForValue(Expr* argExpr, llvm::Value* val);
+
+    bool tryNarrowShadowWriteThrough(const std::string& name, llvm::Value* val,
+                                     bool rhsBorrowed);
+
+    void refreshNarrowShadowOrigin(const std::string& name,
+                                   llvm::Value* newPayload);
 
     llvm::Value* coerceArg(llvm::Value* arg, llvm::Type* paramType);
 

@@ -36,7 +36,7 @@ print(sum_all())             # 0
 
 The annotation is mandatory. Writing `def sum_all(*nums)` with no type is
 rejected - the message tells you to use `*nums: int` for a concrete element type,
-or `*nums: Any` when the arguments really are heterogeneous. This is the static
+or `*nums: int | str` (a declared union) when the arguments really are heterogeneous. This is the static
 analogue of Python's untyped `*args`: you state the element type once, and in
 return the body gets a fully typed `list[int]` with native storage, not a list of
 boxed objects.

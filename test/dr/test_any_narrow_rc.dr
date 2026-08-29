@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | list[int] | list[float] | list[bool] | list[str] | list[list[int]] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 const N: int = 3000
@@ -8,24 +10,24 @@ def arg_len(s: str) -> int {
 }
 
 
-def fresh_any(v: str) -> Any {
+def fresh_any(v: str) -> Boxed {
     return v.upper()
 }
 
 
-def fresh_doc(n: int) -> dict[str, Any] {
+def fresh_doc(n: int) -> dict[str, Boxed] {
     return {"mrn": "A" + str(n)}
 }
 
 
 class Doc {
-    data: dict[str, Any]
+    data: dict[str, Boxed]
 
-    def(data: dict[str, Any]) {
+    def(data: dict[str, Boxed]) {
         self.data = data
     }
 
-    def __getitem__(k: str) -> Any {
+    def __getitem__(k: str) -> Boxed {
         return self.data[k]
     }
 }
@@ -52,11 +54,12 @@ class TestAnyArgNarrow(TestCase) {
     def test_append_borrowed_box() {
         i: int = 0
         while i < 300 {
-            d: dict[str, Any] = {"mrn": "A" + str(i)}
+            d: dict[str, Boxed] = {"mrn": "A" + str(i)}
             out: list[str] = []
-            out.append(d["mrn"])
+            const mrn: str = d["mrn"]        # checked downcast to the declared arm
+            out.append(mrn)
             self.assertEqual(out[0], "A" + str(i))
-            self.assertEqual(arg_len(d["mrn"]), len("A" + str(i)))
+            self.assertEqual(arg_len(mrn), len("A" + str(i)))
             i = i + 1
         }
         self.assertEqual(churn(), 200)
@@ -66,7 +69,8 @@ class TestAnyArgNarrow(TestCase) {
         i: int = 0
         while i < 300 {
             out: list[str] = []
-            out.append(fresh_any("mrn" + str(i)))
+            const v: str = fresh_any("mrn" + str(i))        # checked downcast
+            out.append(v)
             self.assertEqual(out[0], ("mrn" + str(i)).upper())
             i = i + 1
         }
@@ -74,13 +78,15 @@ class TestAnyArgNarrow(TestCase) {
     }
 
     def test_append_int_and_float_tiers() {
-        d: dict[str, Any] = {"n": 7, "f": 1.5}
+        d: dict[str, Boxed] = {"n": 7, "f": 1.5}
         nums: list[int] = []
         reals: list[float] = []
         i: int = 0
         while i < 200 {
-            nums.append(d["n"])
-            reals.append(d["f"])
+            const n: int = d["n"]            # checked downcast
+            const f: float = d["f"]          # checked downcast
+            nums.append(n)
+            reals.append(f)
             i = i + 1
         }
         self.assertEqual(nums[0], 7)
@@ -91,12 +97,14 @@ class TestAnyArgNarrow(TestCase) {
     def test_set_add_and_list_insert() {
         i: int = 0
         while i < 300 {
-            d: dict[str, Any] = {"mrn": "A" + str(i)}
+            d: dict[str, Boxed] = {"mrn": "A" + str(i)}
             seen: set[str] = set()
-            seen.add(d["mrn"])
+            const mv1: str = d["mrn"]        # checked downcast to the declared arm
+            seen.add(mv1)
             self.assertEqual(len(seen), 1)
             out: list[str] = ["z"]
-            out.insert(0, d["mrn"])
+            const mv2: str = d["mrn"]        # checked downcast to the declared arm
+            out.insert(0, mv2)
             self.assertEqual(out[0], "A" + str(i))
             self.assertEqual(out[1], "z")
             i = i + 1
@@ -107,9 +115,10 @@ class TestAnyArgNarrow(TestCase) {
     def test_str_method_argument() {
         i: int = 0
         while i < 300 {
-            d: dict[str, Any] = {"pre": "AB"}
-            self.assertTrue("ABC".startswith(d["pre"]))
-            self.assertFalse("XBC".startswith(d["pre"]))
+            d: dict[str, Boxed] = {"pre": "AB"}
+            const pre: str = d["pre"]        # checked downcast to the declared arm
+            self.assertTrue("ABC".startswith(pre))
+            self.assertFalse("XBC".startswith(pre))
             i = i + 1
         }
         self.assertEqual(churn(), 200)
@@ -118,8 +127,9 @@ class TestAnyArgNarrow(TestCase) {
     def test_literal_element_and_join() {
         i: int = 0
         while i < 300 {
-            d: dict[str, Any] = {"mrn": "A" + str(i)}
-            parts: list[str] = ["id", d["mrn"]]
+            d: dict[str, Boxed] = {"mrn": "A" + str(i)}
+            const pm: str = d["mrn"]         # checked downcast
+            parts: list[str] = ["id", pm]
             self.assertEqual(parts[1], "A" + str(i))
             self.assertEqual(", ".join(parts), "id, A" + str(i))
             i = i + 1
@@ -130,10 +140,11 @@ class TestAnyArgNarrow(TestCase) {
     def test_any_field_and_nested_dict_source() {
         i: int = 0
         while i < 300 {
-            outer: dict[str, Any] = {"mrn": "A" + str(i)}
-            a: Any = outer["mrn"]
+            outer: dict[str, Boxed] = {"mrn": "A" + str(i)}
+            a: Boxed = outer["mrn"]
+            const av: str = a                # checked downcast
             out: list[str] = []
-            out.append(a)
+            out.append(av)
             self.assertEqual(out[0], "A" + str(i))
             i = i + 1
         }
@@ -143,8 +154,9 @@ class TestAnyArgNarrow(TestCase) {
     def test_dict_literal_value() {
         i: int = 0
         while i < 300 {
-            d: dict[str, Any] = {"mrn": "A" + str(i)}
-            byname: dict[str, str] = {"id": d["mrn"]}
+            d: dict[str, Boxed] = {"mrn": "A" + str(i)}
+            const mrn: str = d["mrn"]        # checked downcast to the declared arm
+            byname: dict[str, str] = {"id": mrn}
             self.assertEqual(byname["id"], "A" + str(i))
             i = i + 1
         }
@@ -154,8 +166,9 @@ class TestAnyArgNarrow(TestCase) {
     def test_tuple_literal_element() {
         i: int = 0
         while i < 300 {
-            d: dict[str, Any] = {"mrn": "A" + str(i)}
-            row: tuple[str, int] = (d["mrn"], i)
+            d: dict[str, Boxed] = {"mrn": "A" + str(i)}
+            const mrn: str = d["mrn"]        # checked downcast to the declared arm
+            row: tuple[str, int] = (mrn, i)
             self.assertEqual(row[0], "A" + str(i))
             self.assertEqual(row[1], i)
             i = i + 1
@@ -167,7 +180,8 @@ class TestAnyArgNarrow(TestCase) {
         out: list[str] = []
         i: int = 0
         while i < 300 {
-            out.append(fresh_doc(i)["mrn"])
+            const m: str = fresh_doc(i)["mrn"]   # checked downcast
+            out.append(m)
             i = i + 1
         }
         self.assertEqual(len(out), 300)
@@ -178,17 +192,19 @@ class TestAnyArgNarrow(TestCase) {
     def test_user_getitem_returning_any() {
         r: Doc = Doc({"mrn": "A1"})
         out: list[str] = []
-        out.append(r["mrn"])
+        const rm: str = r["mrn"]        # checked downcast to the declared arm
+        out.append(rm)
         self.assertEqual(out[0], "A1")
         const m: str = r["mrn"]
         self.assertEqual(m, "A1")
     }
 
     def test_wrong_runtime_type_raises_not_segv() {
-        d: dict[str, Any] = {"mrn": 7}
+        d: dict[str, Boxed] = {"mrn": 7}
         raised: bool = False
         try {
-            print(arg_len(d["mrn"]))
+            const mv3: str = d["mrn"]        # checked downcast to the declared arm
+            print(arg_len(mv3))
         } except TypeError {
             raised = True
         }
@@ -196,11 +212,12 @@ class TestAnyArgNarrow(TestCase) {
     }
 
     def test_wrong_runtime_type_on_append_raises() {
-        d: dict[str, Any] = {"mrn": 7}
+        d: dict[str, Boxed] = {"mrn": 7}
         out: list[str] = []
         raised: bool = False
         try {
-            out.append(d["mrn"])
+            const mv4: str = d["mrn"]        # checked downcast to the declared arm
+            out.append(mv4)
         } except TypeError {
             raised = True
         }
@@ -209,11 +226,12 @@ class TestAnyArgNarrow(TestCase) {
     }
 
     def test_source_dict_survives_every_narrowing() {
-        d: dict[str, Any] = {"mrn": "A1"}
+        d: dict[str, Boxed] = {"mrn": "A1"}
         out: list[str] = []
         i: int = 0
         while i < 300 {
-            out.append(d["mrn"])
+            const mv5: str = d["mrn"]        # checked downcast to the declared arm
+            out.append(mv5)
             i = i + 1
         }
         self.assertEqual(len(out), 300)
@@ -226,63 +244,63 @@ class TestAnyArgNarrow(TestCase) {
 
 
 class Keeper {
-    v: Any
-    def(v: Any) {
+    v: Boxed
+    def(v: Boxed) {
         self.v = v
     }
-    def replace(nv: Any) {
+    def replace(nv: Boxed) {
         self.v = nv
     }
 }
 
 
 class DoubleKeeper {
-    a: Any
-    b: Any
-    def(v: Any) {
+    a: Boxed
+    b: Boxed
+    def(v: Boxed) {
         self.a = v
         self.b = v
     }
 }
 
 
-def sink(x: Any) -> int {
+def sink(x: Boxed) -> int {
     return 1
 }
 
 
-def echo(x: Any) -> Any {
+def echo(x: Boxed) -> Boxed {
     return x
 }
 
 
 class ABase {
-    def m(v: Any) -> int {
+    def m(v: Boxed) -> int {
         return 1
     }
 }
 
 
 class AStore(ABase) {
-    kept: Any
+    kept: Boxed
     def() {
         self.kept = 0
     }
-    def m(v: Any) -> int {
+    def m(v: Boxed) -> int {
         self.kept = v
         return 2
     }
 }
 
 
-def call_m(a: ABase, v: Any) -> int {
+def call_m(a: ABase, v: Boxed) -> int {
     return a.m(v)
 }
 
 
 class AnyOwnershipTests(TestCase) {
     def test_borrowed_alias_survives_instance_death() {
-        p: Any = "alias " + str(1)
+        p: Boxed = "alias " + str(1)
         k: Keeper = Keeper(p)
         k = Keeper(0)
         narrowed: int = 0
@@ -295,7 +313,7 @@ class AnyOwnershipTests(TestCase) {
     }
 
     def test_double_adopt_two_fields() {
-        p: Any = "dbl " + str(2)
+        p: Boxed = "dbl " + str(2)
         d: DoubleKeeper = DoubleKeeper(p)
         d = DoubleKeeper(0)
         narrowed: int = 0
@@ -324,7 +342,7 @@ class AnyOwnershipTests(TestCase) {
             k.replace("v" + str(i))
             i = i + 1
         }
-        const back: Any = k.v
+        const back: Boxed = k.v
         narrowed: int = 0
         if isinstance(back, str) {
             const s: str = back
@@ -341,7 +359,7 @@ class AnyOwnershipTests(TestCase) {
             k.v = "d" + str(i)
             i = i + 1
         }
-        const back: Any = k.v
+        const back: Boxed = k.v
         narrowed: int = 0
         if isinstance(back, str) {
             const s: str = back
@@ -368,7 +386,7 @@ class AnyOwnershipTests(TestCase) {
     }
 
     def test_echo_roundtrip() {
-        p: Any = echo("e" + str(3))
+        p: Boxed = echo("e" + str(3))
         narrowed: int = 0
         if isinstance(p, str) {
             const s: str = p
@@ -382,7 +400,7 @@ class AnyOwnershipTests(TestCase) {
         b: AStore = AStore()
         n: int = call_m(b, "vs " + str(4))
         self.assertEqual(n, 2)
-        const back: Any = b.kept
+        const back: Boxed = b.kept
         narrowed: int = 0
         if isinstance(back, str) {
             const s: str = back
@@ -416,7 +434,7 @@ class GenericMethodArgRc(TestCase) {
         s: Sink = Sink()
         i: int = 0
         while i < N {
-            const m: Any = {"k": "value"}
+            const m: Boxed = {"k": "value"}
             const r: int = s.take(m["k"])
             self.assertEqual(r, 1)
             i = i + 1

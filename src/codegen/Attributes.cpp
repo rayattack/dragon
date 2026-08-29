@@ -232,14 +232,14 @@ void CodeGen::visit(AttributeExpr& node) {
             if (auto* iName = dynamic_cast<NameExpr*>(innerAttr->object.get())) {
                 auto vit = impl_->varDictValueKinds.find(iName->name);
                 if (vit != impl_->varDictValueKinds.end() &&
-                    vit->second == Type::Kind::Any)
+                    Impl::isBoxedKind(vit->second))
                     innerYieldsBox = true;
             }
         } else if (auto* innerSub = dynamic_cast<SubscriptExpr*>(node.object.get())) {
             if (auto* iName = dynamic_cast<NameExpr*>(innerSub->object.get())) {
                 auto vit = impl_->varDictValueKinds.find(iName->name);
                 if (vit != impl_->varDictValueKinds.end() &&
-                    vit->second == Type::Kind::Any)
+                    Impl::isBoxedKind(vit->second))
                     innerYieldsBox = true;
             }
         }
@@ -281,7 +281,7 @@ void CodeGen::visit(AttributeExpr& node) {
         std::string dictFieldName;
         std::string staticTypedDictClass;
         bool haveStaticDictValue = false;
-        Type::Kind staticDictValueKind = Type::Kind::Any;
+        Type::Kind staticDictValueKind = Type::Kind::Boxed;
         if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
             if (impl_->lookupVarKind(objName->name) == Impl::VarKind::Dict) {
                 isDictObj = true;
@@ -340,7 +340,7 @@ void CodeGen::visit(AttributeExpr& node) {
             if (!dictObjName.empty()) {
                 auto vit = impl_->varDictValueKinds.find(dictObjName);
                 if (vit != impl_->varDictValueKinds.end() &&
-                    vit->second == Type::Kind::Any)
+                    Impl::isBoxedKind(vit->second))
                     valueIsAny = true;
             }
             if (!valueIsAny && !dictFieldClass.empty()) {
@@ -348,12 +348,12 @@ void CodeGen::visit(AttributeExpr& node) {
                 if (cit != impl_->classFieldDictValueKindsBySym.end()) {
                     auto fit = cit->second.find(dictFieldName);
                     if (fit != cit->second.end() &&
-                        fit->second == Type::Kind::Any)
+                        Impl::isBoxedKind(fit->second))
                         valueIsAny = true;
                 }
             }
             if (!valueIsAny && haveStaticDictValue &&
-                staticDictValueKind == Type::Kind::Any)
+                Impl::isBoxedKind(staticDictValueKind))
                 valueIsAny = true;
             if (valueIsAny && impl_->pendingDictCheckTag < 0) {
                 impl_->lastValue = impl_->builder->CreateCall(
@@ -708,7 +708,7 @@ void CodeGen::visit(SubscriptExpr& node) {
         bool intKeyed = dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
 
         node.object->accept(*this);
-        llvm::Value* dict = impl_->lastValue;
+        llvm::Value* dict = impl_->unboxContainerReceiver(impl_->lastValue);
         Impl::VarKind recvDrain =
             impl_->ownedTempDrainKind(node.object.get(), dict);
         std::vector<llvm::Value*> subBases;
@@ -818,13 +818,13 @@ void CodeGen::visit(SubscriptExpr& node) {
         if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
             auto vit = impl_->varDictValueKinds.find(objName->name);
             if (vit != impl_->varDictValueKinds.end() &&
-                vit->second == Type::Kind::Any)
+                Impl::isBoxedKind(vit->second))
                 valueIsAny = true;
         }
         if (!valueIsAny && node.object->type &&
             node.object->type->kind() == Type::Kind::Dict) {
             if (auto* dt = dynamic_cast<DictType*>(node.object->type.get())) {
-                if (dt->valueType && dt->valueType->kind() == Type::Kind::Any)
+                if (dt->valueType && Impl::isBoxedKind(dt->valueType->kind()))
                     valueIsAny = true;
             }
         }
@@ -846,7 +846,7 @@ void CodeGen::visit(SubscriptExpr& node) {
                     if (cit != impl_->classFieldDictValueKindsBySym.end()) {
                         auto fit = cit->second.find(attrExpr->attribute);
                         if (fit != cit->second.end() &&
-                            fit->second == Type::Kind::Any)
+                            Impl::isBoxedKind(fit->second))
                             valueIsAny = true;
                     }
                 }
@@ -964,7 +964,7 @@ void CodeGen::visit(SubscriptExpr& node) {
         if (tupleIdx->getType() == impl_->i1Type) {
             tupleIdx = impl_->builder->CreateZExt(tupleIdx, impl_->i64Type);
         }
-        if (node.type && (node.type->kind() == Type::Kind::Any ||
+        if (node.type && (node.type->kind() == Type::Kind::Boxed ||
                           node.type->kind() == Type::Kind::Union)) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_tuple_box_get"],
@@ -1081,7 +1081,7 @@ void CodeGen::visit(SubscriptExpr& node) {
         bool elemIsAny = false;
         if (node.object->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.object->type.get())) {
-                if (lt->elementType && lt->elementType->kind() == Type::Kind::Any)
+                if (lt->elementType && Impl::isBoxedKind(lt->elementType->kind()))
                     elemIsAny = true;
             }
         }
@@ -1089,7 +1089,7 @@ void CodeGen::visit(SubscriptExpr& node) {
             if (auto* nameExpr = dynamic_cast<NameExpr*>(node.object.get())) {
                 auto it = impl_->varListElemKinds.find(nameExpr->name);
                 if (it != impl_->varListElemKinds.end() &&
-                    it->second == Type::Kind::Any)
+                    Impl::isBoxedKind(it->second))
                     elemIsAny = true;
             }
         }

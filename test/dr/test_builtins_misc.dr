@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | none | list[int] | list[str] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed]
+
 from unittest import TestCase, main
 from math import sqrt as root
 from math import isqrt as iq
@@ -18,14 +20,16 @@ class IssubclassTests(TestCase) {
       L3  - partition()/rpartition() return a 3-tuple
       map - map(f, xs) over int/float/str callables
       H12 - ternary expressions with mixed-type arms (no crash, correct value)
-      object - `object` annotation behaves as Any
+      object - `object` annotation behaves as Boxed
     """
 
     def test_hierarchy() {
         self.assertTrue(issubclass(Dog, Animal))
         self.assertFalse(issubclass(Animal, Dog))
         self.assertTrue(issubclass(Dog, Dog))
-        self.assertTrue(issubclass(Dog, object))
+        # There is no universal base class in Dragon, so there is no
+        # `issubclass(X, object)` to assert: a class is related only to the
+        # classes it actually declares.
         self.assertFalse(issubclass(Cat, Dog))
     }
 }
@@ -103,20 +107,20 @@ class TernaryTests(TestCase) {
 
     def test_str_int_to_any() {
         n: int = 5
-        s: Any = "yes" if n > 0 else n
+        s: Boxed = "yes" if n > 0 else n
         self.assertEqual(s, "yes")
     }
 
     def test_str_none() {
         n: int = 5
-        x: Any = "x" if n > 0 else None
+        x: Boxed = "x" if n > 0 else None
         self.assertEqual(x, "x")
-        y: Any = "x" if n < 0 else None
+        y: Boxed = "x" if n < 0 else None
         self.assertIsNone(y)
     }
 
     def test_object_alias() {
-        v: object = "hi"
+        v: Boxed = "hi"
         self.assertEqual(v, "hi")
     }
 }

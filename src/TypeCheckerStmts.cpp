@@ -15,9 +15,9 @@ namespace dragon {
 static bool annotationElementIsAny(const std::shared_ptr<Type>& t) {
     if (!t) return false;
     if (auto* lt = dynamic_cast<ListType*>(t.get()))
-        return lt->elementType && lt->elementType->kind() == Type::Kind::Any;
+        return lt->elementType && lt->elementType->kind() == Type::Kind::Boxed;
     if (auto* dt = dynamic_cast<DictType*>(t.get()))
-        return dt->valueType && dt->valueType->kind() == Type::Kind::Any;
+        return dt->valueType && dt->valueType->kind() == Type::Kind::Boxed;
     return false;
 }
 
@@ -43,7 +43,7 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
     if (!value || !annot) return false;
     if (annot->kind() != Type::Kind::List) return false;
     const auto& elemT = static_cast<const ListType&>(*annot).elementType;
-    if (!elemT || elemT->kind() == Type::Kind::Any ||
+    if (!elemT || elemT->kind() == Type::Kind::Boxed ||
         elemT->kind() == Type::Kind::Unknown)
         return false;
 
@@ -55,6 +55,19 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
     for (auto& e : *elems) {
         if (e->type && e->type->kind() != Type::Kind::Unknown &&
             !e->type->isSubtypeOf(*elemT)) {
+            // A nested literal still fits if the element type is a union with
+            // a matching container arm (how list[Data] holds {"k": 3}).
+            if (elemT->kind() == Type::Kind::Union &&
+                coerceLiteralToUnion(e.get(), elemT))
+                continue;
+            // A container LITERAL element is built in the expected layout from
+            // birth (section 7), so `list[dict[str, Data]] = [{"k": 1}]` is
+            // fine even though dict[str, int] is not a dict[str, Data].
+            if ((elemT->kind() == Type::Kind::List ||
+                 elemT->kind() == Type::Kind::Dict ||
+                 elemT->kind() == Type::Kind::Tuple) &&
+                tryExpectedTypeLiteral(e.get(), elemT))
+                continue;
             error(value->location(),
                   "list element of type '" + e->type->toString() +
                   "' is not assignable to element type '" + elemT->toString() +
@@ -67,9 +80,9 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
 
 void TypeChecker::markNarrowTarget(Expr& value,
                                    const std::shared_ptr<Type>& want) {
-    if (!want || !value.type || value.type->kind() != Type::Kind::Any) return;
+    if (!want || !value.type || value.type->kind() != Type::Kind::Boxed) return;
     switch (want->kind()) {
-        case Type::Kind::Any:
+        case Type::Kind::Boxed:
         case Type::Kind::Unknown:
         case Type::Kind::Union:
         case Type::Kind::Optional:
@@ -83,6 +96,10 @@ void TypeChecker::markNarrowTarget(Expr& value,
 
 bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected) {
     if (!value || !expected) return false;
+    // A container literal written straight into a union-typed slot
+    // (`t: Tree = [1, [2, 3]]`) matches against the union's container arm.
+    if (expected->kind() == Type::Kind::Union)
+        return coerceLiteralToUnion(value, expected);
     if (expected->kind() == Type::Kind::List) {
         if (auto* setLit = dynamic_cast<SetExpr*>(value)) {
             const auto& base =
@@ -100,10 +117,20 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
         if (!base) return false;
         for (auto& el : lit->elements) {
             if (!el->type) return false;
-            if (!el->type->isSubtypeOf(*base)) return false;
+            if (el->type->isSubtypeOf(*base)) continue;
+            if (base->kind() == Type::Kind::Union &&
+                coerceLiteralToUnion(el.get(), base))
+                continue;
+            // A nested container literal is built at the element type.
+            if ((base->kind() == Type::Kind::List ||
+                 base->kind() == Type::Kind::Dict ||
+                 base->kind() == Type::Kind::Tuple) &&
+                tryExpectedTypeLiteral(el.get(), base))
+                continue;
+            return false;
         }
         for (auto& el : lit->elements) markNarrowTarget(*el, base);
-        if (base->kind() == Type::Kind::Any) {
+        if (base->kind() == Type::Kind::Boxed) {
             for (auto& el : lit->elements)
                 if (el->type && el->type->kind() == Type::Kind::Class)
                     return true;
@@ -126,12 +153,17 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
                 if (!k->type || !k->type->isSubtypeOf(*dt.keyType)) return false;
             }
             if (v) {
-                if (!v->type || !v->type->isSubtypeOf(*dt.valueType)) return false;
+                if (!v->type) return false;
+                if (v->type->isSubtypeOf(*dt.valueType)) continue;
+                if (dt.valueType && dt.valueType->kind() == Type::Kind::Union &&
+                    coerceLiteralToUnion(v.get(), dt.valueType))
+                    continue;
+                return false;
             }
         }
         for (auto& [k, v] : lit->entries)
             if (v) markNarrowTarget(*v, dt.valueType);
-        if (dt.valueType && dt.valueType->kind() == Type::Kind::Any) {
+        if (dt.valueType && dt.valueType->kind() == Type::Kind::Boxed) {
             for (auto& [k, v] : lit->entries)
                 if (v) boxNestedContainerLiteralForAny(v.get());
         } else if (dt.valueType && (dt.valueType->kind() == Type::Kind::List ||
@@ -156,7 +188,7 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
         for (size_t i = 0; i < lit->elements.size(); ++i) {
             const auto& want = tt.elementTypes[i];
             markNarrowTarget(*lit->elements[i], want);
-            if (want->kind() == Type::Kind::Any) {
+            if (want->kind() == Type::Kind::Boxed) {
                 boxNestedContainerLiteralForAny(lit->elements[i].get());
             } else if (want->kind() == Type::Kind::List ||
                        want->kind() == Type::Kind::Dict ||
@@ -182,7 +214,7 @@ void TypeChecker::boxNestedContainerLiteralForAny(Expr* value) {
         if (literalElementsAreClassDescriptors(l)) return;
         for (auto& el : l->elements)
             boxNestedContainerLiteralForAny(el.get());
-        value->type = std::make_shared<ListType>(impl_->anyType);
+        value->type = std::make_shared<ListType>(impl_->boxedType);
     } else if (auto* d = dynamic_cast<DictExpr*>(value)) {
         for (auto& [k, v] : d->entries)
             if (v) boxNestedContainerLiteralForAny(v.get());
@@ -190,17 +222,82 @@ void TypeChecker::boxNestedContainerLiteralForAny(Expr* value) {
         if (d->type && d->type->kind() == Type::Kind::Dict)
             keyT = static_cast<DictType&>(*d->type).keyType;
         if (!keyT) keyT = impl_->strType;
-        value->type = std::make_shared<DictType>(keyT, impl_->anyType);
+        value->type = std::make_shared<DictType>(keyT, impl_->boxedType);
     }
+}
+
+bool TypeChecker::coerceLiteralToUnion(Expr* value,
+                                       const std::shared_ptr<Type>& target) {
+    if (!value || !target || target->kind() != Type::Kind::Union) return false;
+    auto& arms = static_cast<UnionType&>(*target).types;
+    // A domain may name several arms of one kind (list[str] AND list[int]).
+    // Prefer the arm the literal actually fits, so what is stored is what a
+    // later downcast can name; fall back to the first of that kind.
+    auto armOfKindFor = [&](Type::Kind k,
+                            const std::shared_ptr<Type>& want) -> std::shared_ptr<Type> {
+        if (want) {
+            for (auto& a : arms)
+                if (a && a->kind() == k && a->equals(*want)) return a;
+            for (auto& a : arms) {
+                if (!a || a->kind() != k) continue;
+                if (k == Type::Kind::List && want->kind() == Type::Kind::List) {
+                    auto& ae = static_cast<ListType&>(*a).elementType;
+                    auto& we = static_cast<ListType&>(*want).elementType;
+                    if (ae && we && ae->equals(*we)) return a;
+                }
+                if (k == Type::Kind::Dict && want->kind() == Type::Kind::Dict) {
+                    auto& av = static_cast<DictType&>(*a).valueType;
+                    auto& wv = static_cast<DictType&>(*want).valueType;
+                    if (av && wv && av->equals(*wv)) return a;
+                }
+            }
+        }
+        for (auto& a : arms)
+            if (a && a->kind() == k) return a;
+        return nullptr;
+    };
+    auto armOfKind = [&](Type::Kind k) -> std::shared_ptr<Type> {
+        return armOfKindFor(k, value->type);
+    };
+
+    if (auto* lit = dynamic_cast<ListExpr*>(value)) {
+        auto arm = armOfKind(Type::Kind::List);
+        if (!arm) return false;
+        const auto& elemT = static_cast<ListType&>(*arm).elementType;
+        if (!elemT) return false;
+        for (auto& el : lit->elements) {
+            if (!el) continue;
+            if (el->type && el->type->isSubtypeOf(*elemT)) continue;
+            if (!coerceLiteralToUnion(el.get(), elemT)) return false;
+        }
+        lit->type = arm;
+        return true;
+    }
+    if (auto* lit = dynamic_cast<DictExpr*>(value)) {
+        auto arm = armOfKind(Type::Kind::Dict);
+        if (!arm) return false;
+        auto& dt = static_cast<DictType&>(*arm);
+        if (!dt.keyType || !dt.valueType) return false;
+        for (auto& [k, v] : lit->entries) {
+            if (k && (!k->type || !k->type->isSubtypeOf(*dt.keyType))) return false;
+            if (!v) continue;
+            if (v->type && v->type->isSubtypeOf(*dt.valueType)) continue;
+            if (!coerceLiteralToUnion(v.get(), dt.valueType)) return false;
+        }
+        lit->type = arm;
+        return true;
+    }
+    // A scalar already assignable to some arm needs no rewriting.
+    return value->type && value->type->isSubtypeOf(*target);
 }
 
 std::string TypeChecker::listReprMismatchHint(const Type& from, const Type& to) {
     auto* fl = dynamic_cast<const ListType*>(&from);
     auto* tl = dynamic_cast<const ListType*>(&to);
     if (!fl || !tl || !fl->elementType || !tl->elementType) return "";
-    bool fromBox = fl->elementType->kind() == Type::Kind::Any ||
+    bool fromBox = fl->elementType->kind() == Type::Kind::Boxed ||
                    fl->elementType->kind() == Type::Kind::Union;
-    bool toBox = tl->elementType->kind() == Type::Kind::Any ||
+    bool toBox = tl->elementType->kind() == Type::Kind::Boxed ||
                  tl->elementType->kind() == Type::Kind::Union;
     if (fromBox == toBox) return "";
     return " (the two have different element layouts: monomorphized vs boxed;"
@@ -256,6 +353,7 @@ void TypeChecker::visit(ExprStmt& node) {
 }
 
 void TypeChecker::visit(AssignStmt& node) {
+    refuseGeneratorBinding(node.value.get(), node.location());
     if (node.typeAnnotation) {
         auto annotType = resolveType(node.typeAnnotation.get());
         propagateAnnotationToEmptyLiteral(node.value.get(), annotType);
@@ -354,10 +452,10 @@ void TypeChecker::visit(AssignStmt& node) {
                 bool slotIsAny = false;
                 if (auto* dt = dynamic_cast<DictType*>(contType.get()))
                     slotIsAny = dt->valueType &&
-                                dt->valueType->kind() == Type::Kind::Any;
+                                dt->valueType->kind() == Type::Kind::Boxed;
                 else if (auto* lt = dynamic_cast<ListType*>(contType.get()))
                     slotIsAny = lt->elementType &&
-                                lt->elementType->kind() == Type::Kind::Any;
+                                lt->elementType->kind() == Type::Kind::Boxed;
                 if (slotIsAny)
                     boxNestedContainerLiteralForAny(node.value.get());
             }
@@ -373,7 +471,7 @@ void TypeChecker::visit(AugAssignStmt& node) {
     auto tk = targetType->kind();
     auto vk = valueType->kind();
     auto opaque = [](Type::Kind k) {
-        return k == Type::Kind::Unknown || k == Type::Kind::Any ||
+        return k == Type::Kind::Unknown || k == Type::Kind::Boxed ||
                k == Type::Kind::Instance || k == Type::Kind::TypeVar;
     };
     if (opaque(tk) || opaque(vk)) return;
@@ -403,6 +501,7 @@ void TypeChecker::visit(AugAssignStmt& node) {
 
 void TypeChecker::visit(AnnAssignStmt& node) {
     auto annotType = resolveType(node.annotation.get());
+    refuseGeneratorBinding(node.value.get(), node.location(), annotType);
 
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.target.get())) {
         auto objType = inferType(attr->object.get());
@@ -448,7 +547,7 @@ void TypeChecker::visit(AnnAssignStmt& node) {
 
     std::shared_ptr<Type> declType = annotType;
     if (node.value && annotType->kind() == Type::Kind::Task &&
-        static_cast<TaskType&>(*annotType).resultType->kind() == Type::Kind::Any &&
+        static_cast<TaskType&>(*annotType).resultType->kind() == Type::Kind::Boxed &&
         node.value->type && node.value->type->kind() == Type::Kind::Task) {
         declType = node.value->type;
     }
@@ -786,7 +885,7 @@ void TypeChecker::visit(MatchStmt& node) {
                               std::to_string(order.size()) + " field(s)");
                     for (size_t i = 0; i < pat.subPatterns.size(); ++i) {
                         auto& sub = pat.subPatterns[i];
-                        std::shared_ptr<Type> fieldT = impl_->anyType;
+                        std::shared_ptr<Type> fieldT = impl_->boxedType;
                         if (ct && i < order.size()) {
                             auto fit = ct->fields.find(order[i]);
                             if (fit != ct->fields.end() && fit->second)
@@ -952,6 +1051,10 @@ void TypeChecker::visit(ReturnStmt& node) {
                 tryExpectedTypeLiteral(node.value.get(), expected);
             if (expected->kind() != Type::Kind::Unknown &&
                 retType->kind() != Type::Kind::Unknown &&
+                // An unbound `T` in a generic TEMPLATE is re-checked with the
+                // concrete type at each stamp; judging it here would reject
+                // bodies that are fine for every real instantiation.
+                expected->kind() != Type::Kind::TypeVar &&
                 !retType->isAssignableTo(*expected) &&
                 !tryExpectedTypeLiteral(node.value.get(), expected)) {
                 error(node.location(), "return type '" + retType->toString() +
@@ -1049,6 +1152,15 @@ void TypeChecker::visit(FromImportStmt& node) {
             }
             continue;
         }
+        auto taIt = srcModule.typeExports.find(alias.name);
+        if (taIt != srcModule.typeExports.end()) {
+            impl_->typeNames[defName] = taIt->second;
+            // A renamed recursive alias is canonicalized back to its source
+            // name in annotations, so that spelling must resolve here too.
+            if (defName != alias.name)
+                impl_->typeNames[alias.name] = taIt->second;
+            continue;
+        }
         if (node.module == "collections" && alias.name == "deque") {
             auto tnIt = impl_->typeNames.find("deque");
             if (tnIt != impl_->typeNames.end())
@@ -1113,7 +1225,7 @@ void TypeChecker::visit(FunctionDecl& node) {
               "instance method or a module-level async function");
     }
     if (node.isAsync && retType &&
-        (retType->kind() == Type::Kind::Any ||
+        (retType->kind() == Type::Kind::Boxed ||
          retType->kind() == Type::Kind::Union)) {
         error(node.location(), "an async function cannot return '" +
               retType->toString() +
@@ -1125,6 +1237,7 @@ void TypeChecker::visit(FunctionDecl& node) {
                                     : retType;
     auto funcType = std::make_shared<FunctionType>(paramTypes, externalRet);
     funcType->spawnsFreshTask = node.isAsync;
+    funcType->isGenerator = bodyContainsYield(node.body);
     fillFuncMeta(*funcType, node.params, node.isMethod, node.hasImplicitSelf,
                  node.isClassMethod);
 
@@ -1337,6 +1450,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                                          : retType;
         auto fType = std::make_shared<FunctionType>(paramTypes, externalRet);
         fType->spawnsFreshTask = func->isAsync;
+        fType->isGenerator = bodyContainsYield(func->body);
         fillFuncMeta(*fType, func->params, func->isMethod, func->hasImplicitSelf,
                      func->isClassMethod);
         if (func->isProperty) {
@@ -1388,30 +1502,30 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                     if (dynamic_cast<NoneLiteral*>(rhs)) return impl_->noneType;
                     if (auto* le = dynamic_cast<ListExpr*>(rhs)) {
                         if (le->elements.empty())
-                            return std::make_shared<ListType>(impl_->anyType);
+                            return std::make_shared<ListType>(impl_->boxedType);
                         auto first = rhsLiteralType(le->elements[0].get());
-                        if (!first) return std::make_shared<ListType>(impl_->anyType);
+                        if (!first) return std::make_shared<ListType>(impl_->boxedType);
                         for (size_t i = 1; i < le->elements.size(); ++i) {
                             auto t = rhsLiteralType(le->elements[i].get());
                             if (!t || t->kind() != first->kind())
-                                return std::make_shared<ListType>(impl_->anyType);
+                                return std::make_shared<ListType>(impl_->boxedType);
                         }
                         return std::make_shared<ListType>(first);
                     }
                     if (auto* de = dynamic_cast<DictExpr*>(rhs)) {
                         if (de->entries.empty())
-                            return std::make_shared<DictType>(impl_->anyType, impl_->anyType);
+                            return std::make_shared<DictType>(impl_->boxedType, impl_->boxedType);
                         auto firstK = rhsLiteralType(de->entries[0].first.get());
                         auto firstV = rhsLiteralType(de->entries[0].second.get());
                         if (!firstK || !firstV)
-                            return std::make_shared<DictType>(impl_->anyType, impl_->anyType);
+                            return std::make_shared<DictType>(impl_->boxedType, impl_->boxedType);
                         for (size_t i = 1; i < de->entries.size(); ++i) {
                             auto kt = rhsLiteralType(de->entries[i].first.get());
                             auto vt = rhsLiteralType(de->entries[i].second.get());
                             if (!kt || kt->kind() != firstK->kind())
-                                firstK = impl_->anyType;
+                                firstK = impl_->boxedType;
                             if (!vt || vt->kind() != firstV->kind())
-                                firstV = impl_->anyType;
+                                firstV = impl_->boxedType;
                         }
                         return std::make_shared<DictType>(firstK, firstV);
                     }
@@ -1512,8 +1626,50 @@ void TypeChecker::visit(ContractDecl&) {}
 
 void TypeChecker::visit(TypeAliasStmt& node) {
     if (!node.value) return;
+    if (typeExprMentionsName(node.value.get(), node.name)) {
+        // Recursive alias (e.g. `type Data = str | ... | list[Data]`):
+        // pre-register a named knot so the definition can reference itself,
+        // then fill in the resolved arms. The knot is nominal: it prints and
+        // compares by its alias name, and every use shares this one object.
+        auto* u = dynamic_cast<UnionTypeExpr*>(node.value.get());
+        if (!u) {
+            error(node.location(), "recursive type alias '" + node.name +
+                  "' must be a union at the top level (e.g. `type " +
+                  node.name + " = int | list[" + node.name + "]`)");
+            return;
+        }
+        for (auto& m : u->types) {
+            if (auto* nm = dynamic_cast<NamedTypeExpr*>(m.get())) {
+                if (nm->name == node.name) {
+                    error(node.location(), "type alias '" + node.name +
+                          "' includes itself as a bare arm; a recursive "
+                          "reference must sit inside a container (list[" +
+                          node.name + "], dict[str, " + node.name + "], ...)");
+                    return;
+                }
+            }
+        }
+        auto knot = std::make_shared<UnionType>(
+            std::vector<std::shared_ptr<Type>>{});
+        knot->aliasName = node.name;
+        impl_->typeNames[node.name] = knot;
+        auto resolved = resolveType(node.value.get());
+        if (resolved && resolved->kind() == Type::Kind::Union)
+            knot->types = static_cast<UnionType&>(*resolved).types;
+        else if (resolved && resolved.get() != knot.get())
+            knot->types = {resolved};
+        if (impl_->scopes.size() == 1)
+            impl_->cachedTypeExports[node.name] = knot;
+        return;
+    }
     auto resolved = resolveType(node.value.get());
-    if (resolved) impl_->typeNames[node.name] = resolved;
+    if (resolved) {
+        impl_->typeNames[node.name] = resolved;
+        // Module-top-level aliases export to importers (privacy tiers apply at
+        // the import site, as for value exports).
+        if (impl_->scopes.size() == 1)
+            impl_->cachedTypeExports[node.name] = resolved;
+    }
 }
 
 void TypeChecker::visit(Module& node) {
@@ -1557,8 +1713,8 @@ void TypeChecker::visit(Module& node) {
                 if (!(func->isMethod && !func->hasImplicitSelf &&
                       (p.name == "self" || (func->isClassMethod && p.name == "cls"))))
                     ++nparams;
-            std::vector<std::shared_ptr<Type>> ps(nparams, impl_->anyType);
-            ct->methods[func->name] = std::make_shared<FunctionType>(ps, impl_->anyType);
+            std::vector<std::shared_ptr<Type>> ps(nparams, impl_->boxedType);
+            ct->methods[func->name] = std::make_shared<FunctionType>(ps, impl_->boxedType);
         }
 
         for (auto& s : cd->body) {

@@ -182,7 +182,7 @@ print(bin(5))            # 0b101
 |----------|-----------|-------------|
 | `set` | `set()` / `set(xs: list[T]) -> set[T]` | An empty set, or a set built from a list (dedupes). |
 | `dict` | `dict() -> dict[K, V]` | An empty dictionary. |
-| `list` | `list() -> list[Any]` | An empty list (typed `list[Any]`). |
+| `list` | `list()` (annotate the element type) | An empty list (typed `list[Data]`). |
 
 ```dragon
 const s: set[int] = set([1, 2, 2, 3])
@@ -192,7 +192,7 @@ const d: dict[str, int] = dict()
 print(len(d))            # 0
 ```
 
-> **`list()` always yields `list[Any]`.** It cannot be assigned to a
+> **`list()` always yields `list[Data]`.** It cannot be assigned to a
 > concretely-typed binding such as `list[int]` (you get
 > `cannot assign 'list[Any]' to variable of type 'list[int]'`). For a typed
 > empty list use the literal: `const xs: list[int] = []`. The `list(iterable)`

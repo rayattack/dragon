@@ -175,8 +175,10 @@ void Sema::visit(NameExpr& node) {
         return;
     }
 
+    // A NESTED function is a local of its enclosing function, so a sibling
+    // that calls it must capture it. Module-level functions are globals and
+    // are filtered out below by the Module-scope check, not here.
     if (!impl_->captureStack.empty() &&
-        sym->kind != Symbol::Kind::Function &&
         sym->kind != Symbol::Kind::Class &&
         sym->kind != Symbol::Kind::Module &&
         sym->kind != Symbol::Kind::TypeAlias) {

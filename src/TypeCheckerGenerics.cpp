@@ -3,44 +3,50 @@
 #include "dragon/AstClone.h"
 
 #include <functional>
+#include <unordered_set>
 
 namespace dragon {
 
 namespace {
 
-bool typeIsConcrete(const Type* t) {
+bool typeIsConcrete(const Type* t, std::unordered_set<const Type*>* seen = nullptr) {
     if (!t) return true;
+    // A recursive type alias (`type Data = ... | list[Data]`) is a CYCLE in the
+    // type graph; without a visited set this walk never terminates.
+    std::unordered_set<const Type*> local;
+    if (!seen) seen = &local;
+    if (!seen->insert(t).second) return true;
     switch (t->kind()) {
         case Type::Kind::TypeVar: return false;
         case Type::Kind::List:
-            return typeIsConcrete(static_cast<const ListType&>(*t).elementType.get());
+            return typeIsConcrete(static_cast<const ListType&>(*t).elementType.get(), seen);
         case Type::Kind::Dict: {
             auto& d = static_cast<const DictType&>(*t);
-            return typeIsConcrete(d.keyType.get()) && typeIsConcrete(d.valueType.get());
+            return typeIsConcrete(d.keyType.get(), seen) && typeIsConcrete(d.valueType.get(), seen);
         }
         case Type::Kind::Tuple: {
             for (auto& e : static_cast<const TupleType&>(*t).elementTypes)
-                if (!typeIsConcrete(e.get())) return false;
+                if (!typeIsConcrete(e.get(), seen)) return false;
             return true;
         }
         case Type::Kind::Task:
-            return typeIsConcrete(static_cast<const TaskType&>(*t).resultType.get());
+            return typeIsConcrete(static_cast<const TaskType&>(*t).resultType.get(), seen);
         case Type::Kind::Function: {
             auto& f = static_cast<const FunctionType&>(*t);
             for (auto& p : f.paramTypes)
-                if (!typeIsConcrete(p.get())) return false;
-            return typeIsConcrete(f.returnType.get());
+                if (!typeIsConcrete(p.get(), seen)) return false;
+            return typeIsConcrete(f.returnType.get(), seen);
         }
         case Type::Kind::Union: {
             for (auto& e : static_cast<const UnionType&>(*t).types)
-                if (!typeIsConcrete(e.get())) return false;
+                if (!typeIsConcrete(e.get(), seen)) return false;
             return true;
         }
         case Type::Kind::Instance: {
             auto& i = static_cast<const InstanceType&>(*t);
             if (i.classType)
                 for (auto& a : i.classType->genericArgs)
-                    if (!typeIsConcrete(a.get())) return false;
+                    if (!typeIsConcrete(a.get(), seen)) return false;
             return true;
         }
         default:
@@ -257,7 +263,13 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
         x->name = n;
         return x;
     };
-    if (!t) return named("Any");
+    if (!t) return named("__boxed__");
+    // A recursive alias is a cycle in the type graph; its own name is the only
+    // finite spelling of it, and the alias is in scope wherever the type is.
+    if (t->kind() == Type::Kind::Union) {
+        const auto& an = static_cast<const UnionType&>(*t).aliasName;
+        if (!an.empty()) return named(an);
+    }
     auto generic = [&](const std::string& base,
                        std::vector<std::shared_ptr<Type>> args) {
         auto g = std::make_unique<GenericTypeExpr>();
@@ -272,7 +284,7 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
         case Type::Kind::Str:   return named("str");
         case Type::Kind::Bytes: return named("bytes");
         case Type::Kind::None_: return named("None");
-        case Type::Kind::Any:   return named("Any");
+        case Type::Kind::Boxed:   return named("__boxed__");
         case Type::Kind::Ptr:   return named("ptr");
         case Type::Kind::TypeVar: return named(static_cast<const TypeVarType&>(*t).name);
         case Type::Kind::List:
@@ -304,7 +316,7 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
         }
         case Type::Kind::Lock:  return named("Lock");
         case Type::Kind::Never: return named("Never");
-        default: return named("Any");
+        default: return named("__boxed__");
     }
 }
 
@@ -316,7 +328,26 @@ bool TypeChecker::unifyTypeParam(
         const std::string& nm = static_cast<const TypeVarType&>(*declared).name;
         auto it = out.find(nm);
         if (it == out.end()) { out[nm] = actual; return true; }
-        return it->second && it->second->equals(*actual);
+        if (!it->second) return false;
+        if (it->second->equals(*actual)) return true;
+        // Two arguments, one boxed and one concrete (`assertEqual(v, 10)` where
+        // v is a union): solve at the CONCRETE arm. The union side then goes
+        // through the checked downcast, so the comparison is typed rather than
+        // being forced to the widest of the two.
+        auto armOf = [](const Type& u, const Type& t) {
+            if (u.kind() != Type::Kind::Union) return false;
+            for (const auto& a : static_cast<const UnionType&>(u).types)
+                if (a && a->equals(t)) return true;
+            return false;
+        };
+        // Never solve a type parameter to None: there is no value
+        // representation to stamp, and the union side already covers it.
+        if (actual->kind() != Type::Kind::None_ &&
+            armOf(*it->second, *actual)) { out[nm] = actual; return true; }
+        if (actual->kind() == Type::Kind::None_ && armOf(*it->second, *actual))
+            return true;
+        if (armOf(*actual, *it->second)) return true;
+        return false;
     }
     if (declared->kind() == Type::Kind::List && actual->kind() == Type::Kind::List)
         return unifyTypeParam(static_cast<const ListType&>(*declared).elementType,
@@ -338,6 +369,43 @@ bool TypeChecker::unifyTypeParam(
     if (declared->kind() == Type::Kind::Task && actual->kind() == Type::Kind::Task)
         return unifyTypeParam(static_cast<const TaskType&>(*declared).resultType,
                               static_cast<const TaskType&>(*actual).resultType, out);
+    // A union parameter pattern solves against the argument by cancelling the
+    // arms it already names: `T | None` against `Widget | None` gives
+    // T = Widget, and against a bare `Widget` gives the same (the None arm is
+    // simply absent). Without this, every nullable-taking generic is
+    // uninferable at the call site.
+    if (declared->kind() == Type::Kind::Union) {
+        auto& du = static_cast<const UnionType&>(*declared);
+        std::shared_ptr<Type> var;
+        std::vector<std::shared_ptr<Type>> fixed;
+        for (auto& d : du.types) {
+            if (d && d->kind() == Type::Kind::TypeVar) {
+                if (var) return true;          // more than one hole: ambiguous
+                var = d;
+            } else if (d) {
+                fixed.push_back(d);
+            }
+        }
+        if (!var) return true;
+        std::vector<std::shared_ptr<Type>> rest;
+        if (actual->kind() == Type::Kind::Union) {
+            for (auto& a : static_cast<const UnionType&>(*actual).types) {
+                bool named = false;
+                for (auto& f : fixed)
+                    if (a && f->equals(*a)) { named = true; break; }
+                if (!named && a) rest.push_back(a);
+            }
+        } else {
+            bool named = false;
+            for (auto& f : fixed)
+                if (f->equals(*actual)) { named = true; break; }
+            if (!named) rest.push_back(actual);
+        }
+        if (rest.empty()) return true;
+        std::shared_ptr<Type> solved =
+            rest.size() == 1 ? rest[0] : std::make_shared<UnionType>(rest);
+        return unifyTypeParam(var, solved, out);
+    }
     if (declared->kind() == Type::Kind::Function &&
         actual->kind() == Type::Kind::Function) {
         auto& d = static_cast<const FunctionType&>(*declared);
@@ -701,8 +769,8 @@ bool TypeChecker::tryInstantiateGenericCall(
             if (!pt || !aT) continue;
             if (!typeIsConcrete(pt.get())) continue;
             auto pk = pt->kind(), ak = aT->kind();
-            if (pk == Type::Kind::Unknown || pk == Type::Kind::Any ||
-                ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
+            if (pk == Type::Kind::Unknown || pk == Type::Kind::Boxed ||
+                ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
                 ak == Type::Kind::None_ || ak == Type::Kind::Union ||
                 pk == Type::Kind::Union)
                 continue;
@@ -1131,7 +1199,14 @@ void TypeChecker::runMonomorphization() {
                 impl_->define("self", std::make_shared<InstanceType>(ownerCT));
                 impl_->currentClass = ownerCT.get();
             }
-            stampedFn->accept(*this);
+            {
+                // A synthesized decoder/encoder body is compiler-authored and
+                // may still name the box internally; the ban is on source.
+                const bool prevAllow = impl_->allowDynamicTierSpelling;
+                impl_->allowDynamicTierSpelling = true;
+                stampedFn->accept(*this);
+                impl_->allowDynamicTierSpelling = prevAllow;
+            }
             if (ownerCT)
                 if (auto ft = std::dynamic_pointer_cast<FunctionType>(
                         impl_->lookup(stampedFn->name)))
@@ -1435,10 +1510,22 @@ std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
 
 }
 
+// The boxed JSON tree can be spelled `Any` or as a recursive alias union
+// (`Data`); both decode by delegating to the box-tree loaders.
+static std::string sdBoxedTreeName(const std::shared_ptr<Type>& t) {
+    if (!t) return "";
+    if (t->kind() == Type::Kind::Boxed) return "__boxed__";
+    if (t->kind() == Type::Kind::Union) {
+        const auto& an = static_cast<const UnionType&>(*t).aliasName;
+        if (!an.empty()) return an;
+    }
+    return "";
+}
+
 std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     const std::shared_ptr<Type>& targetType, SourceLocation loc) {
-    if (targetType && targetType->kind() == Type::Kind::Any)
-        return sdBoxedDelegateFn("loadb", sdType("Any", loc), loc);
+    if (const std::string tn = sdBoxedTreeName(targetType); !tn.empty())
+        return sdBoxedDelegateFn("loadb", sdType(tn, loc), loc);
     if (targetType) {
         const std::string sk = sdScalarKindName(targetType->kind());
         if (!sk.empty()) {
@@ -1454,13 +1541,15 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     if (targetType && targetType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*targetType);
         const bool strKey = dt.keyType && dt.keyType->kind() == Type::Kind::Str;
-        if (strKey && dt.valueType && dt.valueType->kind() == Type::Kind::Any)
-            return sdBoxedDelegateFn("loadb_obj", sdInnerType("dict:Any", loc), loc);
+        if (const std::string vn = sdBoxedTreeName(dt.valueType);
+            strKey && !vn.empty())
+            return sdBoxedDelegateFn("loadb_obj", sdInnerType("dict:" + vn, loc), loc);
         const std::string vk = dt.valueType ? sdScalarKindName(dt.valueType->kind()) : "";
         if (!strKey || vk.empty()) {
             error(loc, "json.decode[dict[K, V]]: only dict[str, <scalar>] decodes "
-                       "box-free; spell dict[str, Any] to opt into the boxed tree "
-                       "(a class or container V never falls back to Any)");
+                       "box-free; spell dict[str, Data] (from json) to opt into "
+                       "the boxed JSON tree (a class or container V never falls "
+                       "back to a boxed type on its own)");
             return nullptr;
         }
         auto fn = sdCursorFn(loc);
@@ -1473,8 +1562,8 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     }
     if (targetType && targetType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*targetType);
-        if (lt.elementType && lt.elementType->kind() == Type::Kind::Any)
-            return sdBoxedDelegateFn("loadb_list", sdInnerType("list:Any", loc), loc);
+        if (const std::string en = sdBoxedTreeName(lt.elementType); !en.empty())
+            return sdBoxedDelegateFn("loadb_list", sdInnerType("list:" + en, loc), loc);
         const std::string elemScalar =
             lt.elementType ? sdScalarKindName(lt.elementType->kind()) : "";
         if (!elemScalar.empty()) {

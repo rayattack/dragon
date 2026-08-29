@@ -1336,7 +1336,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             if (ckIt != impl_->classFieldListElemKindsBySym.end()) {
                                 auto fIt = ckIt->second.find(listAttr->attribute);
                                 fieldIsAny = fIt != ckIt->second.end() &&
-                                             fIt->second == Type::Kind::Any;
+                                             Impl::isBoxedKind(fIt->second);
                             }
                             if (!fieldIsAny) {
                                 impl_->classFieldListElemKindsBySym[impl_->classSym(ownerClass)][listAttr->attribute] = Type::Kind::Instance;
@@ -1347,7 +1347,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 } else if (auto* listName = dynamic_cast<NameExpr*>(attr.object.get())) {
                     auto ekIt = impl_->varListElemKinds.find(listName->name);
                     bool varIsAny = ekIt != impl_->varListElemKinds.end() &&
-                                    ekIt->second == Type::Kind::Any;
+                                    Impl::isBoxedKind(ekIt->second);
                     if (!varIsAny) {
                         impl_->varListElemKinds[listName->name] = Type::Kind::Instance;
                         impl_->varListElemClassName[listName->name] = appendedClassName;
@@ -1357,7 +1357,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args[0]->accept(*this);
             llvm::Value* val = impl_->lastValue;
             Type::Kind appendElemKind = impl_->getIterableElementKind(attr.object.get());
-            if (appendElemKind == Type::Kind::Any) {
+            if (Impl::isBoxedKind(appendElemKind)) {
                 auto tp = impl_->boxArgTagPayload(node.args[0].get(),
                                                   val, true);
                 impl_->builder->CreateCall(
@@ -1432,8 +1432,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             llvm::Value* idx = impl_->lastValue;
             node.args[1]->accept(*this);
             llvm::Value* val = impl_->lastValue;
-            if (impl_->getIterableElementKind(attr.object.get()) ==
-                Type::Kind::Any) {
+            if (Impl::isBoxedKind(
+                    impl_->getIterableElementKind(attr.object.get()))) {
                 if (idx->getType() == impl_->i1Type)
                     idx = impl_->builder->CreateZExt(idx, impl_->i64Type);
                 else if (idx->getType()->isPointerTy())
@@ -1460,8 +1460,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (method == "remove" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* val = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-            if (impl_->getIterableElementKind(attr.object.get()) ==
-                Type::Kind::Any) {
+            if (Impl::isBoxedKind(
+                    impl_->getIterableElementKind(attr.object.get()))) {
                 auto tp = impl_->boxArgTagPayload(node.args[0].get(),
                                                   val, false);
                 impl_->builder->CreateCall(
@@ -1481,7 +1481,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (method == "pop") {
             Type::Kind popElemKind =
                 impl_->getIterableElementKind(attr.object.get());
-            bool isBox = popElemKind == Type::Kind::Any;
+            bool isBox = Impl::isBoxedKind(popElemKind);
             llvm::Value* idx;
             if (node.args.size() == 1) {
                 node.args[0]->accept(*this);
@@ -1673,7 +1673,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     {obj, key, defVal}, "dictgetstrdef");
                 return true;
             }
-            if (getVk == Type::Kind::Any) {
+            if (Impl::isBoxedKind(getVk)) {
                 Impl::VarKind bdk = impl_->ownedTempDrainKind(node.args[1].get(), defVal);
                 llvm::Value* defBox = defVal->getType() == impl_->boxType
                     ? defVal
@@ -1734,13 +1734,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
                 auto vit = impl_->varDictValueKinds.find(objName->name);
                 if (vit != impl_->varDictValueKinds.end() &&
-                    vit->second == Type::Kind::Any)
+                    Impl::isBoxedKind(vit->second))
                     valueIsAny = true;
             }
             if (!valueIsAny && attr.object->type &&
                 attr.object->type->kind() == Type::Kind::Dict) {
                 if (auto* dt = dynamic_cast<DictType*>(attr.object->type.get())) {
-                    if (dt->valueType && dt->valueType->kind() == Type::Kind::Any)
+                    if (dt->valueType && Impl::isBoxedKind(dt->valueType->kind()))
                         valueIsAny = true;
                 }
             }
@@ -1899,6 +1899,18 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args[0]->accept(*this);
             Type::Kind addKind = Impl::arrivalKind(node.args[0].get());
             v = impl_->narrowBoxForExpr(node.args[0].get(), impl_->lastValue);
+            if (v->getType() == impl_->boxType) {
+                // A union argument reaching a concrete set: unbox against the
+                // set's element type with the tag check, rather than handing
+                // the runtime a raw box.
+                Type::Kind want = impl_->getIterableElementKind(attr.object.get());
+                if (want != Type::Kind::Unknown && !Impl::isBoxedKind(want)) {
+                    v = impl_->unboxBoxResultChecked(
+                        v, impl_->typeKindToLLVM(want),
+                        Impl::typeKindToVarKind(want), Impl::kNoListElemCheck, want);
+                    addKind = want;
+                }
+            }
             if (v->getType()->isPointerTy()) {
                 v = impl_->ensureHeapString(v, node.args[0].get());
                 bool argIsStr =

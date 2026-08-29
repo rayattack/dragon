@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 const TWO_POW_61: int = 2305843009213693952
@@ -111,8 +113,8 @@ class ListAllocOverflowTests(TestCase) {
 
     def test_repeat_box_wrapping_count_raises() {
         def run() -> None {
-            src: list[Any] = [1]
-            xs: list[Any] = src * TWO_POW_60_PLUS_2
+            src: list[Boxed] = [1]
+            xs: list[Boxed] = src * TWO_POW_60_PLUS_2
         }
         self.assertRaises(MemoryError, run)
     }

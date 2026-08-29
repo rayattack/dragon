@@ -510,7 +510,7 @@ class Customer(TypedDict) {
     id: int
     name: str
 }
-row: dict[str, Any] = {}
+row: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {}
 row["id"] = 1
 row["name"] = "Ada"
 c: Customer = Customer(**row)
@@ -525,8 +525,8 @@ class Customer(TypedDict) {
     id: int
     name: str
 }
-rows: list[dict[str, Any]] = []
-r1: dict[str, Any] = {}
+rows: list[dict[str, int | str]] = []
+r1: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {}
 r1["id"] = 1
 r1["name"] = "Ada"
 rows.append(r1)
@@ -575,7 +575,7 @@ print(len(t))
 #### :tuple_empty_len
 
 ```dr
-t: Any = ()
+t: int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[] = ()
 print(len(t))
 ```
 
@@ -1282,9 +1282,9 @@ print(a == c)
 #### :boxed_list_eq_via_any
 
 ```dr
-a: Any = [1, 2, 3]
-b: Any = [1, 2, 3]
-c: Any = [1, 2, 4]
+a: int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[] = [1, 2, 3]
+b: int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[] = [1, 2, 3]
+c: int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[] = [1, 2, 4]
 print(a == b)
 print(a == c)
 ```
@@ -1292,9 +1292,9 @@ print(a == c)
 #### :boxed_dict_eq_via_any
 
 ```dr
-a: Any = {"k": 1}
-b: Any = {"k": 1}
-c: Any = {"k": 2}
+a: int | dict[str, int] = {"k": 1}
+b: int | dict[str, int] = {"k": 1}
+c: int | dict[str, int] = {"k": 2}
 print(a == b)
 print(a == c)
 ```
@@ -1302,9 +1302,9 @@ print(a == c)
 #### :boxed_bytes_eq_via_any
 
 ```dr
-a: Any = b"hello"
-b: Any = b"hello"
-c: Any = b"world"
+a: int | bytes = b"hello"
+b: int | bytes = b"hello"
+c: int | bytes = b"world"
 print(a == b)
 print(a == c)
 ```
@@ -1324,7 +1324,7 @@ print(result)
 #### :list_any_mixed_literal_indexed_prints_values
 
 ```dr
-x: list[Any] = [10, "hi", 2.5]
+x: list[int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = [10, "hi", 2.5]
 print(x[0])
 print(x[1])
 print(x[2])
@@ -1333,7 +1333,7 @@ print(x[2])
 #### :list_any_homogeneous_int_literal_indexed
 
 ```dr
-x: list[Any] = [1, 2, 3]
+x: list[int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = [1, 2, 3]
 print(x[0])
 print(x[2])
 ```
@@ -1341,8 +1341,8 @@ print(x[2])
 #### :list_any_element_is_castable_via_isinstance
 
 ```dr
-x: list[Any] = [10, "hi"]
-v: Any = x[0]
+x: list[int | str] = [10, "hi"]
+v: int | str = x[0]
 if isinstance(v, int) {
   n: int = v
   print(n + 5)
@@ -1352,7 +1352,7 @@ if isinstance(v, int) {
 #### :list_any_iteration
 
 ```dr
-x: list[Any] = [1, "two", 3.0]
+x: list[int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = [1, "two", 3.0]
 for item in x {
   print(item)
 }
@@ -1361,21 +1361,21 @@ for item in x {
 #### :list_any_holding_str_list_prints_tag_aware
 
 ```dr
-xs: list[Any] = [["a", "b"], [1, 2], [1.5, 2.5]]
+xs: list[int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = [["a", "b"], [1, 2], [1.5, 2.5]]
 print(xs)
 ```
 
 #### :dict_str_any_holding_containers_prints_tag_aware
 
 ```dr
-d: dict[str, Any] = {"a": ["x", "y"], "b": {"inner": "v"}}
+d: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {"a": ["x", "y"], "b": {"inner": "v"}}
 print(d)
 ```
 
 #### :dict_int_any_holding_list_prints_tag_aware
 
 ```dr
-d: dict[int, Any] = {1: ["x", "y"]}
+d: dict[int, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {1: ["x", "y"]}
 print(d)
 ```
 

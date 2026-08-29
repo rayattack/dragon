@@ -2,11 +2,13 @@
 
 The `Class` pattern kind existed in the AST but was unimplemented: the parser
 errored on `case int()` and codegen never matched it. This covers the type-test
-slice - discriminating a Union subject at runtime via the box tag, an `Any`
+slice - discriminating a Union subject at runtime via the box tag, an `Boxed`
 subject likewise, a `Class | None` Optional via a non-null check, the subclass
 chain, OR-of-type-tests, and the wildcard fallback. Field destructuring
 (`case Point(x, y)`) is a separate increment and errors cleanly at check time.
 """
+
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
 
 from unittest import TestCase, main
 
@@ -29,7 +31,7 @@ def classify(value: int | str) -> str {
     return "?"
 }
 
-def kind(v: Any) -> str {
+def kind(v: Boxed) -> str {
     match v {
         case int() | bool() { return "intish" }
         case float() { return "float" }

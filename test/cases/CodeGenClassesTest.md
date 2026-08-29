@@ -1338,30 +1338,6 @@ b: Box = Box(99)
 print(b.get())
 ```
 
-#### :print_class_instance_var
-
-```dr
-class Point {
-  def(x: int, y: int) {
-    self.x = x
-    self.y = y
-  }
-}
-p: Point = Point(1, 2)
-print(p)
-```
-
-#### :print_class_instance_direct
-
-```dr
-class Box {
-  def(val: int) {
-    self.val = val
-  }
-}
-print(Box(42))
-```
-
 #### :static_field_e2_e
 
 ```dr

@@ -12,6 +12,7 @@ obligation on the callers above.
 - but it reads better at a call site that does I/O:
 
 ```dragon
+from json import Data
 async def fetch_data(url: str) -> str {
     # ... network I/O, runs on a green thread ...
     return "Data"

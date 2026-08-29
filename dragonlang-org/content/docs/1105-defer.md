@@ -219,7 +219,7 @@ multiple paths, raises, or real code after it.
 - The callee must resolve to a direct function or method; computed and
 closure callees are not supported yet.
 - No keyword arguments in the deferred call yet; pass positionally.
-- Arguments whose static type is `Any` or a union are not supported yet;
+- Arguments whose static type is `Data` or a union are not supported yet;
 annotate the concrete type.
 - No `defer fire f(x)` fusion; spawning at scope exit composes manually with
 a wrapper that fires inside.

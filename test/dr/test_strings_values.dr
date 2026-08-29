@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 
@@ -400,10 +402,10 @@ class HashTests(TestCase) {
 
 
 class ConversionTests(TestCase) {
-    """float(str) parsing + None/float boxing in Any.
+    """float(str) parsing + None/float boxing in Boxed.
 
     Regressions: (1) float("3.5") used to reinterpret the str pointer as an f64 bit
-    pattern (garbage) instead of parsing; (2) a None value boxed into dict[str, Any]
+    pattern (garbage) instead of parsing; (2) a None value boxed into dict[str, Boxed]
     read back as int 0 instead of None (missing TAG_NONE case). Both are exactly the
     shapes the database drivers hit on float / NULL columns.
     """
@@ -416,20 +418,20 @@ class ConversionTests(TestCase) {
     }
 
     def test_float_str_into_dict_any() {
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["f"] = float("3.5")
         got: float = d["f"]
         self.assertAlmostEqual(got, 3.5)
     }
 
     def test_none_in_dict_any_roundtrip() {
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["n"] = none
         self.assertIsNone(d["n"])
     }
 
     def test_none_str_overwrite_cleanup() {
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["k"] = none
         d["k"] = "s"
         d["k"] = none
@@ -442,15 +444,15 @@ class TypeBuiltinTests(TestCase) {
     """type(x) returns the type's NAME as a str (e.g. "int", "Dog"). Two root-cause
     regressions are pinned here:
 
-      1. Boxing a type(x) result into Any carried TAG_INT (so `print(any)` showed a
-         raw pointer): `type`'s declared return type was Any, not str, so the box
+      1. Boxing a type(x) result into Boxed carried TAG_INT (so `print(any)` showed a
+         raw pointer): `type`'s declared return type was Boxed, not str, so the box
          tag fell back to int. Fixed by declaring type() -> str.
       2. type() on a literal returned "object": the name was derived only from the
          argument's VarKind, which a literal (no NameExpr) doesn't have. Fixed by
          deriving the name from the argument's static type first.
 
-    assertEqual boxes each argument into Any, so every case below also exercises
-    the Any-boxing path that regression #1 broke.
+    assertEqual boxes each argument into Boxed, so every case below also exercises
+    the Boxed-boxing path that regression #1 broke.
     """
 
     def test_literals() {
@@ -475,9 +477,9 @@ class TypeBuiltinTests(TestCase) {
     }
 
     def test_boxed_into_any() {
-        a: Any = type(Dog("rex"))
+        a: Boxed = type(Dog("rex"))
         self.assertEqual(a, "Dog")
-        b: Any = type(42)
+        b: Boxed = type(42)
         self.assertEqual(b, "int")
     }
 }

@@ -32,7 +32,7 @@ def handle(users: list[User]) -> list[Scored] {
 
 That one `extern` line is the whole Dragon side. The declaration is the
 contract: typed at compile time like any extern, monomorphized like any
-generic. `Any` appears nowhere.
+generic. `Data` appears nowhere.
 
 Three tags are accepted: `"python"`, `"golang"`, and `"rust"`. (`"C"` is the
 in-process lane from the previous chapters; `extern "go"` is rejected with a
@@ -58,9 +58,9 @@ are the same public schema-directed pair you can call yourself on any class
 boundary at exactly the cost of encoding a `User`, nothing hidden on top.
 
 A reply whose shape you do not control still has a typed spelling: declare
-the return as `dict[str, Any]` and the reply decodes through the boxed
-convenience tier (`sidecar_call[dict[str, Any]]` / `runs[dict[str, Any]]`).
-The `Any` in the signature is the price tag - each value arrives boxed, so
+the return as `dict[str, Data]` and the reply decodes through the boxed
+convenience tier (`sidecar_call[dict[str, Data]]` / `runs[dict[str, Any]]`).
+The `Data` in the signature is the price tag - each value arrives boxed, so
 narrow with `isinstance` as usual; every concrete return type keeps the
 box-free path.
 

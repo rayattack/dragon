@@ -531,7 +531,7 @@ foo(1, 2, 3)
 #### :var_args_empty
 
 ```dr
-def show(tag: str, *args: Any) {
+def show(tag: str, *args: int | str) {
   print(tag)
   print(len(args))
 }
@@ -541,7 +541,7 @@ show("test")
 #### :var_args_len
 
 ```dr
-def count(*args: Any) -> int {
+def count(*args: int | str) -> int {
   return len(args)
 }
 print(count(1, 2, 3))
@@ -560,7 +560,7 @@ greet("hi", "alice", "bob")
 #### :kwargs_empty
 
 ```dr
-def config(**kwargs: Any) {
+def config(**kwargs: int | str) {
   print(len(kwargs))
 }
 config()
@@ -569,7 +569,7 @@ config()
 #### :kwargs_len
 
 ```dr
-def config(**kwargs: Any) {
+def config(**kwargs: int | str) {
   print(len(kwargs))
 }
 config(host="localhost", port=8080)
@@ -578,7 +578,7 @@ config(host="localhost", port=8080)
 #### :var_args_and_kwargs
 
 ```dr
-def flexfunc(a: int, *args: Any, **kwargs: Any) {
+def flexfunc(a: int, *args: int | str, **kwargs: int | str) {
   print(a)
   print(len(args))
   print(len(kwargs))
@@ -589,7 +589,7 @@ flexfunc(1, 2, 3, x=10, y=20)
 #### :var_args_only_regular
 
 ```dr
-def add(a: int, b: int, *rest: Any) -> int {
+def add(a: int, b: int, *rest: int | str) -> int {
   return a + b
 }
 print(add(10, 32))

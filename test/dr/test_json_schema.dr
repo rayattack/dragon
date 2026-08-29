@@ -13,6 +13,7 @@ runs by name. Registered schemas reference each other with
 from unittest import TestCase, main
 import json
 from json import Schema, ValidationResult, ValidationError, decode
+from json import Data
 
 
 class TestEntryPoint(TestCase) {
@@ -29,7 +30,7 @@ class TestEntryPoint(TestCase) {
 
     def test_register_parsed_text() -> None {
         s: Schema = Schema("draft-07")
-        s.register("evt", decode[dict[str, Any]]('{"type": "object", "required": ["id"]}'.encode("utf-8")))
+        s.register("evt", decode[dict[str, Data]]('{"type": "object", "required": ["id"]}'.encode("utf-8")))
         self.assertEqual(s.validate("evt", json.loads('{"id": 1}')).ok, True)
         const r: ValidationResult = s.validate("evt", json.loads('{}'))
         self.assertEqual(r.errors[0].path, "$.id")
@@ -66,9 +67,9 @@ class TestRefs(TestCase) {
         s: Schema = Schema("draft-07")
         s.register("address", {"type": "object", "required": ["city"], "properties": {"city": {"type": "string", "minLength": 1}}})
         s.register("person", {"type": "object", "required": ["name", "home"], "properties": {"name": {"type": "string"}, "home": {"$ref": "address"}}})
-        const good: Any = json.loads('{"name": "ada", "home": {"city": "lagos"}}')
+        const good: Data = json.loads('{"name": "ada", "home": {"city": "lagos"}}')
         self.assertEqual(s.validate("person", good).ok, True)
-        const bad: Any = json.loads('{"name": "ada", "home": {"city": ""}}')
+        const bad: Data = json.loads('{"name": "ada", "home": {"city": ""}}')
         const r: ValidationResult = s.validate("person", bad)
         self.assertEqual(len(r.errors), 1)
         self.assertEqual(r.errors[0].path, "$.home.city")
@@ -114,9 +115,9 @@ class TestRefs(TestCase) {
     def test_recursive_schema_on_finite_value() -> None {
         s: Schema = Schema("draft-07")
         s.register("node", {"type": "object", "required": ["v"], "properties": {"v": {"type": "integer"}, "kids": {"type": "array", "items": {"$ref": "node"}}}})
-        const tree: Any = json.loads('{"v": 1, "kids": [{"v": 2, "kids": []}, {"v": 3, "kids": [{"v": 4, "kids": []}]}]}')
+        const tree: Data = json.loads('{"v": 1, "kids": [{"v": 2, "kids": []}, {"v": 3, "kids": [{"v": 4, "kids": []}]}]}')
         self.assertEqual(s.validate("node", tree).ok, True)
-        const bad: Any = json.loads('{"v": 1, "kids": [{"v": "x", "kids": []}]}')
+        const bad: Data = json.loads('{"v": 1, "kids": [{"v": "x", "kids": []}]}')
         const r: ValidationResult = s.validate("node", bad)
         self.assertEqual(r.errors[0].path, "$.kids[0].v")
     }

@@ -104,12 +104,12 @@ machine type**, with no box and no tag:
 | `float` | `f64` | a floating-point register |
 | `bool` | `i1` | a single bit |
 | `str`, `list[T]`, `dict[K,V]`, instances | `ptr` | a raw pointer |
-| `Union[...]`, `Any` | `{ i64, i64 }` | a 16-byte tagged box - *only* here |
+| `Union[...]`, `Data` | `{ i64, i64 }` | a 16-byte tagged box - *only* here |
 
 So `a + b` on two `int`s is a single LLVM `add` on two registers. No
 allocation, no unboxing, no tag check. The only time a value gets the
 heavyweight tagged-box representation is when its type is genuinely
-dynamic - a `Union` or `Any` - and even then, narrowing it back with
+dynamic - a `Union` or `Data` - and even then, narrowing it back with
 `isinstance` extracts the payload at its native type. This is the third
 commandment in mechanical form: a value whose type is known flows *at*
 that type, never boxed.

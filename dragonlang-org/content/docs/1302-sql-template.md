@@ -65,16 +65,17 @@ time:
 ```dragon
 import database
 from database import SQL
+from json import Data
 
 db: database.Connection = database.open("sqlite::memory:")
 minimum: float = 10.0
 n: int = 5
 
 # values - fine, these are parameters:
-big: list[dict[str, Any]] = db.all(template[SQL] { select * from orders where total > !{minimum} limit !{n} })
+big: list[dict[str, Data]] = db.all(template[SQL] { select * from orders where total > !{minimum} limit !{n} })
 
 # an identifier is NOT a parameter - write it literally in the template:
-recent: list[dict[str, Any]] = db.all(template[SQL] { select * from orders order by created_at })   # column name is literal
+recent: list[dict[str, Data]] = db.all(template[SQL] { select * from orders order by created_at })   # column name is literal
 ```
 
 If you genuinely need a dynamic column or table name (a sort key chosen at runtime),
@@ -92,7 +93,7 @@ interned string in `.rodata` (deduplicated across structurally identical sites),
 precomputes its hash so the statement-cache bucket is pre-seeded, and emits **only
 the parameter binding** at the call site - your `!{expr}` values flowing at their
 native LLVM types (`int` as `i64`, `float` as `f64`), bound straight into the wire
-protocol with no `Any` round-trip and no string building.
+protocol with no `Data` round-trip and no string building.
 
 Each backend rewrites the canonical `$$N` to its own placeholder dialect once, at
 prepare time - `?N` for SQLite, `$N` for Postgres, `?` for MySQL (see

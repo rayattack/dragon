@@ -1,3 +1,6 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed] | Dog | list[Callable[[], int]]
+
+from json import Data
 from unittest import TestCase, main
 from json import loads
 from anybox_src import give_bytes, give_str
@@ -6,7 +9,7 @@ from anybox_src import give_bytes, give_str
 class IntField {
     id: int
 
-    def(d: dict[str, Any]) {
+    def(d: dict[str, Boxed]) {
         self.id = d['id']
     }
 }
@@ -15,7 +18,7 @@ class IntField {
 class StrField {
     name: str
 
-    def(d: dict[str, Any]) {
+    def(d: dict[str, Boxed]) {
         self.name = d['name']
     }
 }
@@ -25,7 +28,7 @@ class MixedFields {
     id: int
     name: str
 
-    def(d: dict[str, Any]) {
+    def(d: dict[str, Boxed]) {
         self.id = d['id']
         self.name = d['name']
     }
@@ -41,7 +44,7 @@ class MethodStore {
         self.name = ""
     }
 
-    def load(d: dict[str, Any]) -> None {
+    def load(d: dict[str, Boxed]) -> None {
         self.id = d['id']
         self.name = d['name']
     }
@@ -51,7 +54,7 @@ class MethodStore {
 class FloatField {
     price: float
 
-    def(d: dict[str, Any]) {
+    def(d: dict[str, Boxed]) {
         self.price = d['price']
     }
 }
@@ -60,17 +63,17 @@ class FloatField {
 class ListAnySource {
     first: int
 
-    def(xs: list[Any]) {
+    def(xs: list[Boxed]) {
         self.first = xs[0]
     }
 }
 
 
 class TestAnyFieldStore(TestCase) {
-    """Storing an Any expression directly into a typed field must unbox.
+    """Storing an Boxed expression directly into a typed field must unbox.
 
     Regression test for the self-field sibling of the fixed module-global bug:
-    `self.id = d['id']` with d: dict[str, Any] stored the box (or nothing)
+    `self.id = d['id']` with d: dict[str, Boxed] stored the box (or nothing)
     instead of the unboxed value. int fields silently read 0, str fields held a
     garbage pointer that crashed later. The via-a-typed-local path always worked;
     these tests pin the direct path to the same answers
@@ -110,7 +113,7 @@ class TestAnyFieldStore(TestCase) {
     }
 
     def test_direct_matches_via_local() -> None {
-        d: dict[str, Any] = {'id': 42}
+        d: dict[str, Boxed] = {'id': 42}
         direct: IntField = IntField(d)
         tmp: int = d['id']
         self.assertEqual(direct.id, tmp)
@@ -118,58 +121,68 @@ class TestAnyFieldStore(TestCase) {
 }
 
 
-def mk_str_list() -> dict[str, Any] { return {"required": ["id", "name"]} }
-def mk_int_list() -> dict[str, Any] { return {"nums": [1, 2, 3, 4]} }
-def mk_schema() -> dict[str, Any] {
-    return { "type": "object",
-             "properties": { "id": {"type": "integer"},
-                             "name": {"type": "string"} },
-             "required": ["id", "name"] }
+def mk_str_list() -> dict[str, Boxed] { return {"required": ["id", "name"]} }
+def mk_int_list() -> dict[str, Boxed] {
+    const nums: list[Boxed] = [1, 2, 3, 4]
+    return {"nums": nums}
+}
+def mk_schema() -> dict[str, Boxed] {
+    const idp: dict[str, Boxed] = {"type": "integer"}
+    const namep: dict[str, Boxed] = {"type": "string"}
+    const props: dict[str, Boxed] = {"id": idp, "name": namep}
+    const req: list[Boxed] = ["id", "name"]
+    return {"type": "object", "properties": props, "required": req}
 }
 
-def mk_list_of_dict() -> list[dict[str, Any]] { return [{"required": ["id", "name"]}] }
-def mk_dict_of_dict() -> dict[str, dict[str, Any]] {
-    return {"outer": {"required": ["id", "name", "x"]}}
+def mk_list_of_dict() -> list[dict[str, Boxed]] {
+    const req: list[Boxed] = ["id", "name"]
+    const one: dict[str, Boxed] = {"required": req}
+    return [one]
+}
+def mk_dict_of_dict() -> dict[str, dict[str, Boxed]] {
+    const req: list[Boxed] = ["id", "name", "x"]
+    const inner: dict[str, Boxed] = {"required": req}
+    return {"outer": inner}
 }
 
 
-def count_list(s: dict[str, Any], key: str) -> int {
-    v: Any = s[key]
-    if isinstance(v, list) { vl: list[Any] = v  return len(vl) }
+def count_list(s: dict[str, Boxed], key: str) -> int {
+    v: Boxed = s[key]
+    if isinstance(v, list) { vl: list[Boxed] = v  return len(vl) }
     return -1
 }
 
-def count_dict(s: dict[str, Any], key: str) -> int {
-    v: Any = s[key]
-    if isinstance(v, dict) { vd: dict[str, Any] = v  return len(vd) }
+def count_dict(s: dict[str, Boxed], key: str) -> int {
+    v: Boxed = s[key]
+    if isinstance(v, dict) { vd: dict[str, Boxed] = v  return len(vd) }
     return -1
 }
 
 
 class DictAnyListLiteralBornBoxed(TestCase) {
-    """A list/dict literal used as a VALUE in a dict[str, Any] literal is born boxed.
+    """A list/dict literal used as a VALUE in a dict[str, Boxed] literal is born boxed.
 
     Ordinary code, no tricks:
 
-        def mk() -> dict[str, Any] { return {"required": ["id", "name"]} }
-        def use(s: dict[str, Any]) -> int {
-            ra: Any = s["required"]
-            if isinstance(ra, list) { rl: list[Any] = ra  return len(rl) }
+        def mk() -> dict[str, Boxed] { return {"required": ["id", "name"]} }
+        def use(s: dict[str, Boxed]) -> int {
+            ra: Boxed = s["required"]
+            if isinstance(ra, list) { rl: list[Boxed] = ra  return len(rl) }
             return 0
         }
 
-    You did nothing wrong. `dict[K, V] <: dict[K, Any]` is admitted covariantly,
+    You did nothing wrong. `dict[K, V] <: dict[K, Boxed]` is admitted covariantly,
     so `{"required": ["id", "name"]}` PASSED the return-type assignability check
     as dict[str, list[str]] and the born-box retype (tryExpectedTypeLiteral) never
     fired. The nested list was BUILT monomorphized (list[str], 8B/elem native) yet
-    stored under an Any tag; read back as list[Any] (16B/elem box) it walked the
+    stored under an Boxed tag; read back as list[Boxed] (16B/elem box) it walked the
     wrong stride and raised the view-check TypeError.
 
     BEFORE: `use(mk())` -> "TypeError: expected a boxed-element list ... value holds
     a monomorphized list".
-    AFTER: the return literal is born list[Any], so `len(rl)` reads 2.
+    AFTER: the return literal is born list[Boxed], so `len(rl)` reads 2.
 
-    The fix is scoped to LITERALS. A NAMED list[str] variable placed in an Any dict
+    The fix is scoped to LITERALS. A NAMED list[str] variable placed in an Boxed dict
     slot still follows the load-bearing invariance rule (test_named_list_str_stays_
     invariant proves it still raises), never a silent wrong value.
     """
@@ -183,46 +196,46 @@ class DictAnyListLiteralBornBoxed(TestCase) {
     }
 
     def test_nested_dict_and_list() -> None {
-        sch: dict[str, Any] = mk_schema()
+        sch: dict[str, Boxed] = mk_schema()
         self.assertEqual(count_dict(sch, "properties"), 2)
         self.assertEqual(count_list(sch, "required"), 2)
     }
 
     def test_read_inline_still_works() -> None {
-        s: dict[str, Any] = {"tags": ["a", "b", "c"]}
+        s: dict[str, Boxed] = {"tags": ["a", "b", "c"]}
         self.assertEqual(count_list(s, "tags"), 3)
     }
 
     def test_list_of_dict_any() -> None {
-        xs: list[dict[str, Any]] = mk_list_of_dict()
+        xs: list[dict[str, Boxed]] = mk_list_of_dict()
         self.assertEqual(count_list(xs[0], "required"), 2)
     }
 
     def test_dict_of_dict_any() -> None {
-        s: dict[str, dict[str, Any]] = mk_dict_of_dict()
-        inner: dict[str, Any] = s["outer"]
+        s: dict[str, dict[str, Boxed]] = mk_dict_of_dict()
+        inner: dict[str, Boxed] = s["outer"]
         self.assertEqual(count_list(inner, "required"), 3)
     }
 }
 
 
-const _str_box: Any = "hello"
+const _str_box: Boxed = "hello"
 const _gstr: str = _str_box
 const _glen: int = len(_gstr)
 
-const _int_box: Any = 42
+const _int_box: Boxed = 42
 const _gint: int = _int_box
 const _gint2: int = _gint + 1
 
-const _float_box: Any = 2.5
+const _float_box: Boxed = 2.5
 const _gfloat: float = _float_box
 
-const _astral_box: Any = loads("\"a\\ud83d\\ude00b\"")
+const _astral_box: Data = loads("\"a\\ud83d\\ude00b\"")
 const _gastral: str = _astral_box
 const _galen: int = len(_gastral)
 
 _reassigned: str = "x"
-const _re_box: Any = "world!"
+const _re_box: Boxed = "world!"
 _reassigned = _re_box
 const _relen: int = len(_reassigned)
 
@@ -260,12 +273,12 @@ def _bind_wrong() {
 }
 
 class AnyBytesUnbox(TestCase) {
-    """Any -> bytes checked unbox must accept a bytes payload (J2).
+    """Boxed -> bytes checked unbox must accept a bytes payload (J2).
 
     Regression: bytes-typed slots collapse onto the generic heap VarKind, so the
     checked unbox expected a list tag and raised a spurious
     "TypeError: expected list" for a perfectly ordinary `b: bytes = anyval`.
-    The mismatch case must still raise: an Any holding a str into a bytes slot
+    The mismatch case must still raise: an Boxed holding a str into a bytes slot
     is a genuine type error.
     """
 
@@ -298,7 +311,7 @@ class Dog {
 
 
 def park_and_return(n: int) -> int {
-    p: Any = Dog("rex" + str(n))
+    p: Boxed = Dog("rex" + str(n))
     return n * 2
 }
 
@@ -308,18 +321,18 @@ class BoxedInstanceScopeTests(TestCase) {
     Given the code below:
 
         def run() -> None {
-            p: Any = Dog("rex")
+            p: Boxed = Dog("rex")
             print("hi")
         }                          # SIGSEGV here (before the fix)
 
-    An `Any` local is 16-byte {tag, payload} box slot. Binding a class
+    An `Boxed` local is 16-byte {tag, payload} box slot. Binding a class
     instance to it is ordinary code, but the class-name tracking that powers
     member dispatch also overrdes the slot's cleanup kind from Union to
     ClassInstance. Scope cleanup then treats the box slot as a plain pointer
     slot: it loads the FIRST 8 bytes - the tag word (7) - and calls dragon_decref(7),
     dereferencing the integer as a heap header
     (AddressSanitizer: SEGV on address 0x7). Every function that ever parked
-    an instance in an `Any` local crashed at return.
+    an instance in an `Boxed` local crashed at return.
 
     WHY the unwind path never crashed: exception cleanup registered the
     extracted payload with its tag; only the NORMAL scope-exit decref read the
@@ -332,7 +345,7 @@ class BoxedInstanceScopeTests(TestCase) {
     map drifted to. The instance is decref'd properly (LSan-verified: freed,
     not leaked).
 
-    One line: an Any-boxed instance now dies by its tag, not as its tag
+    One line: an Boxed-boxed instance now dies by its tag, not as its tag
     """
 
     def test_boxed_instance_scope_exit_no_crash() {
@@ -345,7 +358,7 @@ class BoxedInstanceScopeTests(TestCase) {
     }
 
     def test_boxed_instance_narrowed_use_then_exit() {
-        p: Any = Dog("odo")
+        p: Boxed = Dog("odo")
         if isinstance(p, Dog) {
             self.assertEqual(p.get_name(), "odo")
         }
@@ -354,19 +367,19 @@ class BoxedInstanceScopeTests(TestCase) {
 }
 
 
-def _takes_any(x: Any) -> int { return 1 }
-def _is_str(x: Any) -> bool { return isinstance(x, str) }
-def _is_str_hop(y: Any) -> bool { return _is_str(y) }
-def _is_str_two_hops(z: Any) -> bool { return _is_str_hop(z) }
+def _takes_any(x: Boxed) -> int { return 1 }
+def _is_str(x: Boxed) -> bool { return isinstance(x, str) }
+def _is_str_hop(y: Boxed) -> bool { return _is_str(y) }
+def _is_str_two_hops(z: Boxed) -> bool { return _is_str_hop(z) }
 
 
-# An escaping sink: the ctor/method STORE the Any into a field (adopt the temp's
+# An escaping sink: the ctor/method STORE the Boxed into a field (adopt the temp's
 # +1). Draining the caller temp here would be a use-after-free.
 class Box {
-    v: Any
-    def(v: Any) { self.v = v }
-    def replace(v: Any) -> None { self.v = v }
-    def get() -> Any { return self.v }
+    v: Boxed
+    def(v: Boxed) { self.v = v }
+    def replace(v: Boxed) -> None { self.v = v }
+    def get() -> Boxed { return self.v }
 }
 
 
@@ -399,7 +412,7 @@ class AnyBorrowDrainTests(TestCase) {
     def test_bound_local_not_double_freed() {
         i: int = 0
         while i < 2000 {
-            const p: Any = loads("\"bound\"")
+            const p: Data = loads("\"bound\"")
             self.assertEqual(_takes_any(p), 1)
             self.assertTrue(isinstance(p, str))
             i = i + 1
@@ -410,7 +423,7 @@ class AnyBorrowDrainTests(TestCase) {
         i: int = 0
         while i < 2000 {
             const b: Box = Box(loads("\"stored\""))
-            const back: Any = b.get()
+            const back: Boxed = b.get()
             self.assertTrue(isinstance(back, str))
             const s: str = back
             self.assertEqual(s, "stored")
@@ -425,7 +438,7 @@ class AnyBorrowDrainTests(TestCase) {
         while i < 2000 {
             const b: Box = Box(loads("\"first\""))
             b.replace(loads("\"second\""))
-            const back: Any = b.get()
+            const back: Boxed = b.get()
             const s: str = back
             self.assertEqual(s, "second")
             i = i + 1
@@ -441,24 +454,24 @@ def make_adder(n: int) -> Callable[[], int] {
 }
 
 class ClosureBoxSubscriptUAF(TestCase) {
-    """Any-subscripting a monomorphic list of closures must incref the element.
+    """Boxed-subscripting a monomorphic list of closures must incref the element.
 
     Regression for the closure-box use-after-free: `dragon_box_subscript`'s
     monomorphic-list switch increfed TAG_STR/LIST/DICT/BYTES to honor the
     owned-return contract, but DRAGON_TAG_CLOSURE fell into the not-refcounted
     default arm. The returned box aliased the list's closure with a refcount one
     short; dropping the box freed the closure while the list still referenced it.
-    Indexing an Any-typed list of closures in a loop then using a live element was
+    Indexing an Boxed-typed list of closures in a loop then using a live element was
     a heap-use-after-free (ASan: dragon_decref_callable). Must stay clean under
     ASAN_OPTIONS=detect_leaks=1.
     """
 
     def test_any_subscript_of_closure_list_keeps_element_alive() {
         fns: list[Callable[[], int]] = [make_adder(10), make_adder(20)]
-        boxed: Any = fns
+        boxed: Boxed = fns
         i: int = 0
         while i < 2000 {
-            const got: Any = boxed[0]
+            const got: Boxed = boxed[0]
             i = i + 1
         }
         const first: Callable[[], int] = fns[0]

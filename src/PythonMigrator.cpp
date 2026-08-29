@@ -284,7 +284,9 @@ std::string PythonMigrator::emitType(TypeExpr* type) {
     if (auto* opt = dynamic_cast<OptionalTypeExpr*>(type)) {
         return emitType(opt->inner.get()) + " | None";
     }
-    return "Any";
+    // A draft must not compile with a type the author never chose: emit a
+    // placeholder that fails loudly until a real domain is written down.
+    return "TODO_ANNOTATE";
 }
 
 static std::string emitBlockHelper(PythonMigrator* self, const std::vector<std::unique_ptr<Stmt>>& stmts,

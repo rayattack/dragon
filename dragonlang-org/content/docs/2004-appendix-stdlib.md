@@ -37,11 +37,11 @@ statically linked the same way. Either way, nothing is fetched at build time.
 
 | Module | Purpose |
 |--------|---------|
-| `json` | JSON encode/decode/validate. Schema-directed `decode[T](bytes) -> T` / `encode[T](value) -> bytes` treat your class as the schema - synthesized per type at compile time, box-free, defaults/`Optional`/nesting honored, `ValueError` with byte offset on mismatch (also the FFI process-lane wire pair). Generic `dumps(obj)` / `loads -> Any` (bytes: `loadb`) for the convenience tier - a spelled-out `Any` in `decode[T]` (`decode[Any]`, `decode[dict[str, Any]]`, `decode[list[Any]]`) is the same boxed tier through the generic door - public `Cursor` / `JsonWriter` for streaming irregular shapes, and a JSON Schema validator - the `Schema` class owns a registry: `register(name, schema)` compiles immediately, `validate(name, payload)` -> `ValidationResult`, schemas compose via `$ref` (Draft 7 subset; replaces the third-party `jsonschema` dependency). Also hosts the `JSON` `template` content type. |
+| `json` | JSON encode/decode/validate. Schema-directed `decode[T](bytes) -> T` / `encode[T](value) -> bytes` treat your class as the schema - synthesized per type at compile time, box-free, defaults/`Optional`/nesting honored, `ValueError` with byte offset on mismatch (also the FFI process-lane wire pair). Generic `dumps(obj)` / `loads -> Any` (bytes: `loadb`) for the convenience tier - a spelled-out `Data` in `decode[T]` (`decode[Any]`, `decode[dict[str, Any]]`, `decode[list[Any]]`) is the same boxed tier through the generic door - public `Cursor` / `JsonWriter` for streaming irregular shapes, and a JSON Schema validator - the `Schema` class owns a registry: `register(name, schema)` compiles immediately, `validate(name, payload)` -> `ValidationResult`, schemas compose via `$ref` (Draft 7 subset; replaces the third-party `jsonschema` dependency). Also hosts the `JSON` `template` content type. |
 | `csv` | CSV reading/writing with quoted fields, escaped quotes, configurable delimiters. Pure Dragon. |
 | `configparser` | INI-file parser - sections, `=`/`:` key-values, `#`/`;` comments, whitespace stripping. Pure Dragon. |
 | `tomllib` | Read-only TOML parser matching Python 3.11+ `tomllib` (practical subset; no arrays-of-tables, inline tables, multi-line strings, or datetimes). |
-| `drs` | Parser for Dragon Script (`.drs`) config files; returns native `dict[str, Any]` / `list[Any]`. |
+| `drs` | Parser for Dragon Script (`.drs`) config files; returns native `dict[str, Data]` / `list[Data]`. |
 | `base64` | RFC 4648 Base64 encode/decode plus URL-safe variants; bytes-oriented to match Python. |
 | `binascii` | Binary↔ASCII conversion - `hexlify`/`unhexlify` (a.k.a. `b2a_hex`/`a2b_hex`) and CRC32 over bytes. |
 | `struct` | Pack/unpack primitives to/from bytes with the CPython format mini-language (`<`/`>`/`!`/`=`, `b`/`h`/`i`/`q`/`f`/`d`/`s`, …). |
@@ -156,7 +156,7 @@ See [Databases](/docs/1301-databases) for the full guide.
 
 | Module | Purpose |
 |--------|---------|
-| `database` | Database package root - queries are `template[SQL]` values (never strings); `all`/`one`/`val`/`run` reject bare `str`, rows are `dict[str, Any]`. Optional `[T]` on the fetch verbs (`all[Customer]`, `val[int]`) maps rows to a class or scalar. Defines the `open(dsn)` dispatcher. |
+| `database` | Database package root - queries are `template[SQL]` values (never strings); `all`/`one`/`val`/`run` reject bare `str`, rows are `dict[str, Data]`. Optional `[T]` on the fetch verbs (`all[Customer]`, `val[int]`) maps rows to a class or scalar. Defines the `open(dsn)` dispatcher. |
 | `database.base` | Shared backend-agnostic core - the `SQL` content type, the error hierarchy, `Results`. |
 | `database.sqlite` | SQLite backend over the bundled amalgamation (no external dependency). |
 | `database.postgres` | Postgres backend speaking the v3 wire protocol directly (SCRAM-SHA-256 auth); no libpq, no C dependency. |
@@ -169,7 +169,7 @@ See [Testing](/docs/1901-unittest) for the full guide.
 
 | Module | Purpose |
 |--------|---------|
-| `unittest` | Python-parity test framework - `TestCase` subclasses driven by method reflection and deep `Any` equality. |
+| `unittest` | Python-parity test framework - `TestCase` subclasses driven by method reflection and deep `Data` equality. |
 
 ## Compression and archives
 

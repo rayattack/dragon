@@ -571,16 +571,6 @@ TEST(CodeGenE2E, DefInitBackcompatE2E) {
     EXPECT_EQ(out, "99\n");
 }
 
-TEST(CodeGenE2E, PrintClassInstanceVar) {
-    auto out = compileAndRun(code("print_class_instance_var"));
-    EXPECT_EQ(out, "<Point instance>\n");
-}
-
-TEST(CodeGenE2E, PrintClassInstanceDirect) {
-    auto out = compileAndRun(code("print_class_instance_direct"));
-    EXPECT_EQ(out, "<Box instance>\n");
-}
-
 TEST(CodeGenE2E, StaticFieldE2E) {
     auto out = compileAndRun(code("static_field_e2_e"));
     EXPECT_EQ(out, "2\n");

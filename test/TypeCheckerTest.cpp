@@ -227,8 +227,11 @@ TEST(TypeCheckerTest, ListLiteralIntToFloatPromotionOk) {
     EXPECT_FALSE(checkHasErrors("xs: list[float] = [1, 2.0, 3]\n"));
 }
 
-TEST(TypeCheckerTest, ListLiteralAnyAcceptsHeterogeneous) {
-    EXPECT_FALSE(checkHasErrors("xs: list[Any] = [1, \"two\", 3.0]\n"));
+TEST(TypeCheckerTest, ListLiteralUnionAcceptsExactlyItsArms) {
+    // A closed domain takes the shapes it names ...
+    EXPECT_FALSE(checkHasErrors("xs: list[int | str] = [1, \"two\"]\n"));
+    // ... and refuses one it does not, instead of widening to a dynamic tier.
+    EXPECT_TRUE(checkHasErrors("ys: list[int | str] = [1, \"two\", 3.0]\n"));
 }
 
 TEST(TypeCheckerTest, NamedConcreteListNotAssignableToListAny) {
@@ -240,7 +243,7 @@ TEST(TypeCheckerTest, ConcreteListArgNotAssignableToListAnyParam) {
 }
 
 TEST(TypeCheckerTest, FreshLiteralStillAssignableToListAny) {
-    EXPECT_FALSE(checkHasErrors("xs: list[Any] = [\"a\", \"b\"]\n"));
+    EXPECT_FALSE(checkHasErrors("xs: list[int | str] = [\"a\", \"b\"]\n"));
 }
 
 TEST(TypeCheckerTest, FreshLiteralArgStillPassableToListAnyParam) {
@@ -251,8 +254,10 @@ TEST(TypeCheckerTest, ListAnyNotAssignableToConcreteList) {
     EXPECT_TRUE(checkHasErrors(code("list_any_not_assignable_to_concrete_list")));
 }
 
-TEST(TypeCheckerTest, DictValueCovarianceToAnyStillAllowed) {
-    EXPECT_FALSE(checkHasErrors(code("dict_value_covariance_to_any_still_allowed")));
+TEST(TypeCheckerTest, DictValueCovarianceToUnionRejected) {
+    // A monomorphized dict and a boxed-value dict have different layouts, so
+    // the conversion is refused rather than silently reinterpreted.
+    EXPECT_TRUE(checkHasErrors(code("dict_value_covariance_to_union_rejected")));
 }
 
 TEST(TypeCheckerTest, StrArgToIntParamRejected) {
@@ -606,8 +611,8 @@ TEST(TypeCheckerTest, FloatNotSubtypeOfInt) {
 
 TEST(TypeCheckerTest, SubtypeOfAny) {
     auto intType = std::make_shared<PrimitiveType>(Type::Kind::Int);
-    auto anyType = std::make_shared<AnyType>();
-    EXPECT_TRUE(intType->isSubtypeOf(*anyType));
+    auto boxedType = std::make_shared<BoxedType>();
+    EXPECT_TRUE(intType->isSubtypeOf(*boxedType));
 }
 
 TEST(TypeCheckerTest, SubtypeOfUnion) {
@@ -1261,8 +1266,8 @@ TEST(TypeCheckerTest, WalrusHomogeneousListInferOk) {
     EXPECT_TRUE(checkOk("xs := [10, 20, 30]\n"));
 }
 
-TEST(TypeCheckerTest, AnnotatedAnyMixedListOk) {
-    EXPECT_TRUE(checkOk("xs: list[Any] = [1, \"a\", 3.0]\n"));
+TEST(TypeCheckerTest, AnnotatedUnionMixedListOk) {
+    EXPECT_TRUE(checkOk("xs: list[int | str | float] = [1, \"a\", 3.0]\n"));
 }
 
 TEST(TypeCheckerTest, MixedListAgainstIntAnnotationRejected) {

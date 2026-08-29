@@ -40,12 +40,16 @@ void CodeGen::visit(AugAssignStmt& node) {
         const bool isCell = (alloca != nullptr) && impl_->isCellBacked(name->name);
         auto storeBack = [&](llvm::Value* result, Impl::VarKind newKind,
                              bool newIsBorrowed) {
-            if (isCell)
+            if (isCell) {
                 impl_->emitCellWrite(alloca, newKind, result, name->name);
-            else
-                impl_->storeWithRCOverwrite(storeTarget, loadType, result,
-                                            varKind, newKind, newIsBorrowed,
-                                            name->name);
+                return;
+            }
+            if (impl_->tryNarrowShadowWriteThrough(name->name, result,
+                                                   newIsBorrowed))
+                return;
+            impl_->storeWithRCOverwrite(storeTarget, loadType, result,
+                                        varKind, newKind, newIsBorrowed,
+                                        name->name);
         };
 
         llvm::Value* current = isCell
@@ -686,12 +690,13 @@ void CodeGen::visit(AnnAssignStmt& node) {
     }
 
     std::string annotClassName;
-    if (auto* namedType = dynamic_cast<NamedTypeExpr*>(node.annotation.get())) {
+    TypeExpr* annoCanon = impl_->resolveTypeAliasExpr(node.annotation.get());
+    if (auto* namedType = dynamic_cast<NamedTypeExpr*>(annoCanon)) {
         annotClassName = impl_->resolveAnnotationClassName(namedType->name);
-    } else if (dynamic_cast<UnionTypeExpr*>(node.annotation.get())) {
-        annotClassName = impl_->typeExprUnionClassName(node.annotation.get());
-    } else if (dynamic_cast<GenericTypeExpr*>(node.annotation.get())) {
-        annotClassName = impl_->genericInstanceClassName(node.annotation.get());
+    } else if (dynamic_cast<UnionTypeExpr*>(annoCanon)) {
+        annotClassName = impl_->typeExprUnionClassName(annoCanon);
+    } else if (dynamic_cast<GenericTypeExpr*>(annoCanon)) {
+        annotClassName = impl_->genericInstanceClassName(annoCanon);
     }
 
     if (auto* attrTarget = dynamic_cast<AttributeExpr*>(node.target.get())) {

@@ -1,0 +1,15 @@
+"""A `type` alias declared in another module is importable, plain and renamed,
+and usable anywhere a type name is (annotations, returns, containers)."""
+
+from alias_export_mod import Pair
+from alias_export_mod import Pair as P
+
+a: Pair = 5
+b: P = "text"
+xs: list[Pair] = [1, "two"]
+
+def pick(v: Pair) -> P {
+    return v
+}
+
+print("alias import ok")

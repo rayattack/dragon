@@ -51,6 +51,16 @@ bool CodeGen::generate(dragon::Module& entryModule,
     for (auto* dep : depModules) impl_->collectContracts(*dep);
     impl_->collectContracts(entryModule);
 
+    // Register surviving (recursive) type aliases before any annotation is
+    // classified; non-recursive aliases were erased by canonicalization.
+    for (auto* dep : depModules)
+        for (auto& stmt : dep->body)
+            if (auto* ta = dynamic_cast<TypeAliasStmt*>(stmt.get()))
+                if (ta->value) impl_->typeAliasDefs[ta->name] = ta->value.get();
+    for (auto& stmt : entryModule.body)
+        if (auto* ta = dynamic_cast<TypeAliasStmt*>(stmt.get()))
+            if (ta->value) impl_->typeAliasDefs[ta->name] = ta->value.get();
+
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         impl_->forwardDeclareClasses(*dep);

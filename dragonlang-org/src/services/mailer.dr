@@ -1,3 +1,4 @@
+from json import Data
 from json import dumps
 from http.client import HTTPSConnection, HTTPSResponse
 from html import HTML
@@ -21,9 +22,9 @@ class ResendMailer(Mailer) {
     }
 
     def send(to: str, subject: str, body: HTML) -> str {
-        payload: dict[str, Any] = {}
+        payload: dict[str, Data] = {}
         payload["from"] = self.from_addr
-        to_list: list[Any] = [to]
+        to_list: list[Data] = [to]
         payload["to"] = to_list
         payload["subject"] = subject
         payload["html"] = body.to_str()

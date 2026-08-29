@@ -306,18 +306,6 @@ b: Box = Box(7)
 print(b)
 ```
 
-#### :dunder_str_no_method
-
-```dr
-class Empty {
-  def() {
-    self.x = 0
-  }
-}
-e: Empty = Empty()
-print(e)
-```
-
 #### :dunder_str_py
 
 ```py

@@ -11,6 +11,24 @@
 
 namespace dragon {
 
+// A function whose body yields is a generator: the call is a lazy sequence,
+// consumable only by `for`. Mirrors CodeGen::Impl::containsYield.
+bool bodyContainsYield(const std::vector<std::unique_ptr<Stmt>>& body) {
+    struct YieldFinder : public DefaultASTVisitor {
+        bool found = false;
+        void visit(YieldExpr&) override { found = true; }
+        void visit(FunctionDecl&) override {}
+        void visit(ClassDecl&) override {}
+    };
+    YieldFinder finder;
+    for (auto& stmt : body) {
+        if (finder.found) break;
+        stmt->accept(finder);
+    }
+    return finder.found;
+}
+
+
 namespace {
 bool classExtendsByName(const ClassType* cls, const std::string& ancestor) {
     while (cls) {
@@ -68,7 +86,7 @@ bool isSameOrSubclass(const ClassType* c, const ClassType* d) {
 
 bool Type::isSubtypeOf(const Type& other) const {
     if (equals(other)) return true;
-    if (other.kind() == Kind::Any) return true;
+    if (other.kind() == Kind::Boxed) return true;
     if (other.kind() == Kind::Union) {
         auto& ut = static_cast<const UnionType&>(other);
         for (auto& t : ut.types) {
@@ -80,7 +98,16 @@ bool Type::isSubtypeOf(const Type& other) const {
 }
 
 bool Type::isAssignableTo(const Type& other) const {
-    return isSubtypeOf(other);
+    if (isSubtypeOf(other)) return true;
+    // Checked downcast: a union value may be assigned to one of its DECLARED
+    // arms. The arm set is closed and compiler-known, so this is not the old
+    // dynamic tier: codegen emits a tag check that raises TypeError on a
+    // mismatch instead of reinterpreting the payload.
+    if (kind() == Kind::Union) {
+        for (const auto& arm : static_cast<const UnionType&>(*this).types)
+            if (arm && arm->equals(other)) return true;
+    }
+    return false;
 }
 
 std::string PrimitiveType::toString() const {
@@ -101,7 +128,7 @@ bool PrimitiveType::equals(const Type& other) const {
 
 bool PrimitiveType::isSubtypeOf(const Type& other) const {
     if (equals(other)) return true;
-    if (other.kind() == Kind::Any) return true;
+    if (other.kind() == Kind::Boxed) return true;
     if (kind_ == Kind::Bool && other.kind() == Kind::Int) return true;
     if (kind_ == Kind::Int && other.kind() == Kind::Float) return true;
     if (kind_ == Kind::Bool && other.kind() == Kind::Float) return true;
@@ -119,6 +146,21 @@ bool ListType::equals(const Type& other) const {
 
 bool ListType::isSubtypeOf(const Type& other) const {
     if (Type::isSubtypeOf(other)) return true;
+    if (other.kind() == Kind::List) {
+        auto& o = static_cast<const ListType&>(other);
+        // Same reasoning as DictType: the internal box is layout-identical to
+        // a declared union and is not source-spellable.
+        if (elementType && elementType->kind() == Kind::Boxed &&
+            o.elementType && o.elementType->kind() == Kind::Union)
+            return true;
+        // ... and one level down: a list OF boxed-valued dicts stamped by the
+        // compiler lands in a list of the declared domain's dicts.
+        if (elementType && o.elementType &&
+            elementType->kind() == Kind::Dict &&
+            o.elementType->kind() == Kind::Dict &&
+            elementType->isSubtypeOf(*o.elementType))
+            return true;
+    }
     return false;
 }
 
@@ -135,7 +177,7 @@ bool SetType::isSubtypeOf(const Type& other) const {
     if (Type::isSubtypeOf(other)) return true;
     if (other.kind() == Kind::Set) {
         auto& o = static_cast<const SetType&>(other);
-        if (o.elementType->kind() == Kind::Any ||
+        if (o.elementType->kind() == Kind::Boxed ||
             o.elementType->kind() == Kind::Unknown ||
             elementType->kind() == Kind::Unknown) {
             return true;
@@ -157,7 +199,7 @@ bool TaskType::isSubtypeOf(const Type& other) const {
     if (Type::isSubtypeOf(other)) return true;
     if (other.kind() == Kind::Task) {
         auto& o = static_cast<const TaskType&>(other);
-        if (o.resultType->kind() == Kind::Any) return true;
+        if (o.resultType->kind() == Kind::Boxed) return true;
     }
     return false;
 }
@@ -186,7 +228,15 @@ bool DictType::isSubtypeOf(const Type& other) const {
     if (Type::isSubtypeOf(other)) return true;
     if (other.kind() == Kind::Dict) {
         auto& o = static_cast<const DictType&>(other);
-        if (keyType->equals(*o.keyType) && o.valueType->kind() == Kind::Any)
+        if (keyType->equals(*o.keyType) && o.valueType->kind() == Kind::Boxed)
+            return true;
+        // The internal box and a declared union share one layout, and source
+        // can no longer spell the box, so it only arrives from compiler
+        // synthesis (a `dict(**row)` stamped for a union-valued T). Let it
+        // land in the declared domain rather than forcing a copy.
+        if (keyType->equals(*o.keyType) && valueType &&
+            valueType->kind() == Kind::Boxed &&
+            o.valueType && o.valueType->kind() == Kind::Union)
             return true;
     }
     return false;
@@ -216,7 +266,7 @@ bool TupleType::isSubtypeOf(const Type& other) const {
     if (other.kind() != Kind::Tuple) return false;
     auto& o = static_cast<const TupleType&>(other);
     return o.elementTypes.size() == 1 &&
-           (o.elementTypes[0]->kind() == Kind::Any ||
+           (o.elementTypes[0]->kind() == Kind::Boxed ||
             o.elementTypes[0]->kind() == Kind::Unknown);
 }
 
@@ -301,6 +351,7 @@ bool ContractType::isSubtypeOf(const Type& other) const {
 }
 
 std::string UnionType::toString() const {
+    if (!aliasName.empty()) return aliasName;
     std::string s;
     for (size_t i = 0; i < types.size(); ++i) {
         if (i > 0) s += " | ";
@@ -310,17 +361,25 @@ std::string UnionType::toString() const {
 }
 
 bool UnionType::equals(const Type& other) const {
+    if (this == &other) return true;
     if (other.kind() != Kind::Union) return false;
     auto& o = static_cast<const UnionType&>(other);
     if (types.size() != o.types.size()) return false;
+    // Comparing two DISTINCT recursive knots structurally would never
+    // terminate; cap the depth and treat deep cycles as nominal (unequal).
+    thread_local int depth = 0;
+    if (depth > 32) return false;
+    depth++;
+    bool eq = true;
     for (auto& t : types) {
         bool found = false;
         for (auto& ot : o.types) {
             if (t->equals(*ot)) { found = true; break; }
         }
-        if (!found) return false;
+        if (!found) { eq = false; break; }
     }
-    return true;
+    depth--;
+    return eq;
 }
 
 bool UnionType::isSubtypeOf(const Type& other) const {
@@ -355,9 +414,11 @@ TypeChecker::~TypeChecker() = default;
 void TypeChecker::registerExternalModule(
     const std::string& moduleName,
     const std::unordered_map<std::string, std::shared_ptr<Type>>& exports,
-    const std::string& filepath) {
+    const std::string& filepath,
+    const std::unordered_map<std::string, std::shared_ptr<Type>>& typeExports) {
     auto mt = impl_->getOrCreateModuleType(moduleName);
     mt->exports = exports;
+    mt->typeExports = typeExports;
     if (!filepath.empty()) mt->filepath = filepath;
     if (moduleName == "threading")
         mt->exports["Lock"] = std::make_shared<LockType>();
@@ -375,6 +436,10 @@ std::unordered_map<std::string, std::shared_ptr<Type>> TypeChecker::getExports()
     return exports;
 }
 
+std::unordered_map<std::string, std::shared_ptr<Type>> TypeChecker::getTypeExports() const {
+    return impl_->cachedTypeExports;
+}
+
 bool TypeChecker::check(Module& module) {
     impl_->currentFile = module.filename;
     impl_->currentModuleName = module.moduleName;
@@ -382,10 +447,10 @@ bool TypeChecker::check(Module& module) {
     impl_->currentClass = nullptr;
     impl_->pushScope();
     impl_->define("print", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->noneType));
     impl_->define("len", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->intType));
     impl_->define("range", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->intType},
@@ -394,53 +459,53 @@ bool TypeChecker::check(Module& module) {
         std::vector<std::shared_ptr<Type>>{impl_->strType},
         impl_->strType));
     impl_->define("int", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->intType));
     impl_->define("float", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->floatType));
     impl_->define("str", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->strType));
     impl_->define("bool", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->boolType));
     impl_->define("bytes", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->bytesType));
     impl_->define("abs", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->intType));
     impl_->define("min", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+        impl_->boxedType));
     impl_->define("max", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+        impl_->boxedType));
     impl_->define("type", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->strType));
     impl_->define("isinstance", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType, impl_->anyType},
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType, impl_->boxedType},
         impl_->boolType));
     impl_->define("enumerate", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+        impl_->boxedType));
     impl_->define("zip", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+        impl_->boxedType));
     impl_->define("map", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType, impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType, impl_->boxedType},
+        impl_->boxedType));
     impl_->define("filter", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType, impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType, impl_->boxedType},
+        impl_->boxedType));
     impl_->define("sorted", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+        impl_->boxedType));
     impl_->define("reversed", std::make_shared<FunctionType>(
-        std::vector<std::shared_ptr<Type>>{impl_->anyType},
-        impl_->anyType));
+        std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+        impl_->boxedType));
     impl_->define("True", impl_->boolType);
     impl_->define("False", impl_->boolType);
     impl_->define("None", impl_->noneType);
@@ -552,6 +617,7 @@ bool TypeChecker::check(Module& module) {
                                        : retType;
         auto funcType = std::make_shared<FunctionType>(paramTypes, externalRet);
         funcType->spawnsFreshTask = fd->isAsync;
+        funcType->isGenerator = bodyContainsYield(fd->body);
         fillFuncMeta(*funcType, fd->params, fd->isMethod, fd->hasImplicitSelf,
                      fd->isClassMethod);
         impl_->define(fd->name, funcType);
@@ -581,6 +647,32 @@ bool TypeChecker::hasErrors() const {
         if (d.level == TypeDiagnostic::Level::Error) return true;
     }
     return false;
+}
+
+bool TypeChecker::isGeneratorCall(Expr* e) {
+    auto* call = dynamic_cast<CallExpr*>(e);
+    if (!call) return false;
+    std::shared_ptr<Type> callee;
+    if (auto* nm = dynamic_cast<NameExpr*>(call->callee.get()))
+        callee = impl_->lookup(nm->name);
+    else if (call->callee && call->callee->type)
+        callee = call->callee->type;
+    return callee && callee->kind() == Type::Kind::Function &&
+           static_cast<const FunctionType&>(*callee).isGenerator;
+}
+
+void TypeChecker::refuseGeneratorBinding(Expr* value, const SourceLocation& loc,
+                                         const std::shared_ptr<Type>& declared) {
+    if (!isGeneratorCall(value)) return;
+    // `ptr` is the documented raw-handle escape (section 7): the GC never
+    // touches it and the pointer stays a pointer, so holding a generator there
+    // is deliberate rather than a mis-typed binding.
+    if (declared && declared->kind() == Type::Kind::Ptr) return;
+    error(loc, "a generator call cannot be bound to a variable: there is no "
+               "generator type to name, and the binding would read the lazy "
+               "sequence as raw memory. Iterate the call directly "
+               "(`for x in gen(...) { ... }`), or collect it "
+               "(`xs: list[int] = [x for x in gen(...)]`).");
 }
 
 void TypeChecker::error(const SourceLocation& loc, const std::string& message) {
@@ -679,7 +771,7 @@ void TypeChecker::initBuiltinTypes() {
     impl_->strType = std::make_shared<PrimitiveType>(Type::Kind::Str);
     impl_->bytesType = std::make_shared<PrimitiveType>(Type::Kind::Bytes);
     impl_->noneType = std::make_shared<PrimitiveType>(Type::Kind::None_);
-    impl_->anyType = std::make_shared<AnyType>();
+    impl_->boxedType = std::make_shared<BoxedType>();
     impl_->neverType = std::make_shared<NeverType>();
     impl_->unknownType = std::make_shared<UnknownType>();
 
@@ -690,17 +782,18 @@ void TypeChecker::initBuiltinTypes() {
     impl_->typeNames["str"] = impl_->strType;
     impl_->typeNames["bytes"] = impl_->bytesType;
     impl_->typeNames["None"] = impl_->noneType;
-    impl_->typeNames["Any"] = impl_->anyType;
     impl_->typeNames["Never"] = impl_->neverType;
-    impl_->typeNames["object"] = impl_->anyType;
+    // Internal-only spelling for compiler-synthesized decoder bodies;
+    // not writable from source (see the ban in resolveType).
+    impl_->typeNames["__boxed__"] = impl_->boxedType;
     impl_->typeNames["ptr"] = std::make_shared<PtrType>();
-    impl_->typeNames["type"] = impl_->anyType;
-    impl_->typeNames["dict"] = std::make_shared<DictType>(impl_->strType, impl_->anyType);
-    impl_->typeNames["list"] = std::make_shared<ListType>(impl_->anyType);
-    impl_->typeNames["tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->anyType});
-    impl_->typeNames["set"] = std::make_shared<SetType>(impl_->anyType);
-    impl_->typeNames["deque"] = std::make_shared<ListType>(impl_->anyType);
-    impl_->typeNames["Task"] = std::make_shared<TaskType>(impl_->anyType);
+    impl_->typeNames["type"] = impl_->boxedType;
+    impl_->typeNames["dict"] = std::make_shared<DictType>(impl_->strType, impl_->boxedType);
+    impl_->typeNames["list"] = std::make_shared<ListType>(impl_->boxedType);
+    impl_->typeNames["tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->boxedType});
+    impl_->typeNames["set"] = std::make_shared<SetType>(impl_->boxedType);
+    impl_->typeNames["deque"] = std::make_shared<ListType>(impl_->boxedType);
+    impl_->typeNames["Task"] = std::make_shared<TaskType>(impl_->boxedType);
 }
 
 static std::string contractSigToString(const std::string& name,
@@ -952,6 +1045,19 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
             }
         }
         if (auto tv = lookupTypeParam(named->name)) return tv;
+        // The dynamic tier is retired: a value domain is declared, never
+        // hand-waved. The 16-byte box lives on as a closed union.
+        if (!impl_->allowDynamicTierSpelling &&
+            (named->name == "Any" || named->name == "any" ||
+             named->name == "object")) {
+            error(named->location(),
+                  "'" + named->name + "' is not a type: Dragon has no dynamic "
+                  "tier. Declare the value domain you mean, e.g. `type Shape = "
+                  "int | str` and annotate `Shape`, or use `from json import "
+                  "Data` for JSON-shaped data. A generic `[T]` is the right "
+                  "tool for \"any type the caller picks\".");
+            return impl_->unknownType;
+        }
         auto it = impl_->typeNames.find(named->name);
         if (it != impl_->typeNames.end()) return it->second;
         auto looked = impl_->lookup(named->name);
@@ -1231,8 +1337,8 @@ static bool setOperandsCompatible(const std::shared_ptr<Type>& l,
     auto& le = static_cast<SetType&>(*l).elementType;
     auto& re = static_cast<SetType&>(*r).elementType;
     if (!le || !re) return true;
-    if (le->kind() == Type::Kind::Unknown || le->kind() == Type::Kind::Any ||
-        re->kind() == Type::Kind::Unknown || re->kind() == Type::Kind::Any) {
+    if (le->kind() == Type::Kind::Unknown || le->kind() == Type::Kind::Boxed ||
+        re->kind() == Type::Kind::Unknown || re->kind() == Type::Kind::Boxed) {
         return true;
     }
     return le->equals(*re);
@@ -1317,8 +1423,8 @@ static std::shared_ptr<Type> joinTypes(const std::shared_ptr<Type>& l,
     if (unresolvedType(l)) return r;
     if (unresolvedType(r)) return l;
     if (l->equals(*r)) return l;
-    if (l->kind() == Type::Kind::Any || r->kind() == Type::Kind::Any)
-        return std::make_shared<AnyType>();
+    if (l->kind() == Type::Kind::Boxed || r->kind() == Type::Kind::Boxed)
+        return std::make_shared<BoxedType>();
     if (numericKind(l->kind()) && numericKind(r->kind()))
         return promotedNumeric(l, r);
     if (auto merged = resolvedContainer(l, r)) return merged;
@@ -1328,6 +1434,10 @@ static std::shared_ptr<Type> joinTypes(const std::shared_ptr<Type>& l,
 std::shared_ptr<Type> TypeChecker::joinBranchTypes(
         const std::shared_ptr<Type>& left, const std::shared_ptr<Type>& right) {
     return joinTypes(left, right);
+}
+
+std::shared_ptr<Type> TypeChecker::typeWithoutNone(const std::shared_ptr<Type>& t) {
+    return withoutNone(t);
 }
 
 static bool foldedConstInt(
@@ -1465,8 +1575,8 @@ void TypeChecker::visit(BinaryExpr& node) {
             bool rUnknown = !re || re->kind() == Type::Kind::Unknown;
             if (lUnknown) { node.type = rightType; return; }
             if (rUnknown) { node.type = leftType; return; }
-            if (le->kind() == Type::Kind::Any) { node.type = leftType; return; }
-            if (re->kind() == Type::Kind::Any) { node.type = rightType; return; }
+            if (le->kind() == Type::Kind::Boxed) { node.type = leftType; return; }
+            if (re->kind() == Type::Kind::Boxed) { node.type = rightType; return; }
             if (le->toString() == re->toString()) { node.type = leftType; return; }
         }
 
@@ -1491,8 +1601,8 @@ void TypeChecker::visit(BinaryExpr& node) {
             }
         }
 
-        if (leftType->kind() == Type::Kind::Any || rightType->kind() == Type::Kind::Any) {
-            node.type = impl_->anyType;
+        if (leftType->kind() == Type::Kind::Boxed || rightType->kind() == Type::Kind::Boxed) {
+            node.type = impl_->boxedType;
             return;
         }
 
@@ -1521,7 +1631,7 @@ void TypeChecker::visit(BinaryExpr& node) {
         }
 
         if (leftType->kind() == Type::Kind::Unknown || rightType->kind() == Type::Kind::Unknown ||
-            leftType->kind() == Type::Kind::Any || rightType->kind() == Type::Kind::Any) {
+            leftType->kind() == Type::Kind::Boxed || rightType->kind() == Type::Kind::Boxed) {
             node.type = impl_->unknownType;
             return;
         }
@@ -1606,7 +1716,7 @@ void TypeChecker::visit(BinaryExpr& node) {
             return;
         }
         if (leftType->kind() == Type::Kind::Unknown || rightType->kind() == Type::Kind::Unknown ||
-            leftType->kind() == Type::Kind::Any || rightType->kind() == Type::Kind::Any) {
+            leftType->kind() == Type::Kind::Boxed || rightType->kind() == Type::Kind::Boxed) {
             node.type = impl_->unknownType;
             return;
         }
@@ -1625,7 +1735,7 @@ void TypeChecker::visit(BinaryExpr& node) {
             break;
         case Type::Kind::Str:
             if (leftType && leftType->kind() != Type::Kind::Str &&
-                leftType->kind() != Type::Kind::Any &&
+                leftType->kind() != Type::Kind::Boxed &&
                 leftType->kind() != Type::Kind::Unknown &&
                 leftType->kind() != Type::Kind::TypeVar) {
                 error(node.location(),
@@ -1657,7 +1767,7 @@ void TypeChecker::visit(BinaryExpr& node) {
             error(node.location(), "'" + node.op.lexeme() +
                   "' on a tuple is not supported; use a list");
             break;
-        case Type::Kind::Any:
+        case Type::Kind::Boxed:
         case Type::Kind::Unknown:
         case Type::Kind::Union:
         case Type::Kind::Optional:
@@ -1688,6 +1798,7 @@ void TypeChecker::visit(ChainedCompExpr& node) {
 }
 
 void TypeChecker::visit(WalrusExpr& node) {
+    refuseGeneratorBinding(node.value.get(), node.location());
     auto valType = inferType(node.value.get());
     auto unresolved = [](const std::shared_ptr<Type>& t) -> const char* {
         if (!t) return nullptr;
@@ -1710,6 +1821,19 @@ void TypeChecker::visit(WalrusExpr& node) {
         error(node.location(),
               "cannot infer the element type of '" + node.name +
               "' (an empty or mixed-type literal) - annotate it (e.g. `" + hint + "`)");
+    }
+    // A walrus is a declaration: register the binding so later `=` hits the
+    // fixed-type check instead of the silent define fallback.
+    if (auto existing = impl_->lookup(node.name)) {
+        if (existing->kind() != Type::Kind::Unknown && valType &&
+            valType->kind() != Type::Kind::Unknown &&
+            !valType->isAssignableTo(*existing)) {
+            error(node.location(), "cannot assign '" + valType->toString() +
+                  "' to '" + node.name + "' of type '" + existing->toString() +
+                  "' (a variable's type is fixed at its declaration)");
+        }
+    } else {
+        impl_->define(node.name, valType);
     }
     node.type = valType;
 }
@@ -1736,7 +1860,7 @@ void TypeChecker::visit(UnaryExpr& node) {
             node.type = impl_->intType;
         } else if (operandType->kind() == Type::Kind::Float) {
             node.type = impl_->floatType;
-        } else if (operandType->kind() == Type::Kind::Unknown || operandType->kind() == Type::Kind::Any) {
+        } else if (operandType->kind() == Type::Kind::Unknown || operandType->kind() == Type::Kind::Boxed) {
             node.type = impl_->unknownType;
         } else if (operandType->kind() == Type::Kind::Instance) {
             node.type = impl_->unknownType;
@@ -1756,7 +1880,7 @@ void TypeChecker::visit(UnaryExpr& node) {
     if (op == TokenType::TILDE) {
         if (operandType->isSubtypeOf(*impl_->intType)) {
             node.type = impl_->intType;
-        } else if (operandType->kind() == Type::Kind::Unknown || operandType->kind() == Type::Kind::Any) {
+        } else if (operandType->kind() == Type::Kind::Unknown || operandType->kind() == Type::Kind::Boxed) {
             node.type = impl_->unknownType;
         } else {
             error(node.location(), "bad operand type for unary ~: '" + operandType->toString() + "'");

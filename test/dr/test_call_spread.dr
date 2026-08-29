@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 
@@ -21,7 +23,7 @@ def greet(name: str, greeting: str) -> str {
     return greeting + ", " + name
 }
 
-def show_any(a: Any, b: Any) -> str {
+def show_any(a: Boxed, b: Boxed) -> str {
     return str(a) + "/" + str(b)
 }
 
@@ -71,7 +73,7 @@ class TupleSpreadDirectTests(TestCase) {
     Covers spread into free functions, class constructors, and instance/static
     methods (incl. virtual dispatch), plus vararg-param forwarding:
       - `*tuple` static spread: homogeneous, heterogeneous, leading-positional,
-        float (native f64), boxed `Any` params, heap (str) elements, + named kwarg.
+        float (native f64), boxed `Boxed` params, heap (str) elements, + named kwarg.
       - `*list[T]` dynamic spread: typed loads + runtime length-mismatch raise.
       - `**dict` spread: bind-by-name, optional-defaulted, missing-required raise,
         unexpected-key raise.
@@ -206,12 +208,12 @@ def count_args(*args: int) -> int {
 
 
 def _cfg_missing_required() -> None {
-    d: dict[str, Any] = {"host": "h"}
+    d: dict[str, Boxed] = {"host": "h"}
     s: str = cfg(**d)
 }
 
 def _cfg_unexpected_key() -> None {
-    d: dict[str, Any] = {"host": "h", "port": 80, "extra": 9}
+    d: dict[str, Boxed] = {"host": "h", "port": 80, "extra": 9}
     s: str = cfg(**d)
 }
 
@@ -261,12 +263,12 @@ class ListSpreadTests(TestCase) {
 
 class DictSpreadTests(TestCase) {
     def test_all_keys_present() {
-        d: dict[str, Any] = {"host": "localhost", "port": 8080, "debug": True}
+        d: dict[str, Boxed] = {"host": "localhost", "port": 8080, "debug": True}
         self.assertEqual(cfg(**d), "localhost:8080/True")
     }
 
     def test_optional_defaulted() {
-        d: dict[str, Any] = {"host": "h", "port": 99}
+        d: dict[str, Boxed] = {"host": "h", "port": 99}
         self.assertEqual(cfg(**d), "h:99/False")
     }
 

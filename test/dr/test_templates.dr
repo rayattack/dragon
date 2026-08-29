@@ -1,3 +1,4 @@
+from json import Data
 from unittest import TestCase, main
 from html import HTML
 
@@ -45,7 +46,7 @@ class TemplateFileBangTests(TestCase) {
     run at ANY `!!` while the escape dispatcher consumed nothing, so `dragon
     build` spun forever on a byte position that never advanced. `dragon check`
     passed (file templates are read at codegen), which made it look like a
-    backend hang, not a source issue. Any minified JS triggered it (htmx has 2
+    backend hang, not a source issue. Data minified JS triggered it (htmx has 2
     occurrences of `!!`, Alpine 7).
 
     Now the literal-run break mirrors the dispatcher exactly: it stops only at

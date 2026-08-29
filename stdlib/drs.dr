@@ -1,4 +1,6 @@
-"""drs.dr - Dragon Script (.drs) parser (D023); native dict[str, Any]/list[Any] via D039, no box-dict layer.
+from json import Data, as_str, as_int, as_float, as_bool, as_obj, as_list
+
+"""drs.dr - Dragon Script (.drs) parser (D023); native dict[str, Data]/list[Data] via D039, no box-dict layer.
 Surface: quoted strings, key=value, nested {}/[], use/include, ${} exprs, if/else+for, dumps()."""
 
 extern "C" def dragon_str_to_int(s: str) -> int
@@ -490,7 +492,7 @@ def _skip_type_ann(tokens: list[int], pos: list[int]) -> None {
     }
 }
 
-def _box_truthy(v: Any) -> bool {
+def _box_truthy(v: Data) -> bool {
     """Truthiness for box values, per Python semantics."""
     if v is None { return false }
     if isinstance(v, bool) { return v }
@@ -507,17 +509,17 @@ def _box_truthy(v: Any) -> bool {
         return len(s) > 0
     }
     if isinstance(v, list) {
-        l: list[Any] = v
+        l: list[Data] = v
         return len(l) > 0
     }
     if isinstance(v, dict) {
-        d: dict[str, Any] = v
+        d: dict[str, Data] = v
         return len(d) > 0
     }
     return true
 }
 
-def _box_to_int(v: Any) -> int {
+def _box_to_int(v: Data) -> int {
     if isinstance(v, int) { return v }
     if isinstance(v, bool) {
         b: bool = v
@@ -534,7 +536,7 @@ def _box_to_int(v: Any) -> int {
     return 0
 }
 
-def _box_to_str(v: Any) -> str {
+def _box_to_str(v: Data) -> str {
     if isinstance(v, str) { return v }
     if isinstance(v, int) {
         n: int = v
@@ -552,7 +554,7 @@ def _box_to_str(v: Any) -> str {
     return ""
 }
 
-def _box_eq(a: Any, b: Any) -> bool {
+def _box_eq(a: Data, b: Data) -> bool {
     if isinstance(a, str) {
         if isinstance(b, str) {
             sa: str = a
@@ -602,7 +604,7 @@ def _box_eq(a: Any, b: Any) -> bool {
     return false
 }
 
-def _eval_primary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_primary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Primary: literal, variable ref, parenthesised expression."""
     _skip_nl(tokens, pos)
     tk: int = _tk(tokens, pos)
@@ -631,7 +633,7 @@ def _eval_primary(src: str, tokens: list[int], pos: list[int], bindings: dict[st
     if tk == TK_NONE { _adv(pos); return None }
     if tk == TK_LPAREN {
         _adv(pos)
-        v: Any = _eval_ternary(src, tokens, pos, bindings)
+        v: Data = _eval_ternary(src, tokens, pos, bindings)
         if _tk(tokens, pos) != TK_RPAREN {
             _err("Expected ')' in expression", _tk_line(tokens, pos), 1)
         }
@@ -650,11 +652,11 @@ def _eval_primary(src: str, tokens: list[int], pos: list[int], bindings: dict[st
     return None
 }
 
-def _eval_unary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_unary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Unary: -expr, not expr (not is handled at a separate precedence level)."""
     if _tk(tokens, pos) == TK_MINUS {
         _adv(pos)
-        v: Any = _eval_unary(src, tokens, pos, bindings)
+        v: Data = _eval_unary(src, tokens, pos, bindings)
         if isinstance(v, int) {
             n: int = v
             return 0 - n
@@ -668,9 +670,9 @@ def _eval_unary(src: str, tokens: list[int], pos: list[int], bindings: dict[str,
     return _eval_primary(src, tokens, pos, bindings)
 }
 
-def _eval_mul(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_mul(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Multiplication, division, modulo."""
-    left: Any = _eval_unary(src, tokens, pos, bindings)
+    left: Data = _eval_unary(src, tokens, pos, bindings)
     while true {
         tk: int = _tk(tokens, pos)
         if tk != TK_STAR {
@@ -679,14 +681,14 @@ def _eval_mul(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
             }
         }
         _adv(pos)
-        right: Any = _eval_unary(src, tokens, pos, bindings)
+        right: Data = _eval_unary(src, tokens, pos, bindings)
         lf: bool = isinstance(left, float)
         rf: bool = isinstance(right, float)
         if lf or rf {
             la: float = _box_to_int(left)
             ra: float = _box_to_int(right)
-            if lf { la = left }
-            if rf { ra = right }
+            if lf { la = as_float(left, la) }
+            if rf { ra = as_float(right, ra) }
             if tk == TK_STAR { left = la * ra }
             if tk == TK_SLASH {
                 if ra == 0.0 { _err("Division by zero", _tk_line(tokens, pos), 1) }
@@ -713,16 +715,16 @@ def _eval_mul(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     return left
 }
 
-def _eval_add(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_add(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Addition, subtraction (also string concat for `+`)."""
-    left: Any = _eval_mul(src, tokens, pos, bindings)
+    left: Data = _eval_mul(src, tokens, pos, bindings)
     while true {
         tk: int = _tk(tokens, pos)
         if tk != TK_PLUS {
             if tk != TK_MINUS { break }
         }
         _adv(pos)
-        right: Any = _eval_mul(src, tokens, pos, bindings)
+        right: Data = _eval_mul(src, tokens, pos, bindings)
         if tk == TK_PLUS {
             if isinstance(left, str) {
                 if isinstance(right, str) {
@@ -738,8 +740,8 @@ def _eval_add(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
         if lf or rf {
             la: float = _box_to_int(left)
             ra: float = _box_to_int(right)
-            if lf { la = left }
-            if rf { ra = right }
+            if lf { la = as_float(left, la) }
+            if rf { ra = as_float(right, ra) }
             if tk == TK_PLUS { left = la + ra } else { left = la - ra }
         } else {
             li: int = _box_to_int(left)
@@ -750,23 +752,23 @@ def _eval_add(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     return left
 }
 
-def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Comparison: ==, !=, <, >, <=, >="""
-    left: Any = _eval_add(src, tokens, pos, bindings)
+    left: Data = _eval_add(src, tokens, pos, bindings)
     tk: int = _tk(tokens, pos)
     if tk == TK_EQ_EQ {
         _adv(pos)
-        right: Any = _eval_add(src, tokens, pos, bindings)
+        right: Data = _eval_add(src, tokens, pos, bindings)
         return _box_eq(left, right)
     }
     if tk == TK_NOT_EQ {
         _adv(pos)
-        r2: Any = _eval_add(src, tokens, pos, bindings)
+        r2: Data = _eval_add(src, tokens, pos, bindings)
         return not _box_eq(left, r2)
     }
     if tk == TK_LT {
         _adv(pos)
-        r3: Any = _eval_add(src, tokens, pos, bindings)
+        r3: Data = _eval_add(src, tokens, pos, bindings)
         if isinstance(left, float) {
             la: float = left
             ra: float = _box_to_int(r3)
@@ -784,7 +786,7 @@ def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     }
     if tk == TK_GT {
         _adv(pos)
-        r4: Any = _eval_add(src, tokens, pos, bindings)
+        r4: Data = _eval_add(src, tokens, pos, bindings)
         if isinstance(left, float) {
             la3: float = left
             ra3: float = _box_to_int(r4)
@@ -802,7 +804,7 @@ def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     }
     if tk == TK_LT_EQ {
         _adv(pos)
-        r5: Any = _eval_add(src, tokens, pos, bindings)
+        r5: Data = _eval_add(src, tokens, pos, bindings)
         if isinstance(left, float) {
             la5: float = left
             ra5: float = _box_to_int(r5)
@@ -820,7 +822,7 @@ def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     }
     if tk == TK_GT_EQ {
         _adv(pos)
-        r6: Any = _eval_add(src, tokens, pos, bindings)
+        r6: Data = _eval_add(src, tokens, pos, bindings)
         if isinstance(left, float) {
             la7: float = left
             ra7: float = _box_to_int(r6)
@@ -839,20 +841,20 @@ def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     return left
 }
 
-def _eval_not(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_not(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     if _tk(tokens, pos) == TK_NOT {
         _adv(pos)
-        v: Any = _eval_not(src, tokens, pos, bindings)
+        v: Data = _eval_not(src, tokens, pos, bindings)
         return not _box_truthy(v)
     }
     return _eval_cmp(src, tokens, pos, bindings)
 }
 
-def _eval_and(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
-    left: Any = _eval_not(src, tokens, pos, bindings)
+def _eval_and(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
+    left: Data = _eval_not(src, tokens, pos, bindings)
     while _tk(tokens, pos) == TK_AND {
         _adv(pos)
-        right: Any = _eval_not(src, tokens, pos, bindings)
+        right: Data = _eval_not(src, tokens, pos, bindings)
         if _box_truthy(left) {
             left = right
         }
@@ -860,11 +862,11 @@ def _eval_and(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     return left
 }
 
-def _eval_or(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
-    left: Any = _eval_and(src, tokens, pos, bindings)
+def _eval_or(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
+    left: Data = _eval_and(src, tokens, pos, bindings)
     while _tk(tokens, pos) == TK_OR {
         _adv(pos)
-        right: Any = _eval_and(src, tokens, pos, bindings)
+        right: Data = _eval_and(src, tokens, pos, bindings)
         if not _box_truthy(left) {
             left = right
         }
@@ -872,30 +874,30 @@ def _eval_or(src: str, tokens: list[int], pos: list[int], bindings: dict[str, An
     return left
 }
 
-def _eval_ternary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _eval_ternary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Top-level expression entry - supports ternary `cond ? then_v : else_v`."""
-    cond: Any = _eval_or(src, tokens, pos, bindings)
+    cond: Data = _eval_or(src, tokens, pos, bindings)
     if _tk(tokens, pos) == TK_QUESTION {
         _adv(pos)
-        then_v: Any = _eval_or(src, tokens, pos, bindings)
+        then_v: Data = _eval_or(src, tokens, pos, bindings)
         if _tk(tokens, pos) != TK_COLON {
             _err("Expected ':' in ternary expression", _tk_line(tokens, pos), 1)
         }
         _adv(pos)
-        else_v: Any = _eval_or(src, tokens, pos, bindings)
+        else_v: Data = _eval_or(src, tokens, pos, bindings)
         if _box_truthy(cond) { return then_v }
         return else_v
     }
     return cond
 }
 
-def _eval_expr_text(expr_src: str, bindings: dict[str, Any]) -> Any {
+def _eval_expr_text(expr_src: str, bindings: dict[str, Data]) -> Data {
     toks: list[int] = _tokenize(expr_src)
     p: list[int] = [0]
     return _eval_ternary(expr_src, toks, p, bindings)
 }
 
-def _interp_str(s: str, bindings: dict[str, Any]) -> str {
+def _interp_str(s: str, bindings: dict[str, Data]) -> str {
     """Scans `s` for `${expr}` markers and replaces each with its stringified evaluated value."""
     n: int = len(s)
     out: str = ""
@@ -920,7 +922,7 @@ def _interp_str(s: str, bindings: dict[str, Any]) -> str {
                         return out + s[i:n]
                     }
                     expr_text: str = s[i+2:j]
-                    v: Any = _eval_expr_text(expr_text, bindings)
+                    v: Data = _eval_expr_text(expr_text, bindings)
                     out = out + _box_to_str(v)
                     i = j + 1
                     continue
@@ -933,7 +935,7 @@ def _interp_str(s: str, bindings: dict[str, Any]) -> str {
     return out
 }
 
-def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     _skip_nl(tokens, pos)
     tk: int = _tk(tokens, pos)
 
@@ -978,7 +980,7 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
 
     if tk == TK_DOLLAR_BRACE {
         _adv(pos)
-        v: Any = _eval_ternary(src, tokens, pos, bindings)
+        v: Data = _eval_ternary(src, tokens, pos, bindings)
         if _tk(tokens, pos) != TK_RBRACE {
             _err("Expected '}' to close ${} expression", _tk_line(tokens, pos), 1)
         }
@@ -992,14 +994,14 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
 
     if tk == TK_LBRACE {
         _adv(pos)
-        obj: dict[str, Any] = {}
+        obj: dict[str, Data] = {}
         _parse_object_body(src, tokens, pos, bindings, obj)
         return obj
     }
 
     if tk == TK_LBRACKET {
         _adv(pos)
-        items: list[Any] = []
+        items: list[Data] = []
         while true {
             _skip_nl(tokens, pos)
             curr2: int = _tk(tokens, pos)
@@ -1008,7 +1010,7 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
                 _err("Unterminated list - expected ']'", _tk_line(tokens, pos), 1)
             }
             if curr2 == TK_COMMA { _adv(pos); continue }
-            iv: Any = _parse_value(src, tokens, pos, bindings)
+            iv: Data = _parse_value(src, tokens, pos, bindings)
             items.append(iv)
             _skip_nl(tokens, pos)
             if _tk(tokens, pos) == TK_COMMA { _adv(pos) }
@@ -1020,7 +1022,7 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
     return None
 }
 
-def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> Data {
     """Phase 4: parses `for IDENT in iter [if cond] { body }`; `iter` may be `range(N)` or any list-valued expr."""
     _adv(pos)
     _skip_nl(tokens, pos)
@@ -1035,14 +1037,14 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
     }
     _adv(pos)
     _skip_nl(tokens, pos)
-    iter_list: list[Any] = []
+    iter_list: list[Data] = []
     if _tk(tokens, pos) == TK_RANGE {
         _adv(pos)
         if _tk(tokens, pos) != TK_LPAREN {
             _err("Expected '(' after 'range'", _tk_line(tokens, pos), 1)
         }
         _adv(pos)
-        n_box: Any = _eval_ternary(src, tokens, pos, bindings)
+        n_box: Data = _eval_ternary(src, tokens, pos, bindings)
         if _tk(tokens, pos) != TK_RPAREN {
             _err("Expected ')' after range argument", _tk_line(tokens, pos), 1)
         }
@@ -1057,7 +1059,7 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
             ri = ri + 1
         }
     } else {
-        iter_box: Any = _eval_ternary(src, tokens, pos, bindings)
+        iter_box: Data = _eval_ternary(src, tokens, pos, bindings)
         if isinstance(iter_box, list) {
             iter_list = iter_box
         } else {
@@ -1100,29 +1102,29 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
         _adv(pos)
     }
     body_end_tok: int = pos[0] - 1
-    result: list[Any] = []
-    local_bindings: dict[str, Any] = bindings
+    result: list[Data] = []
+    local_bindings: dict[str, Data] = bindings
     i_iter: int = 0
     while i_iter < len(iter_list) {
-        elem: Any = iter_list[i_iter]
+        elem: Data = iter_list[i_iter]
         local_bindings[loop_name] = elem
         if has_filter {
             fp: list[int] = [filter_start]
-            fv: Any = _eval_ternary(src, tokens, fp, local_bindings)
+            fv: Data = _eval_ternary(src, tokens, fp, local_bindings)
             if not _box_truthy(fv) {
                 i_iter = i_iter + 1
                 continue
             }
         }
         bp: list[int] = [body_start_tok]
-        body_val: Any = _parse_value(src, tokens, bp, local_bindings)
+        body_val: Data = _parse_value(src, tokens, bp, local_bindings)
         result.append(body_val)
         i_iter = i_iter + 1
     }
     return result
 }
 
-def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], obj: dict[str, Any]) -> None {
+def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data], obj: dict[str, Data]) -> None {
     """Phase 1+4: parses an object body (nested or root payload): `key = value`, `use NAME`, `if/else`."""
     while true {
         _skip_nl(tokens, pos)
@@ -1142,9 +1144,9 @@ def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: di
             uname: str = _tk_text(src, tokens, pos)
             _adv(pos)
             if uname in bindings {
-                src_v: Any = bindings[uname]
+                src_v: Data = bindings[uname]
                 if isinstance(src_v, dict) {
-                    sd: dict[str, Any] = src_v
+                    sd: dict[str, Data] = src_v
                     ukeys: list[str] = dragon_dict_keys(sd)
                     ui: int = 0
                     while ui < len(ukeys) {
@@ -1189,18 +1191,18 @@ def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: di
         }
         _adv(pos)
         _skip_nl(tokens, pos)
-        v: Any = _parse_value(src, tokens, pos, bindings)
+        v: Data = _parse_value(src, tokens, pos, bindings)
         obj[key] = v
         _skip_nl(tokens, pos)
         if _tk(tokens, pos) == TK_COMMA { _adv(pos) }
     }
 }
 
-def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], obj: dict[str, Any]) -> None {
+def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data], obj: dict[str, Data]) -> None {
     """Evaluates `if cond {...} [else {...}]` at parse time, merging the matching branch into `obj`."""
     _adv(pos)
     _skip_nl(tokens, pos)
-    cond_v: Any = _eval_ternary(src, tokens, pos, bindings)
+    cond_v: Data = _eval_ternary(src, tokens, pos, bindings)
     _skip_nl(tokens, pos)
     if _tk(tokens, pos) != TK_LBRACE {
         _err("Expected '{' after 'if' condition", _tk_line(tokens, pos), 1)
@@ -1251,7 +1253,7 @@ def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: di
     }
 }
 
-def _parse_if_into_bindings(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> None {
+def _parse_if_into_bindings(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data]) -> None {
     """Header zone `if/else` - same parser but merges into the `bindings` dict."""
     _parse_if_into_obj(src, tokens, pos, bindings, bindings)
 }
@@ -1302,7 +1304,7 @@ def _drs_unsafe_include(p: str) -> bool {
     return false
 }
 
-def _include_drs(ipath: str, bindings: dict[str, Any], seen: dict[str, bool], base_dir: str) -> None {
+def _include_drs(ipath: str, bindings: dict[str, Data], seen: dict[str, bool], base_dir: str) -> None {
     """Phase 2: includes another .drs file, merging its header bindings. `base_dir` is the
     ROOT document's dir; every include resolves and stays confined under it. Empty base_dir (string input) rejects includes outright."""
     if len(base_dir) == 0 {
@@ -1327,7 +1329,7 @@ def _include_drs(ipath: str, bindings: dict[str, Any], seen: dict[str, bool], ba
     _parse_header_into(content, toks, p, bindings, seen, base_dir)
 }
 
-def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], seen: dict[str, bool], base_dir: str) -> None {
+def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Data], seen: dict[str, bool], base_dir: str) -> None {
     """Header zone parser: `name = value`, `include`, `if/else`, `for`; mutates `bindings` in place.
     Returns at TK_LBRACE (root payload) or TK_EOF; reusable for include-loaded files (no payload)."""
     while true {
@@ -1368,7 +1370,7 @@ def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: di
             }
             _adv(pos)
             _skip_nl(tokens, pos)
-            hval: Any = _parse_value(src, tokens, pos, bindings)
+            hval: Data = _parse_value(src, tokens, pos, bindings)
             bindings[hkey] = hval
             continue
         }
@@ -1377,17 +1379,17 @@ def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: di
     }
 }
 
-def _parse_drs(src: str) -> dict[str, Any] {
-    empty: dict[str, Any] = {}
+def _parse_drs(src: str) -> dict[str, Data] {
+    empty: dict[str, Data] = {}
     return _parse_drs_env(src, empty)
 }
 
-def _parse_drs_env(src: str, env: dict[str, Any], base_dir: str = "") -> dict[str, Any] {
+def _parse_drs_env(src: str, env: dict[str, Data], base_dir: str = "") -> dict[str, Data] {
     """Like _parse_drs but seeds `bindings` with caller env vars first, so in-file conditionals
     (`if platform == 'linux'`) resolve against them; base_dir confines `include`, "" rejects it."""
     tokens: list[int] = _tokenize(src)
     pos: list[int] = [0]
-    bindings: dict[str, Any] = {}
+    bindings: dict[str, Data] = {}
     ekeys: list[str] = dragon_dict_keys(env)
     ei: int = 0
     while ei < len(ekeys) {
@@ -1407,7 +1409,7 @@ def _parse_drs_env(src: str, env: dict[str, Any], base_dir: str = "") -> dict[st
         _err("Expected '{' to begin root payload", _tk_line(tokens, pos), 1)
     }
     _adv(pos)
-    payload: dict[str, Any] = {}
+    payload: dict[str, Data] = {}
     _parse_object_body(src, tokens, pos, bindings, payload)
 
     _skip_nl(tokens, pos)
@@ -1444,7 +1446,7 @@ def _escape_str(s: str) -> str {
     return out
 }
 
-def _dump_value(v: Any, level: int) -> str {
+def _dump_value(v: Data, level: int) -> str {
     """No forward declarations in Dragon, so this one function branches on the value's
     runtime type; dict/list cases inline their walk and recurse via this same function."""
     if isinstance(v, bool) {
@@ -1463,7 +1465,7 @@ def _dump_value(v: Any, level: int) -> str {
         return "None"
     }
     if isinstance(v, dict) {
-        nested: dict[str, Any] = v
+        nested: dict[str, Data] = v
         keys: list[str] = dragon_dict_keys(nested)
         n: int = len(keys)
         if n == 0 { return "{}" }
@@ -1471,7 +1473,7 @@ def _dump_value(v: Any, level: int) -> str {
         i: int = 0
         while i < n {
             k: str = keys[i]
-            cv: Any = nested[k]
+            cv: Data = nested[k]
             out = out + _indent(level + 1) + k + " = " + _dump_value(cv, level + 1) + "\n"
             i = i + 1
         }
@@ -1479,7 +1481,7 @@ def _dump_value(v: Any, level: int) -> str {
         return out
     }
     if isinstance(v, list) {
-        items: list[Any] = v
+        items: list[Data] = v
         m: int = len(items)
         if m == 0 { return "[]" }
         lout: str = "["
@@ -1495,19 +1497,19 @@ def _dump_value(v: Any, level: int) -> str {
     return "None"
 }
 
-def loads(source: str) -> dict[str, Any] {
+def loads(source: str) -> dict[str, Data] {
     return _parse_drs(source)
 }
 
-def load(path: str) -> dict[str, Any] {
+def load(path: str) -> dict[str, Data] {
     handle: ptr = dragon_file_open(path, "r")
     content: str = dragon_file_read(handle)
     dragon_file_close(handle)
-    empty: dict[str, Any] = {}
+    empty: dict[str, Data] = {}
     return _parse_drs_env(content, empty, _drs_dirname(path))
 }
 
-def dumps(data: dict[str, Any]) -> str {
+def dumps(data: dict[str, Data]) -> str {
     return _dump_value(data, 0)
 }
 
@@ -1518,9 +1520,9 @@ class SchemaField {
     type_tag: str
     required: bool
     has_default: bool
-    default: Any
+    default: Data
 
-    def(name: str, type_tag: str, required: bool, has_default: bool, default: Any) {
+    def(name: str, type_tag: str, required: bool, has_default: bool, default: Data) {
         self.name = name
         self.type_tag = type_tag
         self.required = required
@@ -1544,7 +1546,7 @@ class Schema {
         return self
     }
 
-    def optional(name: str, type_tag: str, default: Any) -> Schema {
+    def optional(name: str, type_tag: str, default: Data) -> Schema {
         """Declare an optional field with a default supplied when the key is absent."""
         self.fields.append(SchemaField(name, type_tag, false, true, default))
         return self
@@ -1557,7 +1559,7 @@ class Schema {
     }
 }
 
-def _type_tag_ok(v: Any, tag: str) -> bool {
+def _type_tag_ok(v: Data, tag: str) -> bool {
     if tag == "any" { return true }
     if tag == "str" { return isinstance(v, str) }
     if tag == "bool" { return isinstance(v, bool) }
@@ -1574,7 +1576,7 @@ def _type_tag_ok(v: Any, tag: str) -> bool {
     return false
 }
 
-def _type_name(v: Any) -> str {
+def _type_name(v: Data) -> str {
     if isinstance(v, bool) { return "bool" }
     if isinstance(v, int) { return "int" }
     if isinstance(v, float) { return "float" }
@@ -1585,7 +1587,7 @@ def _type_name(v: Any) -> str {
     return "unknown"
 }
 
-def _validate(schema: Schema, data: dict[str, Any]) -> dict[str, Any] {
+def _validate(schema: Schema, data: dict[str, Data]) -> dict[str, Data] {
     known: dict[str, bool] = {}
     fi: int = 0
     nf: int = len(schema.fields)
@@ -1593,7 +1595,7 @@ def _validate(schema: Schema, data: dict[str, Any]) -> dict[str, Any] {
         f: SchemaField = schema.fields[fi]
         known[f.name] = true
         if f.name in data {
-            v: Any = data[f.name]
+            v: Data = data[f.name]
             if not _type_tag_ok(v, f.type_tag) {
                 raise DragonScriptSchemaError("field '" + f.name + "' expected " + f.type_tag + ", got " + _type_name(v))
             }
@@ -1622,29 +1624,29 @@ def _validate(schema: Schema, data: dict[str, Any]) -> dict[str, Any] {
     return data
 }
 
-def parse(schema: Schema, content: str) -> dict[str, Any] {
+def parse(schema: Schema, content: str) -> dict[str, Data] {
     """Parses `content`, validates against `schema` (defaults filled in), returns the dict.
     Raises DragonScriptSchemaError on a missing/wrong-typed/unknown field."""
-    empty: dict[str, Any] = {}
-    data: dict[str, Any] = _parse_drs_env(content, empty)
+    empty: dict[str, Data] = {}
+    data: dict[str, Data] = _parse_drs_env(content, empty)
     return _validate(schema, data)
 }
 
-def parse_with(schema: Schema, content: str, env: dict[str, Any]) -> dict[str, Any] {
+def parse_with(schema: Schema, content: str, env: dict[str, Data]) -> dict[str, Data] {
     """Like parse(), but seeds header bindings with `env` so conditionals resolve against it."""
-    data: dict[str, Any] = _parse_drs_env(content, env)
+    data: dict[str, Data] = _parse_drs_env(content, env)
     return _validate(schema, data)
 }
 
-def loads_with(source: str, env: dict[str, Any]) -> dict[str, Any] {
-    """Parse with env injection but no schema; returns the raw dict[str, Any]."""
+def loads_with(source: str, env: dict[str, Data]) -> dict[str, Data] {
+    """Parse with env injection but no schema; returns the raw dict[str, Data]."""
     return _parse_drs_env(source, env)
 }
 
-def envs(platform: str = "", arch: str = "", os: str = "", cpu_count: int = 0) -> dict[str, Any] {
+def envs(platform: str = "", arch: str = "", os: str = "", cpu_count: int = 0) -> dict[str, Data] {
     """Build-environment context for parse_with()/loads_with(); named params cover common keys,
-    arbitrary keys can be passed as a dict[str, Any] literal instead."""
-    e: dict[str, Any] = {}
+    arbitrary keys can be passed as a dict[str, Data] literal instead."""
+    e: dict[str, Data] = {}
     if platform != "" { e["platform"] = platform }
     if arch != "" { e["arch"] = arch }
     if os != "" { e["os"] = os }

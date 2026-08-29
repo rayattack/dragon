@@ -1,9 +1,11 @@
+type Boxed = int | float | bool | str | bytes | list[int] | list[float] | list[bool] | list[str] | list[list[int]] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed] | dict[str, list[int]] | dict[str, list[list[int]]] | dict[str, list[str]]
+
 from unittest import TestCase, main
 from json import decode
 
 const N: int = 3000
 
-def sink_any(x: Any) -> int {
+def sink_any(x: Boxed) -> int {
     return 1
 }
 
@@ -46,7 +48,7 @@ def churn() -> int {
 
 
 def read_const(body: str) -> str {
-    const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+    const doc: dict[str, Boxed] = decode[dict[str, Boxed]](body.encode("utf-8"))
     const action: str = doc["action"] if "action" in doc else ""
     churn()
     return action
@@ -54,7 +56,7 @@ def read_const(body: str) -> str {
 
 
 def read_return(body: str) -> str {
-    const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+    const doc: dict[str, Boxed] = decode[dict[str, Boxed]](body.encode("utf-8"))
     return doc["subject_name"] if "subject_name" in doc else "?"
 }
 
@@ -65,8 +67,8 @@ def arg_len(s: str) -> int {
 }
 
 
-def any_action(body: str) -> Any {
-    const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+def any_action(body: str) -> Boxed {
+    const doc: dict[str, Boxed] = decode[dict[str, Boxed]](body.encode("utf-8"))
     return doc["action"]
 }
 
@@ -77,20 +79,21 @@ class BoxLitArgTests(TestCase) {
         # First arg: OWNED dragon_box_subscript result (drained by the call).
         # Second arg: str literal boxed borrow-only (must not dup, must not leak
         """
-        m: Any = {"k": "some-longish-value-xxxxxxxxxxxxxxxxxxxx"}
+        m: Boxed = {"k": "some-longish-value-xxxxxxxxxxxxxxxxxxxx"}
+        mc: dict[str, str] = m        # checked downcast to the declared arm
         i: int = 0
         while i < 3000 {
-            self.assertEqual(m["k"], "some-longish-value-xxxxxxxxxxxxxxxxxxxx")
+            self.assertEqual(mc["k"], "some-longish-value-xxxxxxxxxxxxxxxxxxxx")
             i = i + 1
         }
     }
 
     def test_borrowed_box_first_arg_lit_second() {
         """
-        dict[str, Any] element read is dragon_dict_get_box = BORROWED.
+        dict[str, Boxed] element read is dragon_dict_get_box = BORROWED.
         Draining it would be a use-after-free (amebo's payload[k] pattern)
         """
-        d: dict[str, Any] = {"k": "borrowed-value-yyyyyyyyyyyyyyyyyy"}
+        d: dict[str, Boxed] = {"k": "borrowed-value-yyyyyyyyyyyyyyyyyy"}
         i: int = 0
         while i < 3000 {
             self.assertEqual(d["k"], "borrowed-value-yyyyyyyyyyyyyyyyyy")
@@ -116,14 +119,14 @@ class BoxLitArgTests(TestCase) {
 
     def test_listany_remove_lit_search() {
         """
-        list[Any].remove("lit") boxes the literal borrow-only for the
+        list[Boxed].remove("lit") boxes the literal borrow-only for the
         dragon_box_eq equality search (the other takesOwnership=false
         caller). The search must still match heap-stored elements against a
         literal payload, and must not leak a dup per call
         """
         i: int = 0
         while i < 3000 {
-            xs: list[Any] = ["keep-me", "drop-me-wwwwwwwwwwwwwwww", 7]
+            xs: list[Boxed] = ["keep-me", "drop-me-wwwwwwwwwwwwwwww", 7]
             xs.remove("drop-me-wwwwwwwwwwwwwwww")
             self.assertEqual(len(xs), 2)
             self.assertEqual(xs[0], "keep-me")
@@ -137,7 +140,7 @@ class BoxSubscriptArgRc(TestCase) {
     def test_any_subscript_as_arg_no_leak() {
         i: int = 0
         while i < N {
-            const m: Any = {"name": "Ada", "age": 42}
+            const m: Boxed = {"name": "Ada", "age": 42}
             const r: int = sink_any(m["name"])
             self.assertEqual(r, 1)
             i = i + 1
@@ -146,19 +149,19 @@ class BoxSubscriptArgRc(TestCase) {
 
     # UAF guard: the container's own reference must survive the arg drain
     def test_container_survives_arg_drain() {
-        const m: Any = {"name": "Ada"}
+        const m: Boxed = {"name": "Ada"}
         const r: int = sink_any(m["name"])
         self.assertEqual(r, 1)
         const again: str = m["name"]
         self.assertEqual(again, "Ada")
     }
 
-    # BORROWED (amebo's path): dict[str,Any] element via dragon_dict_get_box is
+    # BORROWED (amebo's path): dict[str,Boxed] element via dragon_dict_get_box is
     # a borrow - must NOT be drained (no double-free), and no leak (container owns)
     def test_typed_dict_any_borrowed_as_arg() {
         i: int = 0
         while i < N {
-            const d: dict[str, Any] = {"action": "order.placed", "n": 7}
+            const d: dict[str, Boxed] = {"action": "order.placed", "n": 7}
             const r: int = sink_any(d["action"])
             self.assertEqual(r, 1)
             const a: str = d["action"]
@@ -170,7 +173,7 @@ class BoxSubscriptArgRc(TestCase) {
     def test_listany_borrowed_as_arg() {
         i: int = 0
         while i < N {
-            const xs: list[Any] = ["x", "y", "z"]
+            const xs: list[Boxed] = ["x", "y", "z"]
             const r: int = sink_any(xs[1])
             self.assertEqual(r, 1)
             i = i + 1
@@ -180,8 +183,9 @@ class BoxSubscriptArgRc(TestCase) {
     def test_box_binop_as_arg() {
         i: int = 0
         while i < N {
-            const a: Any = "pre-"
-            const r: int = sink_any(a + "post")
+            const a: Boxed = "pre-"
+            const as1: str = a                   # checked downcast before concatenation
+            const r: int = sink_any(as1 + "post")
             self.assertEqual(r, 1)
             i = i + 1
         }
@@ -193,7 +197,7 @@ class BoxUnboxSlotRc(TestCase) {
     def test_any_subscript_unbox_str() {
         i: int = 0
         while i < N {
-            const m: Any = {"k": "value"}
+            const m: Boxed = {"k": "value"}
             const nm: str = m["k"]
             self.assertEqual(nm, "value")
             i = i + 1
@@ -203,19 +207,19 @@ class BoxUnboxSlotRc(TestCase) {
     def test_any_subscript_unbox_int() {
         i: int = 0
         while i < N {
-            const m: Any = {"n": 42}
+            const m: Boxed = {"n": 42}
             const x: int = m["n"]
             self.assertEqual(x, 42)
             i = i + 1
         }
     }
 
-    # BORROWED (amebo's exact pattern): dict[str,Any] element via dragon_dict_get_box
+    # BORROWED (amebo's exact pattern): dict[str,Boxed] element via dragon_dict_get_box
     # unboxed to str - must stay leak-free AND not double-free (no UAF).
     def test_typed_dict_any_unbox_str() {
         i: int = 0
         while i < N {
-            const d: dict[str, Any] = {"action": "order.placed"}
+            const d: dict[str, Boxed] = {"action": "order.placed"}
             const a: str = d["action"]
             self.assertEqual(a, "order.placed")
             i = i + 1
@@ -226,7 +230,7 @@ class BoxUnboxSlotRc(TestCase) {
         nm: str = "init"
         i: int = 0
         while i < N {
-            const m: Any = {"k": "value"}
+            const m: Boxed = {"k": "value"}
             nm = m["k"]
             self.assertEqual(nm, "value")
             i = i + 1
@@ -236,7 +240,7 @@ class BoxUnboxSlotRc(TestCase) {
     def test_listany_unbox_str() {
         i: int = 0
         while i < N {
-            const xs: list[Any] = ["x", "yy", "zzz"]
+            const xs: list[Boxed] = ["x", "yy", "zzz"]
             const s: str = xs[1]
             self.assertEqual(s, "yy")
             i = i + 1
@@ -247,7 +251,7 @@ class BoxUnboxSlotRc(TestCase) {
 
 class BoxChainSubscriptTests(TestCase) {
     def test_chained_any_subscript() {
-        obj: Any = {"b": [4, 5, 6]}
+        obj: Boxed = {"b": [4, 5, 6]}
         i: int = 0
         while i < 3000 {
             self.assertEqual(obj["b"][2], 6)
@@ -258,7 +262,7 @@ class BoxChainSubscriptTests(TestCase) {
     def test_chained_any_subscript_str_elem() {
         # Inner element is a heap str: the outer read takes its own reference
         # BEFORE the intermediate box is released (use-after-free guard).
-        obj: Any = {"b": ["p", "q", "rrrrrrrrrrrrrrrrrr"]}
+        obj: Boxed = {"b": ["p", "q", "rrrrrrrrrrrrrrrrrr"]}
         i: int = 0
         while i < 3000 {
             self.assertEqual(obj["b"][2], "rrrrrrrrrrrrrrrrrr")
@@ -267,9 +271,9 @@ class BoxChainSubscriptTests(TestCase) {
     }
 
     def test_chained_borrowed_receiver_guard() {
-        # dict[str, Any] read is dragon_dict_get_box = a BORROWED intermediate.
+        # dict[str, Boxed] read is dragon_dict_get_box = a BORROWED intermediate.
         # Releasing it would be a use-after-free. Must stay untouched.
-        d: dict[str, Any] = {"b": [7, 8, 9]}
+        d: dict[str, Boxed] = {"b": [7, 8, 9]}
         i: int = 0
         while i < 3000 {
             self.assertEqual(d["b"][1], 8)
@@ -279,7 +283,7 @@ class BoxChainSubscriptTests(TestCase) {
     }
 
     def test_chained_into_typed_slot() {
-        obj: Any = {"b": [4, 5, 6]}
+        obj: Boxed = {"b": [4, 5, 6]}
         i: int = 0
         total: int = 0
         while i < 3000 {
@@ -291,7 +295,7 @@ class BoxChainSubscriptTests(TestCase) {
     }
 
     def test_triple_chain() {
-        obj: Any = {"a": [[1, 2], [3, 4]]}
+        obj: Boxed = {"a": [[1, 2], [3, 4]]}
         i: int = 0
         while i < 3000 {
             self.assertEqual(obj["a"][0][1], 2)
@@ -301,44 +305,51 @@ class BoxChainSubscriptTests(TestCase) {
 
 
     def test_owned_subscript_index() {
-        keys: Any = {"i": "key-wwwwwwwwwwwwwwwwww"}
-        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        keys: Boxed = {"i": "key-wwwwwwwwwwwwwwwwww"}
+        keysc: dict[str, str] = keys        # checked downcast to the declared arm
+        d: Boxed = {"key-wwwwwwwwwwwwwwwwww": 42}
         i: int = 0
         while i < 3000 {
-            self.assertEqual(d[keys["i"]], 42)
+            self.assertEqual(d[keysc["i"]], 42)
             i = i + 1
         }
     }
 
     def test_fresh_binop_index() {
-        k1: Any = "key-"
-        k2: Any = "wwwwwwwwwwwwwwwwww"
-        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        k1: Boxed = "key-"
+        k1v: str = k1        # checked downcast to the declared arm
+        k2: Boxed = "wwwwwwwwwwwwwwwwww"
+        const k2v: str = k2        # checked downcast to the declared arm
+        d: Boxed = {"key-wwwwwwwwwwwwwwwwww": 42}
+        dc: dict[str, int] = d        # checked downcast to the declared arm
         i: int = 0
         while i < 3000 {
-            self.assertEqual(d[k1 + k2], 42)
+            self.assertEqual(dc[k1v + k2v], 42)
             i = i + 1
         }
     }
 
     def test_owned_int_index() {
-        idxs: Any = [2, 0]
-        a: Any = [10, 20, 30]
+        idxs: Boxed = [2, 0]
+        idxsc: list[int] = idxs        # checked downcast to the declared arm
+        a: Boxed = [10, 20, 30]
         i: int = 0
         while i < 3000 {
-            self.assertEqual(a[idxs[0]], 30)
+            self.assertEqual(a[idxsc[0]], 30)
             i = i + 1
         }
     }
 
     def test_borrowed_index_guard() {
-        # dict[str, Any] element read is dragon_dict_get_box = BORROWED.
+        # dict[str, Boxed] element read is dragon_dict_get_box = BORROWED.
         # Releasing it would be a use-after-free. Must stay untouched.
-        bor: dict[str, Any] = {"i": "key-wwwwwwwwwwwwwwwwww"}
-        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        bor: dict[str, Boxed] = {"i": "key-wwwwwwwwwwwwwwwwww"}
+        d: Boxed = {"key-wwwwwwwwwwwwwwwwww": 42}
+        dc: dict[str, int] = d        # checked downcast to the declared arm
+        const bk: str = bor["i"]        # checked downcast before use as a key
         i: int = 0
         while i < 3000 {
-            self.assertEqual(d[bor["i"]], 42)
+            self.assertEqual(dc[bk], 42)
             i = i + 1
         }
         v: str = bor["i"]
@@ -349,11 +360,12 @@ class BoxChainSubscriptTests(TestCase) {
 
 class BoxOperandDrainRC(TestCase) {
     def test_box_binop_owned_native_operands() {
-        a: Any = b"xy"
+        a: Boxed = b"xy"
+        av: bytes = a        # checked downcast to the declared arm
         i: int = 0
         while i < 2000 {
-            r: Any = a + mk()
-            s: Any = a + b"z"
+            r: Boxed = av + mk()
+            s: Boxed = av + b"z"
             self.assertEqual(r, b"xyz")
             self.assertEqual(s, b"xyz")
             i = i + 1
@@ -361,9 +373,10 @@ class BoxOperandDrainRC(TestCase) {
     }
 
     def test_box_binop_borrowed_operands_survive() {
-        a: Any = b"xy"
+        a: Boxed = b"xy"
+        av: bytes = a        # checked downcast to the declared arm
         tail: bytes = b"z"
-        r: Any = a + tail
+        r: Boxed = av + tail
         self.assertEqual(r, b"xyz")
         self.assertEqual(len(tail), 1)
     }
@@ -477,12 +490,12 @@ class SubscriptOwnedTempProbe(TestCase) {
 
 
 class TestAnyTernaryStrUnbox(TestCase) {
-    """Reading a str out of a dict[str, Any] through a ternary must not double-free.
+    """Reading a str out of a dict[str, Boxed] through a ternary must not double-free.
 
     Ordinary code, no tricks - the amebo broker's /v1 authorize handler does exactly
     this to pull request fields out of a parsed JSON body:
 
-        const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
+        const doc: dict[str, Boxed] = decode[dict[str, Boxed]](body.encode("utf-8"))
         const action: str = doc["action"] if "action" in doc else ""
         grant(action, ...)              # binds `action` into SQL later
 
@@ -518,7 +531,7 @@ class TestAnyTernaryStrUnbox(TestCase) {
     def test_reassign_target() -> None {
         i: int = 0
         while i < 30 {
-            const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
+            const doc: dict[str, Boxed] = decode[dict[str, Boxed]](BODY.encode("utf-8"))
             s: str = "init"
             s = doc["subject_type"] if "subject_type" in doc else ""
             churn()
@@ -538,7 +551,7 @@ class TestAnyTernaryStrUnbox(TestCase) {
     }
 
     def test_bool_arm_still_correct() -> None {
-        const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
+        const doc: dict[str, Boxed] = decode[dict[str, Boxed]](BODY.encode("utf-8"))
         if "read" in doc {
             const rv: bool = doc["read"]
             self.assertEqual(rv, True)
@@ -548,7 +561,7 @@ class TestAnyTernaryStrUnbox(TestCase) {
     def test_argpass_borrowed_box() -> None {
         i: int = 0
         while i < 30 {
-            const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
+            const doc: dict[str, Boxed] = decode[dict[str, Boxed]](BODY.encode("utf-8"))
             self.assertEqual(arg_len(doc["action"] if "action" in doc else ""), 12)
             self.assertEqual(arg_len(doc["subject_type"]), 7)
             i = i + 1

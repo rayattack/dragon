@@ -265,6 +265,7 @@ void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
         if (options.gcMode == GCMode::RC && isOwnedStrResult(rhs)) {
             builder->CreateCall(runtimeFuncs["dragon_decref_str"], {rhs});
         }
+        refreshNarrowShadowOrigin(name, result);
         if (auto* ai = llvm::dyn_cast<llvm::AllocaInst>(slotPtr)) {
             setVar(name, ai, VarKind::Str);
             // append_inplace consumed the old value; refresh the unwind entry, else
@@ -395,6 +396,7 @@ std::string CodeGen::Impl::typeExprCanonicalName(TypeExpr* t) const {
     }
 
 Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
+        typeExpr = resolveTypeAliasExpr(typeExpr);
         if (!typeExpr) return Type::Kind::Int;
         if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
             if (named->name == "int") return Type::Kind::Int;
@@ -406,7 +408,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             if (named->name == "dict") return Type::Kind::Dict;
             if (named->name == "tuple") return Type::Kind::Tuple;
             if (named->name == "set") return Type::Kind::Set;
-            if (named->name == "Any" || named->name == "object") return Type::Kind::Any;
+            if (named->name == "Any" || named->name == "object") return Type::Kind::Boxed;
             if (typedDictClassesBySym.count(classSym(named->name))) return Type::Kind::Dict;
             if (!resolveAnnotationClassName(named->name).empty())
                 return Type::Kind::Instance;
@@ -429,12 +431,17 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
         if (auto* unionType = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
             if (TypeExpr* niche = unionNicheMember(typeExpr))
                 return typeExprToTypeKind(niche);
-            return Type::Kind::Int;
+            // A real (non-niche) union is a 16-byte box whose tag is only known
+            // at runtime, exactly like Any. Reporting Int here claimed a static
+            // int tag, so container reads took the raw path and either guessed
+            // tag 0 or refused to derive one at all.
+            return Type::Kind::Boxed;
         }
         return Type::Kind::Int;
     }
 
 CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
+        typeExpr = resolveTypeAliasExpr(typeExpr);
         if (!typeExpr) return VarKind::Other;
         if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
             if (named->name == "int") return VarKind::Int;
@@ -490,7 +497,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
     }
 
 TypeExpr* CodeGen::Impl::unionNicheMember(TypeExpr* typeExpr) {
-        auto* ut = dynamic_cast<UnionTypeExpr*>(typeExpr);
+        auto* ut = dynamic_cast<UnionTypeExpr*>(resolveTypeAliasExpr(typeExpr));
         if (!ut || ut->types.size() != 2) return nullptr;
         TypeExpr* noneSide = nullptr;
         TypeExpr* otherSide = nullptr;
@@ -624,7 +631,7 @@ int64_t CodeGen::Impl::listViewWantElemTag(TypeExpr* ann) {
             return -1;
         Type::Kind k = typeExprToTypeKind(g->typeArgs[0].get());
         switch (k) {
-            case Type::Kind::Any:
+            case Type::Kind::Boxed:
             case Type::Kind::Union:
             case Type::Kind::Optional:
                 return -1;
@@ -656,7 +663,8 @@ std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(
                 !isOwnedBoxResult(val))
                 emitUnionIncref(payloadV, tagV);
         } else {
-            tagV = emitTagForExprNoCG(argExpr);
+            tagV = nicheOptionalTagForValue(argExpr, val);
+            if (!tagV) tagV = emitTagForExprNoCG(argExpr);
             if (val->getType()->isPointerTy()) {
                 int64_t litTag = -1;
                 if (auto* cT = llvm::dyn_cast<llvm::ConstantInt>(tagV))
@@ -674,28 +682,6 @@ std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(
                 }
             }
             payloadV = nativeToPayloadI64(val);
-            if (argExpr && argExpr->type &&
-                argExpr->type->kind() == Type::Kind::Union &&
-                val->getType()->isPointerTy()) {
-                auto& u = static_cast<UnionType&>(*argExpr->type);
-                if (u.types.size() == 2) {
-                    Type* inner = nullptr;
-                    bool hasNone = false;
-                    for (auto& t : u.types) {
-                        if (t->kind() == Type::Kind::None_) hasNone = true;
-                        else inner = t.get();
-                    }
-                    int64_t innerTag = inner ? typeKindToTag(inner->kind()) : -1;
-                    if (hasNone && innerTag >= 0) {
-                        auto* nullp = llvm::ConstantPointerNull::get(
-                            llvm::cast<llvm::PointerType>(val->getType()));
-                        auto* isNull = builder->CreateICmpEQ(val, nullp, "opt.isnull");
-                        tagV = builder->CreateSelect(isNull,
-                            llvm::ConstantInt::get(i64Type, TAG_NONE),
-                            llvm::ConstantInt::get(i64Type, innerTag), "opt.tag");
-                    }
-                }
-            }
         }
         return {tagV, payloadV};
     }
@@ -735,10 +721,15 @@ llvm::Value* CodeGen::Impl::emitTagForExpr(Expr* expr, CodeGen& cg) {
             if (tag >= 0)
                 return llvm::ConstantInt::get(i64Type, tag);
         }
+        addError("internal error: no runtime tag is derivable for this "
+                 "expression; the type checker left it untyped and codegen "
+                 "refuses to guess (a guessed tag corrupts boxed values)",
+                 expr ? expr->location() : SourceLocation{});
         return llvm::ConstantInt::get(i64Type, 0);
     }
 
 llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
+        typeExpr = resolveTypeAliasExpr(typeExpr);
         if (!typeExpr) return i64Type;
         if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
             if (named->name == "int") return i64Type;
@@ -819,6 +810,10 @@ llvm::Value* CodeGen::Impl::emitTagForExprNoCG(Expr* expr) {
             if (tag >= 0)
                 return llvm::ConstantInt::get(i64Type, tag);
         }
+        addError("internal error: no runtime tag is derivable for this "
+                 "expression; the type checker left it untyped and codegen "
+                 "refuses to guess (a guessed tag corrupts boxed values)",
+                 expr ? expr->location() : SourceLocation{});
         return llvm::ConstantInt::get(i64Type, 0);
     }
 
@@ -1274,7 +1269,7 @@ llvm::AllocaInst* CodeGen::Impl::bindListElemByTypeKind(
     Type::Kind elemKind) {
         llvm::Value* val;
         llvm::Type* allocaType = typeKindToLLVM(elemKind);
-        if (elemKind == Type::Kind::Any) {
+        if (isBoxedKind(elemKind)) {
             val = builder->CreateCall(
                 runtimeFuncs["dragon_list_box_get"],
                 {listVal, idx}, varName + ".box");

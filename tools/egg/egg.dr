@@ -13,7 +13,7 @@ from secrets import compare_digest
 from binascii import unhexlify
 from crypto import ed25519_verify, ed25519_keypair, ed25519_public_key, ed25519_sign
 from merkle import root as merkle_root, verify_inclusion, verify_consistency
-from json import loads
+from json import loads, Data, as_str, as_int, as_float, as_bool, as_obj, as_list
 from pathlib import Path
 from http.client import HTTPConnection, HTTPResponse, HTTPSConnection, HTTPSResponse, HTTPSBytesResponse
 
@@ -70,8 +70,8 @@ def _cmd_entry(dir: str) -> int {
     }
     content: str = open(manifest_path).text()
     s: Schema = _manifest_schema()
-    d: dict[str, Any] = parse(s, content)
-    entry: Any = d["entry"]
+    d: dict[str, Data] = parse(s, content)
+    entry: Data = d["entry"]
     print(entry)
     return 0
 }
@@ -81,9 +81,9 @@ def _dep_entry(dest: str, name: str) -> str {
     if exists(dep_manifest) {
         c: str = open(dep_manifest).text()
         s: Schema = _manifest_schema()
-        dd: dict[str, Any] = parse(s, c)
-        e: Any = dd["entry"]
-        return e
+        dd: dict[str, Data] = parse(s, c)
+        e: Data = dd["entry"]
+        return as_str(e, "")
     }
     return name + ".dr"
 }
@@ -108,7 +108,7 @@ def _sync_path(name: str, src: str, dest: str) -> int {
     return 0
 }
 
-def _sync_git(name: str, url: str, spec: dict[str, Any], dest: str) -> int {
+def _sync_git(name: str, url: str, spec: dict[str, Data], dest: str) -> int {
     _ensure_drx()
     if exists(dest) { rmtree(dest) }
     clone_args: list[str] = ["git", "clone", "--quiet", url, dest]
@@ -118,8 +118,8 @@ def _sync_git(name: str, url: str, spec: dict[str, Any], dest: str) -> int {
         return 1
     }
     if "hash" in spec {
-        h_any: Any = spec["hash"]
-        h: str = h_any
+        h_any: Data = spec["hash"]
+        h: str = as_str(h_any, "")
         sha: str = h
         if len(h) > 4 {
             if h[0:4] == "git:" { sha = h[4:] }
@@ -137,16 +137,16 @@ def _sync_git(name: str, url: str, spec: dict[str, Any], dest: str) -> int {
     return 0
 }
 
-def _sync_one(name: str, spec: dict[str, Any]) -> int {
+def _sync_one(name: str, spec: dict[str, Data]) -> int {
     dest: str = join(".drx", name)
     if "path" in spec {
-        src_any: Any = spec["path"]
-        src: str = src_any
+        src_any: Data = spec["path"]
+        src: str = as_str(src_any, "")
         return _sync_path(name, src, dest)
     }
     if "git" in spec {
-        url_any: Any = spec["git"]
-        url: str = url_any
+        url_any: Data = spec["git"]
+        url: str = as_str(url_any, "")
         return _sync_git(name, url, spec, dest)
     }
     if "version" in spec {
@@ -154,14 +154,14 @@ def _sync_one(name: str, spec: dict[str, Any]) -> int {
             print("egg '" + name + "': registry dep has a version but no hash - run `dragon grab " + name + "` to pin it")
             return 1
         }
-        ver_any: Any = spec["version"]
-        ver: str = ver_any
-        h_any: Any = spec["hash"]
-        h: str = h_any
+        ver_any: Data = spec["version"]
+        ver: str = as_str(ver_any, "")
+        h_any: Data = spec["hash"]
+        h: str = as_str(h_any, "")
         signer: str = ""
         if "signed_by" in spec {
-            sb_any: Any = spec["signed_by"]
-            signer = sb_any
+            sb_any: Data = spec["signed_by"]
+            signer = as_str(sb_any, signer)
         }
         return _sync_registry(name, ver, h, dest, signer)
     }
@@ -232,14 +232,14 @@ def _download_url(url: str) -> bytes {
 }
 
 def _tarball_from_fetch(body: str) -> bytes {
-    const obj: dict[str, Any] = loads(body)
+    const obj: dict[str, Data] = as_obj(loads(body))
     if "url" in obj {
-        const url_any: Any = obj["url"]
-        const url: str = url_any
+        const url_any: Data = obj["url"]
+        const url: str = as_str(url_any, "")
         return _download_url(url)
     }
-    const tb64_any: Any = obj["tarball"]
-    const tb64: str = tb64_any
+    const tb64_any: Data = obj["tarball"]
+    const tb64: str = as_str(tb64_any, "")
     return b64decode(tb64.encode("utf-8"))
 }
 
@@ -249,18 +249,18 @@ def _leaf_hash(name: str, version: str, pkg_hash: str, ts: int, uid: int) -> str
 }
 
 def _verify_leaf(name: str, version: str, got_hash: str, body: str) -> str {
-    const obj: dict[str, Any] = loads(body)
+    const obj: dict[str, Data] = as_obj(loads(body))
     if not ("log" in obj) {
         return "no transparency-log receipt for " + name + "@" + version + " (registry too old?)"
     }
-    const log_any: Any = obj["log"]
-    const log: dict[str, Any] = log_any
-    const ts_any: Any = log["ts"]
-    const ts: int = ts_any
-    const uid_any: Any = log["published_by"]
-    const uid: int = uid_any
-    const claimed_any: Any = log["leaf_hash"]
-    const claimed: str = claimed_any
+    const log_any: Data = obj["log"]
+    const log: dict[str, Data] = as_obj(log_any)
+    const ts_any: Data = log["ts"]
+    const ts: int = as_int(ts_any, 0)
+    const uid_any: Data = log["published_by"]
+    const uid: int = as_int(uid_any, 0)
+    const claimed_any: Data = log["leaf_hash"]
+    const claimed: str = as_str(claimed_any, "")
     const recomputed: str = _leaf_hash(name, version, got_hash, ts, uid)
     if not compare_digest(recomputed.encode("utf-8"), claimed.encode("utf-8")) {
         return "TRANSPARENCY LEAF MISMATCH - the log does not commit to these bytes"
@@ -349,11 +349,11 @@ def _trusted_pubkey(seen_key_id: str) -> tuple[str, str] {
         if pr[0] != 200 {
             return ("", "cannot fetch registry log pubkey (HTTP " + str(pr[0]) + ")")
         }
-        const pk: dict[str, Any] = loads(pr[1])
-        const pub_any: Any = pk["pubkey"]
-        const pub: str = pub_any
-        const kid_any: Any = pk["key_id"]
-        const kid: str = kid_any
+        const pk: dict[str, Data] = as_obj(loads(pr[1]))
+        const pub_any: Data = pk["pubkey"]
+        const pub: str = as_str(pub_any, "")
+        const kid_any: Data = pk["key_id"]
+        const kid: str = as_str(kid_any, "")
         _pin_key(host, kid, pub)
         print("  pinned registry log key " + kid + " for " + host + " (trust-on-first-use)")
         return (pub, "")
@@ -369,15 +369,15 @@ def _verify_checkpoint() -> tuple[str, str, int] {
     if cr[0] != 200 {
         return ("cannot fetch checkpoint (HTTP " + str(cr[0]) + ")", "", 0)
     }
-    const cp: dict[str, Any] = loads(cr[1])
-    const size_any: Any = cp["size"]
-    const size: int = size_any
-    const root_any: Any = cp["root"]
-    const root: str = root_any
-    const sig_any: Any = cp["signature"]
-    const sig_hex: str = sig_any
-    const kid_any: Any = cp["key_id"]
-    const kid: str = kid_any
+    const cp: dict[str, Data] = as_obj(loads(cr[1]))
+    const size_any: Data = cp["size"]
+    const size: int = as_int(size_any, 0)
+    const root_any: Data = cp["root"]
+    const root: str = as_str(root_any, "")
+    const sig_any: Data = cp["signature"]
+    const sig_hex: str = as_str(sig_any, "")
+    const kid_any: Data = cp["key_id"]
+    const kid: str = as_str(kid_any, "")
     const pr: tuple[str, str] = _trusted_pubkey(kid)
     if len(pr[1]) > 0 {
         return (pr[1], "", 0)
@@ -396,14 +396,14 @@ def _verify_inclusion(name: str, version: str, leaf_hash_str: str, root_hex: str
     if ir[0] != 200 {
         return "no inclusion proof for " + name + "@" + version + " (HTTP " + str(ir[0]) + ")"
     }
-    const obj: dict[str, Any] = loads(ir[1])
-    const idx_any: Any = obj["index"]
-    const index: int = idx_any
-    const proof_any: Any = obj["proof"]
-    const proof_list: list[Any] = proof_any
+    const obj: dict[str, Data] = as_obj(loads(ir[1]))
+    const idx_any: Data = obj["index"]
+    const index: int = as_int(idx_any, 0)
+    const proof_any: Data = obj["proof"]
+    const proof_list: list[Data] = as_list(proof_any)
     proof: list[bytes] = []
     for ph_any in proof_list {
-        ph: str = ph_any
+        ph: str = as_str(ph_any, "")
         proof.append(unhexlify(ph.encode("utf-8")))
     }
     const leaf_data: bytes = leaf_hash_str.encode("utf-8")
@@ -439,16 +439,16 @@ def _cmd_keygen() -> int {
 }
 
 def _verify_author_sig(body: str, tarball: bytes, expected_signer: str) -> str {
-    const obj: dict[str, Any] = loads(body)
+    const obj: dict[str, Data] = as_obj(loads(body))
     sb: str = ""
     sig: str = ""
     if "signed_by" in obj {
-        const sb_any: Any = obj["signed_by"]
-        sb = sb_any
+        const sb_any: Data = obj["signed_by"]
+        sb = as_str(sb_any, sb)
     }
     if "signature" in obj {
-        const sg_any: Any = obj["signature"]
-        sig = sg_any
+        const sg_any: Data = obj["signature"]
+        sig = as_str(sg_any, sig)
     }
     exp: str = expected_signer
     if len(exp) >= 8 {
@@ -527,12 +527,12 @@ def _cmd_scan() -> int {
                 print("scan: cannot fetch consistency proof (HTTP " + str(cr[0]) + ")")
                 return 1
             }
-            const cobj: dict[str, Any] = loads(cr[1])
-            const cp_any: Any = cobj["proof"]
-            const cp_list: list[Any] = cp_any
+            const cobj: dict[str, Data] = as_obj(loads(cr[1]))
+            const cp_any: Data = cobj["proof"]
+            const cp_list: list[Data] = as_list(cp_any)
             cproof: list[bytes] = []
             for x_any in cp_list {
-                x: str = x_any
+                x: str = as_str(x_any, "")
                 cproof.append(unhexlify(x.encode("utf-8")))
             }
             if not verify_consistency(prev[0], size, cproof, unhexlify(prev[1].encode("utf-8")), unhexlify(root_hex.encode("utf-8"))) {
@@ -548,22 +548,22 @@ def _cmd_scan() -> int {
         print("scan: cannot fetch transparency log (HTTP " + str(lr[0]) + ")")
         return 1
     }
-    const logobj: dict[str, Any] = loads(lr[1])
-    const entries_any: Any = logobj["entries"]
-    const entries: list[Any] = entries_any
+    const logobj: dict[str, Data] = as_obj(loads(lr[1]))
+    const entries_any: Data = logobj["entries"]
+    const entries: list[Data] = as_list(entries_any)
     leaves: list[bytes] = []
     index: dict[str, str] = {}
     for e_any in entries {
-        e: dict[str, Any] = e_any
-        lh_any: Any = e["leaf_hash"]
-        lh: str = lh_any
+        e: dict[str, Data] = as_obj(e_any)
+        lh_any: Data = e["leaf_hash"]
+        lh: str = as_str(lh_any, "")
         leaves.append(lh.encode("utf-8"))
-        nm_any: Any = e["name"]
-        nm: str = nm_any
-        vr_any: Any = e["version"]
-        vr: str = vr_any
-        ph_any: Any = e["pkg_hash"]
-        ph: str = ph_any
+        nm_any: Data = e["name"]
+        nm: str = as_str(nm_any, "")
+        vr_any: Data = e["version"]
+        vr: str = as_str(vr_any, "")
+        ph_any: Data = e["pkg_hash"]
+        ph: str = as_str(ph_any, "")
         index[nm + "@" + vr] = ph
     }
     sub: list[bytes] = []
@@ -586,23 +586,23 @@ def _cmd_scan() -> int {
     }
     const content: str = open("dragon.drs").text()
     const s: Schema = _manifest_schema()
-    const d: dict[str, Any] = parse(s, content)
+    const d: dict[str, Data] = parse(s, content)
     if not ("eggs" in d) {
         return 0
     }
-    const eggs_any: Any = d["eggs"]
-    const eggs: dict[str, Any] = eggs_any
+    const eggs_any: Data = d["eggs"]
+    const eggs: dict[str, Data] = as_obj(eggs_any)
     bad: int = 0
     checked: int = 0
     for name in eggs {
-        spec_any: Any = eggs[name]
-        spec: dict[str, Any] = spec_any
+        spec_any: Data = eggs[name]
+        spec: dict[str, Data] = as_obj(spec_any)
         if "version" in spec {
             if "hash" in spec {
-                v_any: Any = spec["version"]
-                v: str = v_any
-                h_any: Any = spec["hash"]
-                h: str = h_any
+                v_any: Data = spec["version"]
+                v: str = as_str(v_any, "")
+                h_any: Data = spec["hash"]
+                h: str = as_str(h_any, "")
                 const key: str = name + "@" + v
                 checked = checked + 1
                 if not (key in index) {
@@ -631,9 +631,9 @@ def _grab_registry(name: str, version: str) -> int {
             print("egg '" + name + "': not found on registry (HTTP " + str(er[0]) + ")")
             return 1
         }
-        const eobj: dict[str, Any] = loads(er[1])
-        const latest_any: Any = eobj["latest"]
-        ver = latest_any
+        const eobj: dict[str, Data] = as_obj(loads(er[1]))
+        const latest_any: Data = eobj["latest"]
+        ver = as_str(latest_any, ver)
         if ver == "" {
             print("egg '" + name + "': no installable (non-yanked) version")
             return 1
@@ -646,9 +646,9 @@ def _grab_registry(name: str, version: str) -> int {
     }
     const tarball: bytes = _tarball_from_fetch(fr[1])
     const our_hash: str = "sha256:" + hexdigest("sha256", tarball)
-    const fobj: dict[str, Any] = loads(fr[1])
-    const srv_any: Any = fobj["hash"]
-    const srv: str = srv_any
+    const fobj: dict[str, Data] = as_obj(loads(fr[1]))
+    const srv_any: Data = fobj["hash"]
+    const srv: str = as_str(srv_any, "")
     if not compare_digest(our_hash.encode("utf-8"), srv.encode("utf-8")) {
         print("egg '" + name + "': WARNING registry-stated hash != bytes received")
         print("  stated:   " + srv)
@@ -659,12 +659,12 @@ def _grab_registry(name: str, version: str) -> int {
         print("egg '" + name + "': " + cpv[0])
         return 1
     }
-    const log_any: Any = fobj["log"]
-    const log: dict[str, Any] = log_any
-    const ts_any: Any = log["ts"]
-    const ts: int = ts_any
-    const uid_any: Any = log["published_by"]
-    const uid: int = uid_any
+    const log_any: Data = fobj["log"]
+    const log: dict[str, Data] = as_obj(log_any)
+    const ts_any: Data = log["ts"]
+    const ts: int = as_int(ts_any, 0)
+    const uid_any: Data = log["published_by"]
+    const uid: int = as_int(uid_any, 0)
     const our_leaf: str = _leaf_hash(name, ver, our_hash, ts, uid)
     const incl_err: str = _verify_inclusion(name, ver, our_leaf, cpv[1], cpv[2])
     if len(incl_err) > 0 {
@@ -674,8 +674,8 @@ def _grab_registry(name: str, version: str) -> int {
     print("  inclusion proof verified against signed Merkle root " + cpv[1][0:16] + "...")
     signer: str = ""
     if "signed_by" in fobj {
-        const sgb_any: Any = fobj["signed_by"]
-        signer = sgb_any
+        const sgb_any: Data = fobj["signed_by"]
+        signer = as_str(sgb_any, signer)
     }
     if len(signer) > 0 {
         print("  author-signed by ed25519:" + signer[0:16] + "... (pinned as signed_by)")
@@ -695,17 +695,17 @@ def _cmd_sync() -> int {
     }
     content: str = open("dragon.drs").text()
     s: Schema = _manifest_schema()
-    d: dict[str, Any] = parse(s, content)
+    d: dict[str, Data] = parse(s, content)
     if not ("eggs" in d) {
         print("no eggs to sync")
         return 0
     }
-    eggs_any: Any = d["eggs"]
-    eggs: dict[str, Any] = eggs_any
+    eggs_any: Data = d["eggs"]
+    eggs: dict[str, Data] = as_obj(eggs_any)
     count: int = 0
     for name in eggs {
-        spec_any: Any = eggs[name]
-        spec: dict[str, Any] = spec_any
+        spec_any: Data = eggs[name]
+        spec: dict[str, Data] = as_obj(spec_any)
         rc: int = _sync_one(name, spec)
         if rc != 0 { return rc }
         count = count + 1
@@ -903,10 +903,10 @@ def _cmd_push(sign: bool) -> int {
     }
     const content: str = open("dragon.drs").text()
     const s: Schema = _manifest_schema()
-    const d: dict[str, Any] = parse(s, content)
-    const name: str = d["name"]
-    const version: str = d["version"]
-    const description: str = d["description"]
+    const d: dict[str, Data] = parse(s, content)
+    const name: str = as_str(d["name"], "")
+    const version: str = as_str(d["version"], "")
+    const description: str = as_str(d["description"], "")
 
     const token: str = getenv("DRAGON_REGISTRY_TOKEN")
     if token == "" {

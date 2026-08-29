@@ -68,7 +68,7 @@ class TestCase {
     }
 
     def assertEqual[T](first: T, second: T, msg: str = "") {
-        """Monomorphized at T (cmd #3): no Any box, so assertEqual(1, "x") is a compile
+        """Monomorphized at T (cmd #3): no box, so assertEqual(1, "x") is a compile
         error like `name: int = "boy"`; typed `!=` still deep-compares lists/dicts/bytes."""
         if first != second {
             self._fail_with("assertEqual", msg, f"{first} != {second}")
@@ -93,14 +93,15 @@ class TestCase {
         }
     }
 
-    def assertIsNone(value: Any, msg: str = "") {
-        """Any-typed so None comparisons hit the box-eq path."""
+    def assertIsNone[T](value: T | None, msg: str = "") {
+        """Generic over the caller's own type: `T | None` is the nullable
+        pointer, so the check is a null test, not a dynamic-tier box."""
         if value != None {
             self._fail_with("assertIsNone", msg, f"{value} is not None")
         }
     }
 
-    def assertIsNotNone(value: Any, msg: str = "") {
+    def assertIsNotNone[T](value: T | None, msg: str = "") {
         if value == None {
             self._fail_with("assertIsNotNone", msg, "value is None")
         }

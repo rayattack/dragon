@@ -18,10 +18,10 @@ struct TypeInference::Impl {
     std::shared_ptr<PrimitiveType> boolType = std::make_shared<PrimitiveType>(Type::Kind::Bool);
     std::shared_ptr<PrimitiveType> strType = std::make_shared<PrimitiveType>(Type::Kind::Str);
     std::shared_ptr<PrimitiveType> noneType = std::make_shared<PrimitiveType>(Type::Kind::None_);
-    std::shared_ptr<AnyType> anyType = std::make_shared<AnyType>();
+    std::shared_ptr<BoxedType> boxedType = std::make_shared<BoxedType>();
 
     std::shared_ptr<Type> inferFromExpr(Expr* expr) {
-        if (!expr) return anyType;
+        if (!expr) return boxedType;
         if (dynamic_cast<IntegerLiteral*>(expr)) return intType;
         if (dynamic_cast<FloatLiteral*>(expr)) return floatType;
         if (dynamic_cast<StringLiteral*>(expr)) return strType;
@@ -33,7 +33,7 @@ struct TypeInference::Impl {
             if (name->name == "None") return noneType;
             auto it = varTypes.find(name->name);
             if (it != varTypes.end()) return it->second;
-            return anyType;
+            return boxedType;
         }
 
         if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
@@ -58,7 +58,7 @@ struct TypeInference::Impl {
             if (lt->kind() == Type::Kind::Float || rt->kind() == Type::Kind::Float) return floatType;
             if (lt->kind() == Type::Kind::Int && rt->kind() == Type::Kind::Int) return intType;
 
-            return anyType;
+            return boxedType;
         }
 
         if (auto* unary = dynamic_cast<UnaryExpr*>(expr)) {
@@ -78,23 +78,23 @@ struct TypeInference::Impl {
                 if (callee->name == "print") return noneType;
                 if (callee->name == "range") return std::make_shared<ListType>(intType);
                 if (callee->name == "sorted" || callee->name == "list" ||
-                    callee->name == "reversed") return std::make_shared<ListType>(anyType);
+                    callee->name == "reversed") return std::make_shared<ListType>(boxedType);
 
                 auto it = funcReturnTypes.find(callee->name);
                 if (it != funcReturnTypes.end()) return it->second;
             }
-            return anyType;
+            return boxedType;
         }
 
         if (auto* list = dynamic_cast<ListExpr*>(expr)) {
-            if (list->elements.empty()) return std::make_shared<ListType>(anyType);
+            if (list->elements.empty()) return std::make_shared<ListType>(boxedType);
             auto elemType = inferFromExpr(list->elements[0].get());
             return std::make_shared<ListType>(elemType);
         }
 
         if (auto* dict = dynamic_cast<DictExpr*>(expr)) {
             if (dict->entries.empty())
-                return std::make_shared<DictType>(anyType, anyType);
+                return std::make_shared<DictType>(boxedType, boxedType);
             auto kt = inferFromExpr(dict->entries[0].first.get());
             auto vt = inferFromExpr(dict->entries[0].second.get());
             return std::make_shared<DictType>(kt, vt);
@@ -113,14 +113,14 @@ struct TypeInference::Impl {
                 return static_cast<DictType*>(objType.get())->valueType;
             }
             if (objType->kind() == Type::Kind::Str) return strType;
-            return anyType;
+            return boxedType;
         }
 
-        return anyType;
+        return boxedType;
     }
 
     std::unique_ptr<TypeExpr> typeToTypeExpr(const std::shared_ptr<Type>& type) {
-        if (!type || type->kind() == Type::Kind::Any || type->kind() == Type::Kind::Unknown) {
+        if (!type || type->kind() == Type::Kind::Boxed || type->kind() == Type::Kind::Unknown) {
             return nullptr;
         }
         switch (type->kind()) {
@@ -171,7 +171,7 @@ std::shared_ptr<Type> TypeInference::inferExprType(Expr* expr) {
 
 std::shared_ptr<Type> TypeInference::inferVarType(const std::string& name) {
     auto it = impl_->varTypes.find(name);
-    return (it != impl_->varTypes.end()) ? it->second : impl_->anyType;
+    return (it != impl_->varTypes.end()) ? it->second : impl_->boxedType;
 }
 
 bool TypeInference::hasUnresolvedTypes() const {

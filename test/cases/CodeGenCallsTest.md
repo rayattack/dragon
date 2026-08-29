@@ -305,12 +305,12 @@ if hasattr(c, "y") {
 #### :any_kwarg_to_var_kwargs_function
 
 ```dr
-def kw(**keys: Any) -> int {
+def kw(**keys: int | str) -> int {
   n: int = 0
   for k in keys { n = n + 1 }
   return n
 }
-d: dict[str, Any] = {}
+d: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {}
 d["id"] = 5
 d["name"] = "ada"
 print(kw(a=d["id"], b=d["name"]))
@@ -319,10 +319,10 @@ print(kw(a=d["id"], b=d["name"]))
 #### :any_kwarg_keeps_runtime_type_and_value
 
 ```dr
-def kw(**keys: Any) -> str {
+def kw(**keys: int | str) -> str {
   return str(keys["a"]) + "|" + str(keys["b"])
 }
-d: dict[str, Any] = {}
+d: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {}
 d["id"] = 5
 d["name"] = "ada"
 print(kw(a=d["id"], b=d["name"]))
@@ -332,16 +332,16 @@ print(kw(a=d["id"], b=d["name"]))
 
 ```dr
 class Bag {
-  data: dict[str, Any]
-  def(d: dict[str, Any]) { self.data = d }
-  def get(k: str) -> Any { return self.data[k] }
-  def kw(**keys: Any) -> int {
+  data: dict[str, int | str]
+  def(d: dict[str, int | str]) { self.data = d }
+  def get(k: str) -> int | str { return self.data[k] }
+  def kw(**keys: int | str) -> int {
     n: int = 0
     for k in keys { n = n + 1 }
     return n
   }
 }
-d: dict[str, Any] = {}
+d: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {}
 d["id"] = 5
 b: Bag = Bag(d)
 print(b.kw(a=d["id"], c=b.get("id")))
@@ -354,7 +354,7 @@ class Point(TypedDict) {
   id: int
   name: str
 }
-d: dict[str, Any] = {}
+d: dict[str, int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = {}
 d["id"] = 7
 p: Point = Point(id=d["id"], name="a")
 print(p.id)
@@ -363,7 +363,7 @@ print(p.id)
 #### :container_kwarg_keeps_its_own_tag
 
 ```dr
-def kw(**keys: Any) -> int {
+def kw(**keys: int | str) -> int {
   n: int = 0
   for k in keys { n = n + 1 }
   return n
@@ -378,7 +378,7 @@ print(kw(a=l, b=d, c=b))
 #### :container_kwarg_values_read_back_in_callee
 
 ```dr
-def kw(**keys: Any) -> str {
+def kw(**keys: str | list[int]) -> str {
   xs: list[int] = keys["a"]
   name: str = keys["b"]
   return str(xs[0] + xs[1] + xs[2]) + "|" + name
@@ -398,7 +398,7 @@ class Node {
   def(v: int) { self.v = v }
 }
 class Holder {
-  def kwm(**keys: Any) -> int {
+  def kwm(**keys: int | str) -> int {
     n: int = 0
     for k in keys { n = n + 1 }
     return n
@@ -497,4 +497,18 @@ k: Sink = Sink()
 label: str = "report-" + "2026"
 print(k.archive(name=dub label))
 print(label)
+```
+
+#### :str_of_str_stays_zero_copy_ir
+
+`str(s)` and `f"{s}"` on a value that is already a `str` must not allocate: they
+hand back the same pointer with one retain. The shared render helper routes
+every stringify site, so this pins that it did not turn the identity case into a
+copy.
+
+```dr
+s: str = "hello"
+a: str = str(s)
+b: str = f"{s}"
+print(a + b)
 ```

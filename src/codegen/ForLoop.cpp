@@ -462,7 +462,7 @@ void CodeGen::visit(ForStmt& node) {
     {
         bool iterMayBeBox = false;
         if (node.iterable->type &&
-            (node.iterable->type->kind() == Type::Kind::Any ||
+            (node.iterable->type->kind() == Type::Kind::Boxed ||
              node.iterable->type->kind() == Type::Kind::Union))
             iterMayBeBox = true;
         if (auto* nm = dynamic_cast<NameExpr*>(node.iterable.get())) {
@@ -472,14 +472,14 @@ void CodeGen::visit(ForStmt& node) {
         if (node.iterable->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.iterable->type.get())) {
                 if (lt->elementType &&
-                    lt->elementType->kind() == Type::Kind::Any)
+                    Impl::isBoxedKind(lt->elementType->kind()))
                     anyElemList = true;
             }
         }
         if (auto* nm = dynamic_cast<NameExpr*>(node.iterable.get())) {
             auto it = impl_->varListElemKinds.find(nm->name);
             if (it != impl_->varListElemKinds.end() &&
-                it->second == Type::Kind::Any)
+                Impl::isBoxedKind(it->second))
                 anyElemList = true;
             if (impl_->varListElemIsType.count(nm->name))
                 anyElemList = false;
@@ -500,7 +500,7 @@ void CodeGen::visit(ForStmt& node) {
                 if (cit != impl_->classFieldListElemKindsBySym.end()) {
                     auto fit = cit->second.find(iterAttr->attribute);
                     if (fit != cit->second.end() &&
-                        fit->second == Type::Kind::Any)
+                        Impl::isBoxedKind(fit->second))
                         anyElemList = true;
                 }
             }

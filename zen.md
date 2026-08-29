@@ -22,7 +22,7 @@ Unless it is the fastest way, you haven't found it yet
 
 Anything that can be done in Dragon must be done in Dragon
 A scope that ends frees what it held
-A knowable type is never `Any`
+A knowable type is never boxed
 
 Types are one honking great idea -- let's monomorphize more of those!
 

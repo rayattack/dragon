@@ -19,7 +19,7 @@ annotation *system*. This chapter covers the foundation - the core annotations,
 the declaration rule, type aliases, and how annotations become storage. The
 chapters that follow take it further:
 [Union, Optional, and Narrowing](/docs/0702-union-and-narrowing),
-[Any](/docs/0703-any), [Callable, TypedDict, and intc](/docs/0704-callable-and-typeddict),
+[no dynamic tier](/docs/0703-any), [Callable, TypedDict, and intc](/docs/0704-callable-and-typeddict),
 and [Generics](/docs/0705-generics).
 
 ## The core types, as annotations
@@ -110,7 +110,7 @@ strs:   list[str]   = ["a", "b"]     # void*[]    - refcounted pointers
 vectorizes; `list[str]` stores refcount-aware pointers. The code generator picks
 the storage and the runtime entry points from the element type in your annotation.
 Nothing is boxed; nothing carries a per-element tag. Dicts work the same way -
-`dict[str, int]` keeps `i64` values inline, and only `dict[str, Any]` boxes,
+`dict[str, int]` keeps `i64` values inline, and only `dict[str, Data]` boxes,
 because only then is the value type unknown. You tell the truth about your data,
 and the truth compiles to fast code.
 

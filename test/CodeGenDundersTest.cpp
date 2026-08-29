@@ -103,11 +103,6 @@ TEST(CodeGenE2E, DunderStrFallbackRepr) {
     EXPECT_EQ(out, "Box(7)\n");
 }
 
-TEST(CodeGenE2E, DunderStrNoMethod) {
-    auto out = compileAndRun(code("dunder_str_no_method"));
-    EXPECT_EQ(out, "<Empty instance>\n");
-}
-
 TEST(CodeGenE2E, DunderStrPy) {
     auto out = compileAndRunPy(code("dunder_str_py"));
     EXPECT_EQ(out, "Hello #42\n");

@@ -192,7 +192,7 @@ foreach(_guard decode_dict_class_guard decode_dict_intkey_guard)
     add_test(NAME dr_${_guard}
         COMMAND $<TARGET_FILE:dragon> check ${CMAKE_CURRENT_SOURCE_DIR}/dr/${_guard}.dr)
     set_tests_properties(dr_${_guard} PROPERTIES
-        PASS_REGULAR_EXPRESSION "never falls back to Any")
+        PASS_REGULAR_EXPRESSION "never falls back to a boxed type on its own")
 endforeach()
 
 foreach(_guard import_missing_guard from_import_missing_guard)
@@ -201,6 +201,22 @@ foreach(_guard import_missing_guard from_import_missing_guard)
     set_tests_properties(dr_${_guard} PROPERTIES
         PASS_REGULAR_EXPRESSION "cannot find module 'zzz_no_such_module'")
 endforeach()
+
+add_test(NAME dr_alias_import_guard
+    COMMAND $<TARGET_FILE:dragon> run ${CMAKE_CURRENT_SOURCE_DIR}/dr/alias_import_guard.dr)
+set_tests_properties(dr_alias_import_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "alias import ok")
+
+add_test(NAME dr_recursive_alias_guard
+    COMMAND $<TARGET_FILE:dragon> run ${CMAKE_CURRENT_SOURCE_DIR}/dr/recursive_alias_guard.dr)
+set_tests_properties(dr_recursive_alias_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "recursive alias ok")
+
+add_test(NAME dr_union_container_guard
+    COMMAND $<TARGET_FILE:dragon> run ${CMAKE_CURRENT_SOURCE_DIR}/dr/union_container_guard.dr)
+set_tests_properties(dr_union_container_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "union containers ok"
+    FAIL_REGULAR_EXPRESSION "FAIL:")
 
 add_test(NAME dr_ctor_arity_guard
     COMMAND $<TARGET_FILE:dragon> check ${CMAKE_CURRENT_SOURCE_DIR}/dr/ctor_arity_guard.dr)

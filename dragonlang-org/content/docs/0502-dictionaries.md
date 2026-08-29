@@ -126,7 +126,7 @@ inserts `None`; a Dragon `dict[str, int]` cannot hold `None` (its value type is
 zero-value (`0` for `int`, `""` for `str`, `[]` for a list) rather than smuggling
 in a dynamic `None`. When you want absence to be representable, type the value as
 `dict[str, int | None]` and pass the default explicitly. This is the same honest-
-types stance described in [Any](/docs/0703-any): the surface mirrors Python, the
+types stance described in [no dynamic tier](/docs/0703-any): the surface mirrors Python, the
 type system stays truthful.
 
 ## Merging and copying

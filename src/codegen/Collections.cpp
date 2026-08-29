@@ -76,7 +76,7 @@ void CodeGen::visit(ListExpr& node) {
     bool isAny = false;
     if (node.type) {
         if (auto* lt = dynamic_cast<ListType*>(node.type.get())) {
-            if (lt->elementType && lt->elementType->kind() == Type::Kind::Any)
+            if (lt->elementType && Impl::isBoxedKind(lt->elementType->kind()))
                 isAny = true;
         }
     }
@@ -130,7 +130,7 @@ void CodeGen::visit(TupleExpr& node) {
         if (tupleType && i < (int64_t)tupleType->elementTypes.size() &&
             tupleType->elementTypes[i]) {
             Type::Kind slotKind = tupleType->elementTypes[i]->kind();
-            if (slotKind == Type::Kind::Any || slotKind == Type::Kind::Union) {
+            if (slotKind == Type::Kind::Boxed || slotKind == Type::Kind::Union) {
                 if (node.elements[i]->type)
                     elemTag =
                         Impl::typeKindToElemTag(node.elements[i]->type->kind());

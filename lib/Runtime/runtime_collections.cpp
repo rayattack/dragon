@@ -65,10 +65,40 @@ static void dragon_repr_bytes(DragonStrBuf* out, const DragonBytes* b) {
 static void dragon_repr_list(DragonStrBuf* out, DragonList* l);
 static void dragon_repr_list_box(DragonStrBuf* out, DragonListBox* l);
 static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d);
+static void dragon_repr_dict_int(DragonStrBuf* out, DragonDict* d);
 static void dragon_repr_set(DragonStrBuf* out, DragonSet* s);
 static void dragon_repr_tuple(DragonStrBuf* out, DragonTuple* t);
 
-extern "C" const char* dragon_instance_class_name(void* instance);
+extern "C" {
+static void dragon_repr_deque(DragonStrBuf* out, DragonDeque* d);
+const char* dragon_instance_class_name(void* instance);
+}
+
+static void dragon_repr_heap_obj(DragonStrBuf* out, int64_t val) {
+    DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
+    if (!h) { sb_puts(out, "None"); return; }
+    switch (h->type_tag) {
+        case DRAGON_TAG_LIST:     dragon_repr_list(out, (DragonList*)h); return;
+        case DRAGON_TAG_LIST_BOX: dragon_repr_list_box(out, (DragonListBox*)h); return;
+        case DRAGON_TAG_TUPLE:    dragon_repr_tuple(out, (DragonTuple*)h); return;
+        case DRAGON_TAG_SET:      dragon_repr_set(out, (DragonSet*)h); return;
+        case DRAGON_TAG_DEQUE:    dragon_repr_deque(out, (DragonDeque*)h); return;
+        case DRAGON_TAG_BYTES:    dragon_repr_bytes(out, (DragonBytes*)h); return;
+        case DRAGON_TAG_DICT: {
+            DragonDict* d = (DragonDict*)h;
+            if (d->key_kind == DRAGON_DICT_KEY_STR) dragon_repr_dict(out, d);
+            else dragon_repr_dict_int(out, d);
+            return;
+        }
+        default: break;
+    }
+    const char* nm = dragon_instance_class_name((void*)h);
+    char tmp[96];
+    if (nm) snprintf(tmp, sizeof(tmp), "<%s instance>", nm);
+    else    snprintf(tmp, sizeof(tmp), "<object at 0x%llx>",
+                     (unsigned long long)val);
+    sb_puts(out, tmp);
+}
 
 static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
     switch (tag) {
@@ -89,31 +119,11 @@ static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         }
         case TAG_BOOL: sb_puts(out, val ? "True" : "False"); break;
         case TAG_NONE: sb_puts(out, "None"); break;
-        case TAG_LIST: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
-            if (h && h->type_tag == DRAGON_TAG_LIST_BOX)
-                dragon_repr_list_box(out, (DragonListBox*)h);
-            else
-                dragon_repr_list(out, (DragonList*)h);
+        case TAG_LIST:
+        case TAG_DICT:
+        case TAG_BYTES:
+            dragon_repr_heap_obj(out, val);
             break;
-        }
-        case TAG_DICT: dragon_repr_dict(out, (DragonDict*)(uintptr_t)val); break;
-        case TAG_BYTES: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
-            if (h && h->type_tag == DRAGON_TAG_BYTES) {
-                dragon_repr_bytes(out, (DragonBytes*)h);
-            } else if (!h) {
-                sb_puts(out, "None");
-            } else {
-                const char* nm = dragon_instance_class_name((void*)h);
-                char tmp[96];
-                if (nm) snprintf(tmp, sizeof(tmp), "<%s instance>", nm);
-                else    snprintf(tmp, sizeof(tmp), "<object at 0x%llx>",
-                                 (unsigned long long)val);
-                sb_puts(out, tmp);
-            }
-            break;
-        }
         default: {
             char tmp[32];
             snprintf(tmp, sizeof(tmp), "%ld", (long)val);

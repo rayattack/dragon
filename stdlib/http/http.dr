@@ -22,7 +22,7 @@ Server constants live on HTTPServer; the server itself is `http.server`.
 
 from http.client import HTTPConnection, HTTPSConnection, HTTPResponse, HTTPSResponse
 from urllib.parse import urlsplit, urlencode, SplitResult
-from json import dumps as _json_dumps, loads as _json_loads
+from json import dumps as _json_dumps, loads as _json_loads, Data
 
 
 class HTTPStatusError(Exception) {
@@ -68,7 +68,7 @@ class Response {
         return default
     }
 
-    def json() -> Any {
+    def json() -> Data {
         return _json_loads(self.text)
     }
 
@@ -146,7 +146,7 @@ def _has_header(headers: dict[str, str], name: str) -> bool {
 
 
 def _request(method: str, url: str, headers: dict[str, str],
-             params: dict[str, str], body: str, json_body: dict[str, Any],
+             params: dict[str, str], body: str, json_body: dict[str, Data],
              form: dict[str, str], timeout: int = 0) -> Response {
     target: _Target = _target_of(url, params)
     payload: str = body
@@ -191,21 +191,21 @@ async def get(url: str, headers: dict[str, str] = {},
 }
 
 
-async def post(url: str, body: str = "", json: dict[str, Any] = {},
+async def post(url: str, body: str = "", json: dict[str, Data] = {},
                data: dict[str, str] = {}, headers: dict[str, str] = {},
                params: dict[str, str] = {}, timeout: int = 0) -> Response {
     return _request("POST", url, headers, params, body, json, data, timeout)
 }
 
 
-async def put(url: str, body: str = "", json: dict[str, Any] = {},
+async def put(url: str, body: str = "", json: dict[str, Data] = {},
               data: dict[str, str] = {}, headers: dict[str, str] = {},
               params: dict[str, str] = {}, timeout: int = 0) -> Response {
     return _request("PUT", url, headers, params, body, json, data, timeout)
 }
 
 
-async def patch(url: str, body: str = "", json: dict[str, Any] = {},
+async def patch(url: str, body: str = "", json: dict[str, Data] = {},
                 data: dict[str, str] = {}, headers: dict[str, str] = {},
                 params: dict[str, str] = {}, timeout: int = 0) -> Response {
     return _request("PATCH", url, headers, params, body, json, data, timeout)
@@ -270,21 +270,21 @@ class Client {
                         params, "", {}, {}, self.timeout)
     }
 
-    async def post(path: str, body: str = "", json: dict[str, Any] = {},
+    async def post(path: str, body: str = "", json: dict[str, Data] = {},
                    data: dict[str, str] = {}, headers: dict[str, str] = {},
                    params: dict[str, str] = {}) -> Response {
         return _request("POST", self._full_url(path), self._merged(headers),
                         params, body, json, data, self.timeout)
     }
 
-    async def put(path: str, body: str = "", json: dict[str, Any] = {},
+    async def put(path: str, body: str = "", json: dict[str, Data] = {},
                   data: dict[str, str] = {}, headers: dict[str, str] = {},
                   params: dict[str, str] = {}) -> Response {
         return _request("PUT", self._full_url(path), self._merged(headers),
                         params, body, json, data, self.timeout)
     }
 
-    async def patch(path: str, body: str = "", json: dict[str, Any] = {},
+    async def patch(path: str, body: str = "", json: dict[str, Data] = {},
                     data: dict[str, str] = {}, headers: dict[str, str] = {},
                     params: dict[str, str] = {}) -> Response {
         return _request("PATCH", self._full_url(path), self._merged(headers),

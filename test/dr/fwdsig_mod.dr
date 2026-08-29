@@ -1,9 +1,10 @@
+from database.base import Value
 from fwdsig_store import fwd_connect, FwdStore
 
 
-def build_bundle(path: str) -> dict[str, Any] {
+def build_bundle(path: str) -> dict[str, list[dict[str, Value]]] {
     src: FwdStore = fwd_connect(path)
-    const bundle: dict[str, Any] = {
+    const bundle: dict[str, list[dict[str, Value]]] = {
         rows: collect(src, "x")
     }
     src.close()
@@ -11,8 +12,8 @@ def build_bundle(path: str) -> dict[str, Any] {
 }
 
 
-def collect(src: FwdStore, name: str) -> list[dict[str, Any]] {
-    out: list[dict[str, Any]] = []
+def collect(src: FwdStore, name: str) -> list[dict[str, Value]] {
+    out: list[dict[str, Value]] = []
     out.append({a: src.n})
     return out
 }

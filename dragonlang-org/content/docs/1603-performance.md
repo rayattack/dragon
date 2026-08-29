@@ -13,7 +13,7 @@ book.
    performance. When something is slow at the root, the root gets fixed.
 3. **Types must be honest.** Every value whose type is known flows *at*
    that type - monomorphized, never boxed - so the hot path stays
-   allocation-free. The dynamic escape hatches (`Any`, boxing) exist only
+   allocation-free. The dynamic escape hatches (`Data`, boxing) exist only
    for genuinely dynamic data, never as a convenience that quietly costs
    speed.
 
@@ -129,7 +129,7 @@ The language already gives you the levers that matter:
   entirely and lets the OS reclaim memory at exit - ideal for a one-shot
   CLI filter or a micro-benchmark, never for a long-running service (see
   [The Memory Model](/docs/1601-memory-model)).
-- **Keep types concrete.** A value left as `Any` is boxed; a value with a
+- **Keep types concrete.** A value left as `Data` is boxed; a value with a
   known type is not. Honest, specific types are not just safer - per the
   third commandment, they are the difference between a register and a heap
   allocation.

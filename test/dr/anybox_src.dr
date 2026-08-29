@@ -1,7 +1,9 @@
-def give_bytes() -> Any {
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
+def give_bytes() -> Boxed {
     return b"abc"
 }
 
-def give_str() -> Any {
+def give_str() -> Boxed {
     return "xyz"
 }

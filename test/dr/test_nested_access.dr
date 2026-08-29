@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | none | list[int] | list[str] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed]
+
 from unittest import TestCase, main
 from json import dumps
 
@@ -122,14 +124,14 @@ class Point {
 
 
 def _dumps_cyclic_dict() {
-    d: dict[str, Any] = {}
+    d: dict[str, Boxed] = {}
     d["self"] = d
     dumps(d)
 }
 
 
 def _dumps_cyclic_list() {
-    l: list[Any] = []
+    l: list[Boxed] = []
     l.append(l)
     dumps(l)
 }
@@ -327,19 +329,19 @@ class NestedSubscriptStore(TestCase) {
 
 class CycleTests(TestCase) {
     def test_str_cyclic_list() {
-        l: list[Any] = []
+        l: list[Boxed] = []
         l.append(l)
         self.assertEqual(str(l), "[[...]]")
     }
 
     def test_str_cyclic_dict() {
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["self"] = d
         self.assertEqual(str(d), "{'self': {...}}")
     }
 
     def test_print_cyclic_no_crash() {
-        l: list[Any] = []
+        l: list[Boxed] = []
         l.append(l)
         print(l)
         self.assertTrue(true)
@@ -352,7 +354,7 @@ class CycleTests(TestCase) {
 
     def test_acyclic_shared_subtree_still_renders() {
         inner: list[int] = [1, 2]
-        outer: list[Any] = []
+        outer: list[Boxed] = []
         outer.append(inner)
         outer.append(inner)
         self.assertEqual(str(outer), "[[1, 2], [1, 2]]")

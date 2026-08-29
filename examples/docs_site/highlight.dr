@@ -3,7 +3,7 @@ const _KW: set[str] = {"if", "elif", "else", "while", "for", "break", "continue"
 const _CONST: set[str] = {"True", "False", "None", "Ellipsis", "NotImplemented", "true", "false"}
 
 const _TYPE1: set[str] = {"int", "float", "complex", "bool", "str", "bytes", "bytearray", "list", "tuple", "set", "dict", "frozenset", "range", "object", "void", "ptr", "intc"}
-const _TYPE2: set[str] = {"Optional", "List", "Dict", "Set", "Tuple", "Any", "Union", "Callable", "Iterable", "Iterator", "Generator", "Sequence", "Mapping", "Type", "TypeVar", "IO", "TextIO", "BinaryIO", "Pattern", "Match", "NoReturn", "SyncList", "SyncDict", "Task", "Lock", "Thread"}
+const _TYPE2: set[str] = {"Optional", "List", "Dict", "Set", "Tuple", "Union", "Callable", "Iterable", "Iterator", "Generator", "Sequence", "Mapping", "Type", "TypeVar", "IO", "TextIO", "BinaryIO", "Pattern", "Match", "NoReturn", "SyncList", "SyncDict", "Task", "Lock", "Thread"}
 const _TYPE3: set[str] = {"HTML", "SQL", "CSS", "JSON", "URL", "XML", "Template", "Connection", "Request", "Response", "Router", "Context"}
 const _TYPE4: set[str] = {"Exception", "BaseException", "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError", "StopIteration", "OSError", "IOError", "FileNotFoundError", "ZeroDivisionError", "AttributeError", "NameError", "NotImplementedError", "AssertionError", "ImportError", "DatabaseError", "ConnectionError", "QueryError", "NoRows", "MultipleRows"}
 

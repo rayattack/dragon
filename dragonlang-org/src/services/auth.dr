@@ -1,3 +1,4 @@
+from database.base import Value
 from time import now
 from argon2id import hash as argon_hash, verify as argon_verify
 from secrets import token_urlsafe, token_bytes
@@ -97,7 +98,7 @@ class AuthService {
     def confirm_signup(token: str) -> AuthResult {
         const ch: str = _token_hash(token)
         const ts: int = now()
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select id, username, email, password_hash, expires_at
             from pending_signups where confirm_hash = !{ch}
         })
@@ -154,14 +155,14 @@ class AuthService {
     }
 
     def _username_taken(username: str) -> bool {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select 1 from users where username = !{username}
         })
         return len(rows) > 0
     }
 
     def _email_taken(email: str) -> bool {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select 1 from users where email = !{email}
         })
         return len(rows) > 0
@@ -180,7 +181,7 @@ class AuthService {
 
     def verify_token(plaintext: str) -> int {
         const th: str = _token_hash(plaintext)
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select id, user_id, revoked from tokens where token_hash = !{th}
         })
         if len(rows) == 0 {

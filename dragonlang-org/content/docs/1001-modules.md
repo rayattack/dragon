@@ -182,7 +182,7 @@ this is by design, not a missing feature.
 When you need to pick a callable by a string known only at runtime - the use case
 people reach for `importlib` for - use an explicit **dispatch table**: a typed
 `dict` mapping names to function references. It is fully static, type-checked, and a
-plain hash lookup at runtime (no compiler magic, no `Any` ceremony):
+plain hash lookup at runtime (no compiler magic, no `Data` ceremony):
 
 ```dragon
 def double(x: int) -> int { return x * 2 }

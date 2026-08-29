@@ -376,3 +376,11 @@ TEST(CodeGenE2E, DubIntoOwnParamByKeywordLeavesSourceIntact) {
     auto out = compileAndRun(code("dub_into_own_param_by_keyword_leaves_source_intact"));
     EXPECT_EQ(out, "11\nreport-2026\n");
 }
+
+TEST(CodeGenTest, StrOfStrStaysZeroCopy) {
+    auto ir = generateIR(code("str_of_str_stays_zero_copy_ir"));
+    EXPECT_NE(ir.find("call ptr @dragon_str_retain"), std::string::npos)
+        << "str(s) on a str must retain, not copy\nIR:\n" << ir;
+    EXPECT_EQ(ir.find("call ptr @dragon_string_dup"), std::string::npos)
+        << "str(s) on a str must not allocate a duplicate\nIR:\n" << ir;
+}

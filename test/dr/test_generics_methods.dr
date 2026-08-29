@@ -1,3 +1,4 @@
+from database.base import Value
 from unittest import TestCase, main
 
 class Animal {
@@ -89,7 +90,7 @@ class Repo {
     def second[K, V](k: K, v: V) -> V {
         return v
     }
-    def fetch[T](rows: list[dict[str, Any]]) -> list[T] {
+    def fetch[T](rows: list[dict[str, Value]]) -> list[T] {
         return [T(**r) for r in rows]
     }
     def gather[T](xs: list[int]) -> list[T] {
@@ -270,7 +271,7 @@ class GenericsMethodTests(TestCase) {
 
     def test_comprehension_spread_materialization() {
         r: Repo = Repo()
-        rows: list[dict[str, Any]] = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+        rows: list[dict[str, Value]] = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
         custs: list[Customer] = r.fetch[Customer](rows)
         self.assertEqual(len(custs), 2)
         self.assertEqual(custs[0].id, 1)

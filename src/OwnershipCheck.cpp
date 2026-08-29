@@ -116,7 +116,7 @@ struct OwnershipCheck::Impl {
             case Type::Kind::Tuple:
             case Type::Kind::Instance:
             case Type::Kind::Function:
-            case Type::Kind::Any:
+            case Type::Kind::Boxed:
             case Type::Kind::Union:
             case Type::Kind::Lock:
                 return true;

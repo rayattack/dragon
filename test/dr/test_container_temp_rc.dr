@@ -1,6 +1,8 @@
 # Pre-fix: os.getcwd() returned glibc's malloc'd buffer as a DragonString
 # (the A/B-proven realpath corruption shape); every call leaked under LSan.
 
+type Boxed = int | float | bool | str | bytes | list[int] | list[float] | list[bool] | list[str] | list[list[int]] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed]
+
 from unittest import TestCase, main
 from collections import deque
 from os import getcwd
@@ -29,13 +31,13 @@ class TupleUnpackRcTests(TestCase) {
       - a BORROWED source (a named var) is NOT freed by the unpack (no double-free),
         and stays usable afterward.
 
-    Also pins tuple[Any, ...] literal construction (TupleAnyElemTests). An Any
+    Also pins tuple[Boxed, ...] literal construction (TupleAnyElemTests). An Boxed
     element arrives as a {tag, payload} box, and codegen passed the whole box to
     dragon_tuple_set, whose slot is an i64 - an LLVM verification failure on every
-    tuple literal with an Any element, e.g.:
+    tuple literal with an Boxed element, e.g.:
 
-        a: Any = 1
-        t: tuple[Any, int] = (a, 5)   # DRAGON SCALE ERROR before the fix
+        a: Boxed = 1
+        t: tuple[Boxed, int] = (a, 5)   # DRAGON SCALE ERROR before the fix
 
     The fix extracts the box's payload and runtime tag and routes them through
     dragon_tuple_set_tagged (mirroring the dict-literal box branch). RC: a payload
@@ -104,21 +106,21 @@ class TupleUnpackRcTests(TestCase) {
 }
 
 
-def mk_any_str_tuple(i: int) -> tuple[Any, int] {
+def mk_any_str_tuple(i: int) -> tuple[Boxed, int] {
     # The heap str is boxed from a local that DIES at return - the tuple must
     # own its own ref or t[0] is a use-after-free in the caller.
     s: str = "hydra" + str(i)
-    a: Any = s
+    a: Boxed = s
     return (a, i)
 }
 
 
 class TupleAnyElemTests(TestCase) {
     def test_boxed_scalar_element() {
-        a: Any = 1
-        t: tuple[Any, int] = (a, 5)
+        a: Boxed = 1
+        t: tuple[Boxed, int] = (a, 5)
         self.assertEqual(t[1], 5)
-        e: Any = t[0]
+        e: Boxed = t[0]
         matched: bool = False
         if isinstance(e, int) {
             ei: int = e
@@ -132,8 +134,8 @@ class TupleAnyElemTests(TestCase) {
         got: str = ""
         i: int = 0
         while i < 200 {
-            t: tuple[Any, int] = mk_any_str_tuple(i)
-            e: Any = t[0]
+            t: tuple[Boxed, int] = mk_any_str_tuple(i)
+            e: Boxed = t[0]
             if isinstance(e, str) {
                 got = e
             }
@@ -146,10 +148,10 @@ class TupleAnyElemTests(TestCase) {
         # Both the tuple's element ref and the original slots decref at scope
         # exit; without the borrowed-box incref that is a double-free.
         s: str = "al" + "pha"
-        a: Any = s
-        t: tuple[Any, int] = (a, 1)
+        a: Boxed = s
+        t: tuple[Boxed, int] = (a, 1)
         self.assertEqual(s, "alpha")
-        e: Any = t[0]
+        e: Boxed = t[0]
         matched: bool = False
         if isinstance(e, str) {
             es: str = e
@@ -160,14 +162,14 @@ class TupleAnyElemTests(TestCase) {
     }
 
     def test_boxed_list_element() {
-        xs: list[Any] = [1, 2, 3]
-        a: Any = xs
-        t: tuple[Any, int] = (a, 4)
+        xs: list[Boxed] = [1, 2, 3]
+        a: Boxed = xs
+        t: tuple[Boxed, int] = (a, 4)
         self.assertEqual(t[1], 4)
-        e: Any = t[0]
+        e: Boxed = t[0]
         matched: bool = False
         if isinstance(e, list) {
-            el: list[Any] = e
+            el: list[int] = e
             self.assertEqual(len(el), 3)
             matched = True
         }
@@ -176,9 +178,9 @@ class TupleAnyElemTests(TestCase) {
 
     def test_concrete_str_in_any_slot() {
         s: str = "hy" + "dra"
-        t: tuple[Any, int] = (s, 5)
+        t: tuple[Boxed, int] = (s, 5)
         self.assertEqual(t[1], 5)
-        e: Any = t[0]
+        e: Boxed = t[0]
         matched: bool = False
         if isinstance(e, str) {
             es: str = e
@@ -190,12 +192,12 @@ class TupleAnyElemTests(TestCase) {
     }
 
     def test_nested_list_literal_in_any_slot_born_boxed() {
-        u: tuple[Any, int] = ([1, 2], 6)
+        u: tuple[Boxed, int] = ([1, 2], 6)
         self.assertEqual(u[1], 6)
-        e: Any = u[0]
+        e: Boxed = u[0]
         matched: bool = False
         if isinstance(e, list) {
-            el: list[Any] = e
+            el: list[int] = e
             self.assertEqual(len(el), 2)
             matched = True
         }

@@ -1,3 +1,4 @@
+from database.base import Value
 from time import now
 from hashlib import hexdigest
 from database import SQL, Results
@@ -30,7 +31,7 @@ class RegistryService {
     }
 
     def signature_for(name: str, version: str) -> tuple[str, str] {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select signed_by, signature from version_signatures where name = !{name} and version = !{version}
         })
         if len(rows) == 0 {
@@ -98,7 +99,7 @@ class RegistryService {
         if pid == 0 {
             return ""
         }
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select hash from versions where package_id = !{pid} and version = !{version}
         })
         if len(rows) == 0 {
@@ -154,7 +155,7 @@ class RegistryService {
     }
 
     def describe(name: str) -> str {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select description from packages where name = !{name}
         })
         if len(rows) == 0 {
@@ -165,7 +166,7 @@ class RegistryService {
     }
 
     def _package_id(name: str) -> int {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select id from packages where name = !{name}
         })
         if len(rows) == 0 {
@@ -176,7 +177,7 @@ class RegistryService {
     }
 
     def _package_owner(pid: int) -> int {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select owner_id from packages where id = !{pid}
         })
         if len(rows) == 0 {
@@ -196,7 +197,7 @@ class RegistryService {
     }
 
     def _version_exists(pid: int, version: str) -> bool {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select 1 from versions where package_id = !{pid} and version = !{version}
         })
         return len(rows) > 0

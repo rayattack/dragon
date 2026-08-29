@@ -150,7 +150,7 @@ match value {
 
 Supported patterns today: **literals** (`0`, `"hi"`, `True`, `None`),
 **type tests** (`case int()`, `case str()`, `case MyClass()` - a type
-test matches by runtime tag for a `Union`/`Any` subject and by a
+test matches by runtime tag for a `Union`/`Data` subject and by a
 non-null check for a `Class | None`, and an instance of a subclass
 matches its base), **OR-patterns** (`case int() | bool()`), **sequence**
 patterns (`case [a, b]` / `case (a, b)`), **capture** (`case n`, binds),

@@ -17,11 +17,11 @@ Contents (Decision 049 surface):
                       per-backend `run`/`raw` primitives (virtual dispatch, D026).
   - `Tx`            - a `with db.transaction() as tx { ... }` scope.
 
-Result rows are `dict[str, Any]` (column name -> native value). The typed fetch
+Result rows are `dict[str, Value]` (column name -> native value). The typed fetch
 verbs materialize each row via the call-site `**`-spread (D047): `T` is supplied
 explicitly (`db.one[Customer](sql)`) or inferred from the binding annotation
-(`c: Customer = db.one(sql)`); a bare `row: dict[str, Any] = db.one(sql)` infers
-`T = dict[str, Any]`, which copies the row.
+(`c: Customer = db.one(sql)`); a bare `row: dict[str, Value] = db.one(sql)` infers
+`T = dict[str, Value]`, which copies the row.
 """
 
 from template import Template
@@ -29,8 +29,12 @@ from template import Template
 extern "C" def dragon_str_fnv1a(s: str) -> int
 
 
+# The closed value domain of a SQL parameter or result column: what a driver
+# can bind and what a row hands back.
+type Value = int | float | bool | str | bytes | none
+
 class SQL(Template) {
-    def(canonical: str, phash: int, params: list[Any]) {
+    def(canonical: str, phash: int, params: list[Value]) {
         self.canonical = canonical
         self.hash = phash
         self.params = params
@@ -45,7 +49,7 @@ class SQL(Template) {
     }
 
     @staticmethod
-    def build(canonical: str, params: list[Any]) -> SQL {
+    def build(canonical: str, params: list[Value]) -> SQL {
         return SQL(canonical, dragon_str_fnv1a(canonical), params)
     }
 }
@@ -58,7 +62,7 @@ class MultipleRows(QueryError) {}
 class TxError(DatabaseError) {}
 
 class Results {
-    def(rows: list[dict[str, Any]], xid: int, ran: int) {
+    def(rows: list[dict[str, Value]], xid: int, ran: int) {
         self._rows = rows
         self.xid = xid
         self.ran = ran
@@ -89,9 +93,9 @@ class Results {
         if len(self._rows) > 1 {
             raise MultipleRows("query returned more than one row")
         }
-        row: dict[str, Any] = self._rows[0]
+        row: dict[str, Value] = self._rows[0]
         for k in row {
-            v: Any = row[k]
+            v: Value = row[k]
             return v
         }
         raise QueryError("scalar query returned a row with no columns")

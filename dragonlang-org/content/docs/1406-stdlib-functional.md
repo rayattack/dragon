@@ -24,7 +24,7 @@ function, Dragon ships a *monomorphic* one - typically the `int` case,
 with `float` and `str` variants under suffixed names where the operation
 is ambiguous. That is the price of zero-overhead, statically-typed
 functional code, and these modules pay it deliberately rather than
-boxing everything into `Any`. Read each module's real signatures below;
+boxing everything into `Data`. Read each module's real signatures below;
 they are not always the Python ones.
 
 ## `itertools` - eager sequence builders
@@ -87,7 +87,7 @@ The headline export is `reduce`, in three concrete forms. `cache` and
 `lru_cache` are not in this module, and `partial`/`wraps` are
 intentionally omitted - all three need first-class closures over
 arbitrary signatures, which awaits a generic-functions language feature.
-Shipping them as `Any`-boxed stubs would violate the no-workaround rule.
+Shipping them as `Data`-boxed stubs would violate the no-workaround rule.
 
 | Function | Signature | Notes |
 |---|---|---|

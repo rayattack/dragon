@@ -1,3 +1,4 @@
+from database.base import Value
 from hashlib import hexdigest
 from crypto import ed25519_sign, ed25519_public_key
 from database import SQL, Results
@@ -39,7 +40,7 @@ class TranslogService {
     }
 
     def _head() -> str {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select chain_head from transparency_log order by seq desc limit 1
         })
         if len(rows) == 0 {
@@ -68,7 +69,7 @@ class TranslogService {
     }
 
     def size() -> int {
-        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+        const rows: list[dict[str, Value]] = self.db.conn.all[dict[str, Value]](template[SQL] {
             select count(*) as n from transparency_log
         })
         const n: int = rows[0]["n"]

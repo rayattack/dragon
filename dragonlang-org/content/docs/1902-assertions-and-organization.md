@@ -49,7 +49,7 @@ beyond the one-liner.
 
 ### Equality is deep
 
-`assertEqual` compares through `Any`, so it recurses into containers. Two
+`assertEqual` compares through `Data`, so it recurses into containers. Two
 distinct list allocations holding the same elements are equal, exactly as
 in Python:
 

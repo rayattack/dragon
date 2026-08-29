@@ -1059,7 +1059,7 @@ class Router {
     }
 
     def _match_before(path: str, sd: str) -> list[MiddlewareEntry] {
-        # Concrete element type: a bare `list` boxes each MiddlewareEntry to Any, and calling
+        # Concrete element type: a bare `list` boxes each MiddlewareEntry, and calling
         # `mw.handler` on the boxed instance mishandles its refcount (heap UAF after a few requests).
         const matched: list[MiddlewareEntry] = []
         if sd not in self._before_by_sd {

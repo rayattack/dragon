@@ -1330,7 +1330,7 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             if (auto* st = dynamic_cast<StarredExpr*>(node.args[i].get())) {
                 auto* lt = dynamic_cast<ListType*>(st->value->type.get());
                 bool srcConcrete = lt && lt->elementType &&
-                    lt->elementType->kind() != Type::Kind::Any;
+                    lt->elementType->kind() != Type::Kind::Boxed;
                 int64_t srcTag = srcConcrete
                     ? impl_->typeKindToTag(lt->elementType->kind()) : -1;
                 if (lt && !vaInfo.varArgElemIsAny && srcConcrete &&
@@ -1801,8 +1801,8 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                     return fail("`*list` spread cannot be combined with keyword "
                                 "arguments", st->location());
                 auto et = lt->elementType;
-                if (et && et->kind() == Type::Kind::Any)
-                    return fail("`*list[Any]` spread is not supported; use a "
+                if (et && et->kind() == Type::Kind::Boxed)
+                    return fail("`*list[<union>]` spread is not supported; use a "
                                 "concrete element type or `*tuple`",
                                 st->location());
                 int64_t R = (int64_t)numParams - (int64_t)args.size();

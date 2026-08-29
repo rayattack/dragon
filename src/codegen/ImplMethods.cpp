@@ -14,7 +14,7 @@ Type::Kind CodeGen::Impl::elemVarKindToTypeKind(VarKind ek) {
             case VarKind::Set:           return Type::Kind::Set;
             case VarKind::ClassInstance: return Type::Kind::Instance;
             case VarKind::Closure:       return Type::Kind::Function;
-            case VarKind::Union:         return Type::Kind::Any;
+            case VarKind::Union:         return Type::Kind::Boxed;
             default:                     return Type::Kind::Int;
         }
     }
@@ -300,7 +300,7 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                             lt->elementType->kind() == Type::Kind::Instance;
                         if (!elemIsInstance) staleElem = true;
                     } else if (rk != Type::Kind::Unknown &&
-                               rk != Type::Kind::Any) {
+                               rk != Type::Kind::Boxed) {
                         staleElem = true;
                     }
                 }
@@ -925,7 +925,7 @@ int64_t CodeGen::Impl::typeKindToElemTag(dragon::Type::Kind k) {
             case Type::Kind::Function: return TAG_CALLABLE;
             case Type::Kind::None_:    return TAG_NONE;
             case Type::Kind::Int:
-            case Type::Kind::Any:
+            case Type::Kind::Boxed:
             case Type::Kind::Unknown:
             default:                   return TAG_INT;
         }
@@ -938,7 +938,7 @@ std::string CodeGen::Impl::containerReprFn(Expr* e) {
         VarKind vk = resolveExprVarKind(e);
         if (vk == VarKind::List || dynamic_cast<ListExpr*>(e) ||
             dynamic_cast<ListCompExpr*>(e)) {
-            if (getIterableElementKind(e) == Type::Kind::Any)
+            if (isBoxedKind(getIterableElementKind(e)))
                 return "dragon_list_box_to_str";
             return "dragon_list_to_str";
         }
@@ -973,7 +973,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
             case Type::Kind::Instance: return VarKind::ClassInstance;
             case Type::Kind::Contract: return VarKind::ClassInstance;
             case Type::Kind::Function: return VarKind::Closure;
-            case Type::Kind::Any:      return VarKind::Union;
+            case Type::Kind::Boxed:
+            case Type::Kind::Union:      return VarKind::Union;
             default:                   return VarKind::Int;
         }
     }
@@ -993,7 +994,8 @@ llvm::Type* CodeGen::Impl::typeKindToLLVM(Type::Kind k) const {
             case Type::Kind::Contract:
             case Type::Kind::Module:
             case Type::Kind::Class:    return i8PtrType;
-            case Type::Kind::Any:      return boxType;
+            case Type::Kind::Boxed:
+            case Type::Kind::Union:      return boxType;
             default:                   return i64Type;
         }
     }
@@ -1010,9 +1012,10 @@ bool CodeGen::Impl::isHeapTypeKind(Type::Kind k) {
             // A `for f in list[Callable]` elem must be BORROWED (the list owns it),
             // else per-iteration cleanup frees a closure the list still holds (UAF).
             case Type::Kind::Function:
-            // list[Any] iteration elements are BORROWED boxes (the list keeps the
-            // +1); else per-iteration cleanup double-frees on list destroy (the JSON UAF).
-            case Type::Kind::Any:
+            // Boxed-element iteration yields BORROWED boxes (the list keeps the
+            // +1); else per-iteration cleanup double-frees on list destroy.
+            case Type::Kind::Boxed:
+            case Type::Kind::Union:
                 return true;
             default:
                 return false;

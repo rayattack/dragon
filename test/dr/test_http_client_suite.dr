@@ -1,3 +1,4 @@
+from json import Data
 from unittest import TestCase, main
 from http import get, post, delete, Client, Response, HTTPStatusError
 from http.client import HTTPConnection, HTTPResponse
@@ -122,7 +123,7 @@ class RequestApiTests(TestCase) {
         r: Response = await get("http://127.0.0.1:19181/j")
         await srv
         lis.close()
-        decoded: dict[str, Any] = r.json()
+        decoded: dict[str, Data] = r.json()
         self.assertEqual(decoded["tag"], "ok")
         self.assertEqual(decoded["n"], 7)
     }
@@ -132,7 +133,7 @@ class RequestApiTests(TestCase) {
         lis.bind()
         lis.listen(1)
         srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 201 Created", "", "{}")
-        payload: dict[str, Any] = {"name": "Ada", "admin": True}
+        payload: dict[str, Data] = {"name": "Ada", "admin": True}
         r: Response = await post("http://127.0.0.1:19182/users", json=payload)
         captured: str = await srv
         lis.close()

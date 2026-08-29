@@ -12,7 +12,7 @@ What it implements:
     placeholders are rewritten to Postgres's `$N+1`, and the payload never
     touches the SQL text, so injection-safety is structural.
   - oid -> Dragon type mapping for result columns (int / float / bool / str /
-    NULL) into `dict[str, Any]` rows.
+    NULL) into `dict[str, Value]` rows.
 
 Postgres returns result columns in TEXT format here, so no binary float decode
 is needed (that requirement is unique to the MySQL binary protocol).
@@ -22,7 +22,7 @@ PgConnection used from a `fire` green thread cooperates with the runtime
 scheduler for free (ADR 038 Phase 8).
 """
 
-from database.base import Connection, SQL, Results, QueryError, ConnectionError
+from database.base import Connection, SQL, Results, QueryError, ConnectionError, Value
 from socket import TcpStream
 from ssl import SSLContext, SSLSocket, PROTOCOL_TLS_CLIENT, CERT_NONE
 from hmac import digest as hmac_digest
@@ -324,7 +324,7 @@ class PgConnection(Connection) {
         return sql
     }
 
-    def _param_text(p: Any) -> str {
+    def _param_text(p: Value) -> str {
         if isinstance(p, bool) {
             b: bool = p
             if b {
@@ -364,7 +364,7 @@ class PgConnection(Connection) {
         return "drs" + str(n)
     }
 
-    def _pipeline(name: str, sql: str, params: list[Any], parse: bool) -> list[dict[str, Any]] {
+    def _pipeline(name: str, sql: str, params: list[Value], parse: bool) -> list[dict[str, Value]] {
         np: int = len(params)
         nb: bytes = name.encode("utf-8")
         out: bytes = bytes()
@@ -374,7 +374,7 @@ class PgConnection(Connection) {
         bind: bytes = NUL + nb + NUL + _be16(0) + _be16(np)
         i: int = 0
         while i < np {
-            p: Any = params[i]
+            p: Value = params[i]
             if isinstance(p, bool) or isinstance(p, int) or isinstance(p, float) or isinstance(p, str) {
                 pv: bytes = self._param_text(p).encode("utf-8")
                 bind = bind + _be32(len(pv)) + pv
@@ -392,7 +392,7 @@ class PgConnection(Connection) {
 
         names: list[str] = []
         oids: list[int] = []
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Value]] = []
         self._affected = 0
         done: bool = False
         while not done {
@@ -417,7 +417,7 @@ class PgConnection(Connection) {
                 p: bytes = m.payload
                 nc: int = _rd_u16(p, 0)
                 o: int = 2
-                row: dict[str, Any] = {}
+                row: dict[str, Value] = {}
                 c: int = 0
                 while c < nc {
                     ln: int = _rd_u32(p, o)
@@ -466,29 +466,29 @@ class PgConnection(Connection) {
         return rows
     }
 
-    def _run(canonical: str, params: list[Any]) -> list[dict[str, Any]] {
+    def _run(canonical: str, params: list[Value]) -> list[dict[str, Value]] {
         if canonical in self._stmt_cache {
             return self._pipeline(self._stmt_cache[canonical], "", params, False)
         }
         name: str = self._next_name()
         sql: str = self._to_pg(canonical, len(params))
-        rows: list[dict[str, Any]] = self._pipeline(name, sql, params, True)
+        rows: list[dict[str, Value]] = self._pipeline(name, sql, params, True)
         self._stmt_cache[canonical] = name
         return rows
     }
 
     def run(sql: SQL) -> Results {
-        rows: list[dict[str, Any]] = self._run(sql.canonical, sql.params)
+        rows: list[dict[str, Value]] = self._run(sql.canonical, sql.params)
         return Results(rows, self._returned_id(rows), self._affected)
     }
 
-    def _returned_id(rows: list[dict[str, Any]]) -> int {
+    def _returned_id(rows: list[dict[str, Value]]) -> int {
         if len(rows) == 0 {
             return 0
         }
-        row: dict[str, Any] = rows[0]
+        row: dict[str, Value] = rows[0]
         if "id" in row {
-            v: Any = row["id"]
+            v: Value = row["id"]
             if isinstance(v, int) {
                 iv: int = v
                 return iv
@@ -496,7 +496,7 @@ class PgConnection(Connection) {
             return 0
         }
         for k in row {
-            fv: Any = row[k]
+            fv: Value = row[k]
             if isinstance(fv, int) {
                 fid: int = fv
                 return fid
@@ -508,7 +508,7 @@ class PgConnection(Connection) {
 
     def raw(text: str) -> Results {
         self._pipeline("", text, [], True)
-        empty: list[dict[str, Any]] = []
+        empty: list[dict[str, Value]] = []
         return Results(empty, 0, self._affected)
     }
 

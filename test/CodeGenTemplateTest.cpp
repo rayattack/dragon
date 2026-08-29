@@ -604,6 +604,22 @@ TEST(CodeGenTest, TemplateSpreadDesugarsToJoinIR) {
         << "Spread must lower to dragon_str_join_ptr\nIR:\n" << ir;
 }
 
+TEST(CodeGenTest, UntypedStrSpreadKeepsSingleJoinCall) {
+    auto ir = generateIR(code("template_spread_desugars_to_join_ir"));
+    EXPECT_EQ(ir.find("tpl.join.body"), std::string::npos)
+        << "An untyped list[str] spread must stay one join call, no loop\nIR:\n"
+        << ir;
+}
+
+TEST(CodeGenTest, TypedSpreadRendersEachElementThroughEscape) {
+    auto ir = generateIR(code("template_spread_typed_escapes_elements_ir"));
+    EXPECT_NE(ir.find("tpl.join.body"), std::string::npos)
+        << "A spread inside a typed template must render element by element\nIR:\n"
+        << ir;
+    EXPECT_NE(ir.find("escape"), std::string::npos)
+        << "Each element must travel the content type's escape\nIR:\n" << ir;
+}
+
 TEST(CodeGenE2E, TemplateBlockNestedLoops) {
     auto output = compileAndRun(code("template_block_nested_loops"));
     EXPECT_EQ(output, "[r1:c1,c2,][r2:c1,c2,]\n");
@@ -645,14 +661,14 @@ static const std::string SQL_TPL_BASE =
     "    def __str__() -> str { return self._inner }\n"
     "}\n"
     "class SQL(Template) {\n"
-    "    def(canonical: str, phash: int, params: list[Any]) {\n"
+    "    def(canonical: str, phash: int, params: list[int | str]) {\n"
     "        self.canonical = canonical\n"
     "        self.hash = phash\n"
     "        self.params = params\n"
     "    }\n"
     "    def __str__() -> str { return self.canonical }\n"
     "    @staticmethod\n"
-    "    def build(canonical: str, params: list[Any]) -> SQL {\n"
+    "    def build(canonical: str, params: list[int | str]) -> SQL {\n"
     "        return SQL(canonical, 0, params)\n"
     "    }\n"
     "}\n";

@@ -2,6 +2,7 @@ from unittest import TestCase, main
 import json
 from math import nan
 from json import Schema, ValidationResult
+from json import Data
 
 class Customer {
     id: int
@@ -13,8 +14,8 @@ class Customer {
 }
 
 class Results {
-    rows: list[dict[str, Any]]
-    def(rows: list[dict[str, Any]]) {
+    rows: list[dict[str, Data]]
+    def(rows: list[dict[str, Data]]) {
         self.rows = rows
     }
     def one[T]() -> T {
@@ -97,20 +98,20 @@ class DictGetOptionalTests(TestCase) {
     }
 
     def test_any_valued_keeps_its_tag() {
-        d: dict[str, Any] = {n: 10, s: "string", b: True}
+        d: dict[str, Data] = {n: 10, s: "string", b: True}
         self.assertEqual(str(d.get("s")), "string")
         self.assertEqual(str(d.get("n")), "10")
         self.assertEqual(str(d.get("b")), "True")
     }
 
     def test_any_valued_default_keeps_its_tag() {
-        d: dict[str, Any] = {s: "string"}
+        d: dict[str, Data] = {s: "string"}
         self.assertEqual(str(d.get("s", "fallback")), "string")
         self.assertEqual(str(d.get("zz", "fallback")), "fallback")
     }
 
     def test_any_valued_miss_is_none() {
-        d: dict[str, Any] = {s: "string"}
+        d: dict[str, Data] = {s: "string"}
         self.assertTrue(d.get("zz") is none)
     }
 
@@ -415,7 +416,7 @@ class DictSpreadTests(TestCase) {
 
     Also covers the D049 materialization shape: a single generic method
     `def one[T]() -> T { return T(**row) }` serving BOTH a typed class fetch
-    (`T(**row)`) and the untyped `T = dict[str, Any]` path (`dict(**row)`).
+    (`T(**row)`) and the untyped `T = dict[str, Data]` path (`dict(**row)`).
     """
 
     def test_literal_single_spread() {
@@ -441,8 +442,8 @@ class DictSpreadTests(TestCase) {
     }
 
     def test_call_single_spread() {
-        row: dict[str, Any] = {"id": 1, "name": "a"}
-        m: dict[str, Any] = dict(**row)
+        row: dict[str, Data] = {"id": 1, "name": "a"}
+        m: dict[str, Data] = dict(**row)
         self.assertEqual(len(m), 2)
     }
 
@@ -478,7 +479,7 @@ class DictSpreadTests(TestCase) {
 
     def test_d049_untyped_dict_path() {
         res: Results = Results([{"id": 2, "name": "bob"}])
-        row: dict[str, Any] = res.one()
+        row: dict[str, Data] = res.one()
         self.assertEqual(row["name"], "bob")
     }
 }
@@ -498,9 +499,9 @@ class TestTypedReads(TestCase) {
     You did nothing wrong - the store side tagged instance values TAG_LIST=5
     (the list elem_tag mapping) while annotated reads expected TAG_CLASS=7 (the
     box-domain mapping). The same split made isinstance miss on instances held in
-    dict[str, Any], sent print(d) and json.dumps(d) walking the instance as a
+    dict[str, Data], sent print(d) and json.dumps(d) walking the instance as a
     LIST (ASan heap-buffer-overflow), and an append-tracking heuristic clobbered
-    declared list[Any] receivers into the native-pointer append (another OOB).
+    declared list[Data] receivers into the native-pointer append (another OOB).
     All instance values now carry TAG_CLASS=7; print renders <Thing instance>;
     json.dumps raises a catchable TypeError (Python parity)
     """
@@ -579,9 +580,9 @@ class TestLifetimes(TestCase) {
 
 class TestBoxDomains(TestCase) {
     def test_anydict_isinstance_narrow() -> None {
-        d: dict[str, Any] = {}
+        d: dict[str, Data] = {}
         d["t"] = Thing(21)
-        const v: Any = d["t"]
+        const v: Data = d["t"]
         hit: bool = False
         if isinstance(v, Thing) {
             const t: Thing = v
@@ -592,9 +593,9 @@ class TestBoxDomains(TestCase) {
     }
 
     def test_listany_append_instance() -> None {
-        l: list[Any] = []
+        l: list[Data] = []
         l.append(Thing(3))
-        const v: Any = l[0]
+        const v: Data = l[0]
         hit: bool = False
         if isinstance(v, Thing) {
             const t: Thing = v

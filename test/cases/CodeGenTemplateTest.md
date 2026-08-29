@@ -294,3 +294,17 @@ y: str = template {!{
 }}
 print(y)
 ```
+
+#### :template_spread_typed_escapes_elements_ir
+
+A spread inside a typed template renders each element at its static type and
+pushes it through the content type's `escape`, exactly like the loop form. The
+old lowering handed the whole list to `join`, which read each element as a C
+string.
+
+```dr
+from html import HTML
+
+items: list[str] = ["a", "b"]
+page: HTML = template[HTML] {<p>!{*items}</p>}
+```

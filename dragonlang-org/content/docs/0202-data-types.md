@@ -93,7 +93,7 @@ Operations: `append`, `extend`, `insert`, `remove`, `pop`, `index`,
 `count`, `sort`, `reverse`, `clear`. Slicing and concatenation work as
 in Python.
 
-If you need a sequence with mixed types, use `list[Any]` or a `tuple`.
+If you need a sequence with mixed types, use `list[Data]` or a `tuple`.
 
 ## Dicts
 

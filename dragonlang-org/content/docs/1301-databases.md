@@ -14,12 +14,13 @@ to install, nothing to `pip`, and no code path that concatenates user input into
 ```dragon
 import database
 from database import SQL
+from json import Data
 
 with database.open("sqlite::memory:") as db {
     db.raw("create table products(id integer primary key, name text, price real)")
     db.run(template[SQL] { insert into products(name, price) values(!{"pen"}, !{1.5}) })
 
-    top: dict[str, Any] = db.one(template[SQL] {
+    top: dict[str, Data] = db.one(template[SQL] {
         select name, price from products order by price desc limit 1
     })
     print(top.name, top.price)   # pen 1.5
@@ -52,9 +53,9 @@ cover everything, and the fetch verbs are **generic in the row type**.
 
 ```dragon
 # doc: no-check
-rows: list[dict[str, Any]] = db.all(template[SQL] { select id, name from players })
+rows: list[dict[str, Data]] = db.all(template[SQL] { select id, name from players })
 
-player: dict[str, Any] = db.one(template[SQL] { select id, name from players where id = !{pid} })
+player: dict[str, Data] = db.one(template[SQL] { select id, name from players where id = !{pid} })
 
 total: int = db.val(template[SQL] { select count(*) from players })
 ```
@@ -107,14 +108,14 @@ pass user input through `raw`; that's exactly the door `template[SQL]` closes.
 
 ## Rows are dictionaries
 
-A row is a `dict[str, Any]` keyed by column name, each value at its native type
+A row is a `dict[str, Data]` keyed by column name, each value at its native type
 (`int`, `float`, `str`, or `none` for SQL `NULL`). Dragon dicts support
 [dot-access](/docs/0502-dictionaries) for identifier keys, so both forms read the
 same value:
 
 ```dragon
 # doc: no-check
-r: dict[str, Any] = db.one(template[SQL] { select id, name from players where id = !{pid} })
+r: dict[str, Data] = db.one(template[SQL] { select id, name from players where id = !{pid} })
 print(r["name"])   # subscript - works for any key
 print(r.name)      # dot-access - cleaner for identifier columns
 ```
@@ -124,7 +125,7 @@ mind the quotes: `f"{r['name']}"` or `f"{r.name}"`, not `f"{r["name"]}"`.)
 
 ## Typed rows: `db.all[Customer](...)`
 
-`dict[str, Any]` is convenient but untyped. For a typed value, define a `TypedDict`
+`dict[str, Data]` is convenient but untyped. For a typed value, define a `TypedDict`
 and ask the fetch verb for it with `[T]`:
 
 ```dragon
@@ -175,7 +176,7 @@ Everything the layer raises descends from `DatabaseError`, so one
 from database import DatabaseError, NoRows, MultipleRows
 
 try {
-    row: dict[str, Any] = db.one(template[SQL] { select id from customers where email = !{email} })
+    row: dict[str, Data] = db.one(template[SQL] { select id from customers where email = !{email} })
 } except NoRows {
     print("no customer with that email")
 } except MultipleRows {

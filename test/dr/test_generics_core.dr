@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 class Box[T] {
@@ -193,11 +195,11 @@ class GenericsFunctionTests(TestCase) {
 }
 
 class GenericsTransitiveTests(TestCase) {
-    """Decision 044 - transitive instantiation + composition with Any.
+    """Decision 044 - transitive instantiation + composition with Boxed.
 
     Instantiating `Outer[int]` must auto-stamp the `Inner[int]` it holds (the
     worklist follows the dependency). `Pair[K, V]` exercises multi-parameter
-    stamping. `Box[Any]` composes the monomorphized container with the D039 box for
+    stamping. `Box[Boxed]` composes the monomorphized container with the D039 box for
     a genuinely heterogeneous element - monomorphize the container, box the element.
     """
 
@@ -218,7 +220,7 @@ class GenericsTransitiveTests(TestCase) {
     }
 
     def test_box_any_holds_int() {
-        b: Box[Any] = Box[Any](7)
+        b: Box[Boxed] = Box[Boxed](7)
         self.assertEqual(b.get(), 7)
     }
 

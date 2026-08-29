@@ -1,7 +1,7 @@
 from urllib.parse import unquote_plus, parse_qsl
 from http.multipart import parse_multipart, boundary_from_content_type, Part
 from http.sessions import Session
-from json import loadb
+from json import loadb, Data
 
 extern "C" def dragon_str_contains(a: str, b: str) -> int
 extern "C" def dragon_str_find(haystack: str, needle: str) -> int
@@ -325,7 +325,7 @@ class Request {
         self._csrf_token: str = ""
     }
 
-    def json() -> Any {
+    def json() -> Data {
         return loadb(self.body_bytes)
     }
 

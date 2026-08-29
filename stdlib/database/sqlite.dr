@@ -9,7 +9,7 @@ C ints are i32 (intc); rowids and bound/read integers use the 64-bit variants
 so Dragon's i64 `int` round-trips losslessly.
 """
 
-from database.base import Connection, SQL, Results, QueryError, ConnectionError
+from database.base import Connection, SQL, Results, QueryError, ConnectionError, Value
 
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
@@ -83,7 +83,7 @@ class SqliteConnection(Connection) {
         }
         i: int = 0
         while i < nparams {
-            p: Any = sql.params[i]
+            p: Value = sql.params[i]
             idx: int = i + 1
             if isinstance(p, bool) {
                 b: bool = p
@@ -109,8 +109,8 @@ class SqliteConnection(Connection) {
         return stmt
     }
 
-    def _read_row(stmt: ptr, names: list[str]) -> dict[str, Any] {
-        row: dict[str, Any] = {}
+    def _read_row(stmt: ptr, names: list[str]) -> dict[str, Value] {
+        row: dict[str, Value] = {}
         ncol: int = len(names)
         c: int = 0
         while c < ncol {
@@ -146,7 +146,7 @@ class SqliteConnection(Connection) {
         stmt: ptr = self._prepare(sql)
         defer sqlite3_finalize(stmt)
         names: list[str] = self._column_names(stmt)
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Value]] = []
         rc: int = sqlite3_step(stmt)
         while rc == SQLITE_ROW {
             rows.append(self._read_row(stmt, names))
@@ -163,7 +163,7 @@ class SqliteConnection(Connection) {
         if rc != SQLITE_OK {
             raise QueryError(sqlite3_errmsg(self.db))
         }
-        empty: list[dict[str, Any]] = []
+        empty: list[dict[str, Value]] = []
         return Results(empty, sqlite3_last_insert_rowid(self.db), sqlite3_changes(self.db))
     }
 

@@ -66,7 +66,7 @@ for w in shout(["one", "two", "three"]) {
 
 Generators are designed to be consumed by `for`. That is the supported
 mechanism: there is **no `next()` builtin**, and a generator object can only
-be bound to an `Any`-typed variable (`g: Any = count_up(4)`), so the idiomatic
+be bound to an boxed variable (`g: Any = count_up(4)`), so the idiomatic
 form is to iterate the call directly - `for v in count_up(4)`. You can `yield`
 the result of an expression - `for w in text.split(" ") { yield w.upper() }`
 yields each transformed value - just as you can `yield` a parameter or a
@@ -116,7 +116,7 @@ local variables says it more directly.
 | A lazy sequence | a generator: `def g() { yield ... }` |
 | Yield a transformed value | `yield f"{w}!"` (any expression) |
 | Consume a generator | `for v in g() { ... }` (no `next()`) |
-| Hold a generator object | `g: Any = count_up(4)` (only `Any`-typed) |
+| Hold a generator object | `g: Any = count_up(4)` (only boxed) |
 | Make a class iterable | `__iter__` returns the iterator, `__next__` yields values |
 | Signal exhaustion | `raise StopIteration()` from `__next__` |
 

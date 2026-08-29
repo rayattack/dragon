@@ -1,3 +1,5 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 
@@ -88,15 +90,15 @@ class ListComparisonTests(TestCase) {
     }
 
     def test_any_boxed_lists() {
-        x: Any = [1, 2]
-        y: Any = [1, 3]
+        x: Boxed = [1, 2]
+        y: Boxed = [1, 3]
         self.assertTrue(x < y)
         self.assertFalse(y < x)
     }
 
     def test_incomparable_elements_raise() {
-        a: list[Any] = [1]
-        b: list[Any] = ["a"]
+        a: list[Boxed] = [1]
+        b: list[Boxed] = ["a"]
         raised: bool = False
         try {
             print(a < b)
@@ -124,7 +126,7 @@ class ListConcatSortExtendTests(TestCase) {
 
     All three are exercised across int / str / float (the three monomorphic list
     variants - DragonList / DragonListPtr / DragonListF64) and homogeneous
-    list[Any] (the box variant), since each variant has a distinct runtime layout.
+    list[Boxed] (the box variant), since each variant has a distinct runtime layout.
     """
 
     def test_sorted_reverse_int() {
@@ -241,15 +243,15 @@ class ListConcatSortExtendTests(TestCase) {
     }
 
     def test_any_concat() {
-        a: list[Any] = [1, "two", 3.0]
-        b: list[Any] = [True, "four"]
-        c: list[Any] = a + b
+        a: list[Boxed] = [1, "two", 3.0]
+        b: list[Boxed] = [True, "four"]
+        c: list[Boxed] = a + b
         self.assertEqual(len(c), 5)
     }
 
     def test_any_augconcat_and_extend() {
-        a: list[Any] = [1, "two"]
-        x: list[Any] = [100, "x"]
+        a: list[Boxed] = [1, "two"]
+        x: list[Boxed] = [100, "x"]
         a.extend(x)
         a += [99]
         self.assertEqual(len(a), 5)
@@ -342,7 +344,7 @@ class SortedLargeTests(TestCase) {
 
 
 class TupleBuiltinType(TestCase) {
-    """tuple([...]) from a list literal is typed as a concrete tuple, not Any.
+    """tuple([...]) from a list literal is typed as a concrete tuple, not Boxed.
 
     Regression: the tuple() builtin call fell through the checker's builtin
     return-type block to Unknown, so `print(tuple([1, 2]))` rendered blank (print

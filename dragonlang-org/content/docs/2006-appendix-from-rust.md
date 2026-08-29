@@ -186,7 +186,7 @@ couple of features Dragon does not have:
   supported yet - a clean compile error, never a miscompile.
 
 Where you genuinely need *dynamic* typing rather than parametric polymorphism,
-`Any` and pipe-unions (`int | str`) fill that separate gap:
+`Data` and pipe-unions (`int | str`) fill that separate gap:
 
 ```dragon
 # Dragon: a pipe-union is dynamic, not generic - narrow with isinstance
@@ -412,7 +412,7 @@ than to dynamic Python.
 | Move semantics | Values move by default | No moves - references are shared |
 | Errors | `Result<T, E>` + `?`, no exceptions | Exceptions: `raise`/`try`/`except` |
 | Generics | `fn f<T>()`, monomorphized | `def f[T]()` / `class Box[T]`, monomorphized |
-| Dynamic types | `enum` / `dyn` | `int \| str` unions, `Any` |
+| Dynamic types | `enum` / `dyn` | `int \| str` unions, `Data` |
 | Polymorphism | Traits + `impl`, `dyn` | Classes + inheritance + vtables |
 | Concurrency | `async`/`await` + executor crate | Colorless `fire`/`await` green threads |
 | Thread safety | `Send`/`Sync`, compiler-proven | Locks, programmer-enforced |

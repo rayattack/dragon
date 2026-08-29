@@ -14,7 +14,7 @@ namespace dragon {
 
 static bool aggregateElemSupported(const std::string& fn, Type::Kind ek) {
     bool numeric = ek == Type::Kind::Int || ek == Type::Kind::Float ||
-                   ek == Type::Kind::Bool || ek == Type::Kind::Any ||
+                   ek == Type::Kind::Bool || ek == Type::Kind::Boxed ||
                    ek == Type::Kind::Unknown;
     return numeric || (fn != "sum" && ek == Type::Kind::Str);
 }
@@ -33,7 +33,7 @@ static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
     return nullptr;
 }
 
-static bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
+bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
     if (!ct.decl) return false;
     for (auto& base : ct.decl->bases) {
         if (auto* bn = dynamic_cast<NameExpr*>(base.get()))
@@ -44,7 +44,7 @@ static bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
     return false;
 }
 
-static bool hasDataclassDecorator(const ClassType& ct) {
+bool hasDataclassDecorator(const ClassType& ct) {
     if (!ct.decl) return false;
     for (auto& d : ct.decl->decorators) {
         if (auto* n = dynamic_cast<NameExpr*>(d.get()))
@@ -56,7 +56,7 @@ static bool hasDataclassDecorator(const ClassType& ct) {
     return false;
 }
 
-static bool derivesFromBuiltinException(const ClassType* c) {
+bool derivesFromBuiltinException(const ClassType* c) {
     int guard = 0;
     while (c && guard++ < 64) {
         if (isBuiltinExceptionName(c->name)) return true;
@@ -163,20 +163,66 @@ void TypeChecker::visit(CallExpr& node) {
                 error(node.location(),
                       "spread or keyword arguments are not supported when calling "
                       "the overloaded method '" + attr->attribute + "'");
-                node.type = impl_->anyType;
+                node.type = impl_->boxedType;
                 return;
             }
-            auto argMatch = [&](const std::shared_ptr<Type>& at,
+            // A container LITERAL is built in the parameter's layout from
+            // birth (section 7), so judge it element-wise rather than by
+            // whole-container subtyping: `{"a": 1}` fits a dict[str, Data]
+            // parameter even though dict[str, int] is not a subtype of it.
+            std::function<bool(Expr*, const std::shared_ptr<Type>&)> literalFits =
+                [&](Expr* e, const std::shared_ptr<Type>& want) -> bool {
+                if (!e || !want) return false;
+                // The target may be the union itself (a nested value inside a
+                // dict[str, Data]): descend into the arm of the literal's own
+                // kind, or the recursion stops one level in.
+                if (want->kind() == Type::Kind::Union) {
+                    Type::Kind lk = dynamic_cast<DictExpr*>(e)  ? Type::Kind::Dict
+                                  : dynamic_cast<ListExpr*>(e)  ? Type::Kind::List
+                                  : Type::Kind::Unknown;
+                    if (lk == Type::Kind::Unknown) return false;
+                    for (auto& arm : static_cast<UnionType&>(*want).types)
+                        if (arm && arm->kind() == lk && literalFits(e, arm))
+                            return true;
+                    return false;
+                }
+                if (auto* dl = dynamic_cast<DictExpr*>(e)) {
+                    if (want->kind() != Type::Kind::Dict) return false;
+                    auto& dt = static_cast<DictType&>(*want);
+                    for (auto& [k, v] : dl->entries) {
+                        if (k && k->type && dt.keyType &&
+                            !k->type->isAssignableTo(*dt.keyType)) return false;
+                        if (!v || !dt.valueType) continue;
+                        if (v->type && v->type->isAssignableTo(*dt.valueType)) continue;
+                        if (!literalFits(v.get(), dt.valueType)) return false;
+                    }
+                    return true;
+                }
+                if (auto* ll = dynamic_cast<ListExpr*>(e)) {
+                    if (want->kind() != Type::Kind::List) return false;
+                    auto& el = static_cast<ListType&>(*want).elementType;
+                    for (auto& x : ll->elements) {
+                        if (!x || !el) continue;
+                        if (x->type && x->type->isAssignableTo(*el)) continue;
+                        if (!literalFits(x.get(), el)) return false;
+                    }
+                    return true;
+                }
+                return false;
+            };
+            auto argMatch = [&](Expr* argExpr,
+                                const std::shared_ptr<Type>& at,
                                 const std::shared_ptr<Type>& pt,
                                 bool& exact) -> bool {
                 exact = false;
                 if (!at || !pt) return true;
                 auto ak = at->kind(), pk = pt->kind();
-                if (ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
-                    pk == Type::Kind::Unknown || pk == Type::Kind::Any)
+                if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
+                    pk == Type::Kind::Unknown || pk == Type::Kind::Boxed)
                     return true;
                 if (at->equals(*pt)) { exact = true; return true; }
-                return at->isSubtypeOf(*pt);
+                if (at->isSubtypeOf(*pt)) return true;
+                return literalFits(argExpr, pt);
             };
             std::vector<int> matched;
             std::vector<int> exactMatched;
@@ -186,7 +232,8 @@ void TypeChecker::visit(CallExpr& node) {
                 bool all = true, allExact = true;
                 for (size_t ai = 0; ai < node.args.size(); ++ai) {
                     bool ex = false;
-                    if (!argMatch(node.args[ai]->type, ft.paramTypes[ai], ex)) {
+                    if (!argMatch(node.args[ai].get(), node.args[ai]->type,
+                                  ft.paramTypes[ai], ex)) {
                         all = false; break;
                     }
                     if (!ex) allExact = false;
@@ -205,7 +252,7 @@ void TypeChecker::visit(CallExpr& node) {
                     error(node.location(),
                           "ambiguous call to overloaded method '" + attr->attribute +
                           "' - multiple overloads match the argument types");
-                node.type = impl_->anyType;
+                node.type = impl_->boxedType;
                 return;
             }
             node.resolvedMethodOverload = chosen;
@@ -231,7 +278,7 @@ void TypeChecker::visit(CallExpr& node) {
                 }
                 tryExpectedTypeLiteral(node.args[ai].get(), pt);
             }
-            node.type = chosenFt.returnType ? chosenFt.returnType : impl_->anyType;
+            node.type = chosenFt.returnType ? chosenFt.returnType : impl_->boxedType;
             return;
         }
     }
@@ -263,7 +310,7 @@ void TypeChecker::visit(CallExpr& node) {
             if (posAfterStar >= 0) {
                 error(node.args[posAfterStar]->location(),
                       "positional argument after `*` spread is not allowed");
-                node.type = impl_->anyType;
+                node.type = impl_->boxedType;
                 return;
             }
 
@@ -313,7 +360,7 @@ void TypeChecker::visit(CallExpr& node) {
                         auto& dictT = static_cast<DictType&>(*dt);
                         auto kk = dictT.keyType ? dictT.keyType->kind()
                                                 : Type::Kind::Unknown;
-                        if (kk != Type::Kind::Unknown && kk != Type::Kind::Any &&
+                        if (kk != Type::Kind::Unknown && kk != Type::Kind::Boxed &&
                             kk != Type::Kind::Str) {
                             error(kw.second->location(),
                                   "`**` spread requires a str-keyed dict (it "
@@ -323,9 +370,9 @@ void TypeChecker::visit(CallExpr& node) {
                         auto vt = dictT.valueType;
                         if (kwElemType && vt &&
                             kwElemType->kind() != Type::Kind::Unknown &&
-                            kwElemType->kind() != Type::Kind::Any &&
+                            kwElemType->kind() != Type::Kind::Boxed &&
                             vt->kind() != Type::Kind::Unknown &&
-                            vt->kind() != Type::Kind::Any &&
+                            vt->kind() != Type::Kind::Boxed &&
                             !vt->isAssignableTo(*kwElemType)) {
                             error(kw.second->location(),
                                   "dict spread value type '" + vt->toString() +
@@ -334,7 +381,7 @@ void TypeChecker::visit(CallExpr& node) {
                                   "'");
                         }
                     } else if (dt->kind() != Type::Kind::Unknown &&
-                               dt->kind() != Type::Kind::Any) {
+                               dt->kind() != Type::Kind::Boxed) {
                         error(kw.second->location(),
                               "`**` spread source must be a dict, got '" +
                               dt->toString() + "'");
@@ -347,8 +394,8 @@ void TypeChecker::visit(CallExpr& node) {
                                       const std::shared_ptr<Type>& pt) -> bool {
                     if (!at || !pt) return true;
                     auto ak = at->kind(), pk = pt->kind();
-                    if (ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
-                        pk == Type::Kind::Unknown || pk == Type::Kind::Any ||
+                    if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
+                        pk == Type::Kind::Unknown || pk == Type::Kind::Boxed ||
                         ak == Type::Kind::None_ || ak == Type::Kind::Union ||
                         pk == Type::Kind::Union)
                         return true;
@@ -377,7 +424,7 @@ void TypeChecker::visit(CallExpr& node) {
                                   std::to_string(totalPos) + " positional "
                                   "arguments but the callable takes at most " +
                                   std::to_string(paramTypes.size()));
-                            node.type = retType ? retType : impl_->anyType;
+                            node.type = retType ? retType : impl_->boxedType;
                             return;
                         }
                         if (node.kwArgs.empty() && totalPos < requiredParams) {
@@ -386,7 +433,7 @@ void TypeChecker::visit(CallExpr& node) {
                                   std::to_string(totalPos) + " positional "
                                   "arguments but the callable requires " +
                                   std::to_string(requiredParams));
-                            node.type = retType ? retType : impl_->anyType;
+                            node.type = retType ? retType : impl_->boxedType;
                             return;
                         }
                         for (size_t k = 0; k < L; ++k) {
@@ -417,7 +464,7 @@ void TypeChecker::visit(CallExpr& node) {
                     }
                 }
             }
-            node.type = retType ? retType : impl_->anyType;
+            node.type = retType ? retType : impl_->boxedType;
             return;
         }
     }
@@ -506,18 +553,19 @@ void TypeChecker::visit(CallExpr& node) {
             const auto& pt = ft.paramTypes[i];
             if (!at || !pt) continue;
             auto ak = at->kind(), pk = pt->kind();
-            if (ak == Type::Kind::Any) markNarrowTarget(*node.args[i], pt);
-            if (ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
+            if (ak == Type::Kind::Boxed || ak == Type::Kind::Union)
+                markNarrowTarget(*node.args[i], pt);
+            if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
                 pk == Type::Kind::Unknown)
                 continue;
-            if (pk == Type::Kind::Any) {
+            if (pk == Type::Kind::Boxed) {
                 if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
                     bool recvIsBoxList = false;
                     if (att->object && att->object->type) {
                         if (auto* rlt = dynamic_cast<ListType*>(
                                 att->object->type.get()))
                             recvIsBoxList = rlt->elementType &&
-                                rlt->elementType->kind() == Type::Kind::Any;
+                                rlt->elementType->kind() == Type::Kind::Boxed;
                     }
                     if (recvIsBoxList &&
                         (att->attribute == "append" ||
@@ -554,7 +602,7 @@ void TypeChecker::visit(CallExpr& node) {
                     if (ae && pe && ae->kind() != Type::Kind::Unknown &&
                         pe->kind() != Type::Kind::Unknown) {
                         auto boxElem = [](const Type::Kind k) {
-                            return k == Type::Kind::Any ||
+                            return k == Type::Kind::Boxed ||
                                    k == Type::Kind::Union;
                         };
                         if (boxElem(ae->kind()) != boxElem(pe->kind())) {
@@ -566,7 +614,11 @@ void TypeChecker::visit(CallExpr& node) {
                                   TypeChecker::listReprMismatchHint(*at, *pt));
                         } else if (!diagnoseHeterogeneousLiteral(
                                        node.args[i].get(), pt) &&
-                                   !ae->isSubtypeOf(*pe)) {
+                                   !ae->isSubtypeOf(*pe) &&
+                                   // A literal argument is built in the
+                                   // parameter's layout from birth.
+                                   !tryExpectedTypeLiteral(node.args[i].get(),
+                                                           pt)) {
                             error(node.args[i]->location(),
                                   "argument " + std::to_string(i + 1) +
                                   " of type '" + at->toString() +
@@ -632,7 +684,7 @@ void TypeChecker::visit(CallExpr& node) {
         if (auto* lcn = dynamic_cast<NameExpr*>(node.callee.get())) {
             if (lcn->name == "len" && node.args.size() == 1 &&
                 ft.paramTypes.size() == 1 && ft.paramTypes[0] &&
-                ft.paramTypes[0]->kind() == Type::Kind::Any &&
+                ft.paramTypes[0]->kind() == Type::Kind::Boxed &&
                 node.args[0]->type &&
                 node.args[0]->type->kind() == Type::Kind::Function) {
                 if (auto* an = dynamic_cast<NameExpr*>(node.args[0].get())) {
@@ -687,8 +739,18 @@ void TypeChecker::visit(CallExpr& node) {
                     return;
                 }
             }
+            if ((cn->name == "min" || cn->name == "max") && node.args.size() > 1) {
+                std::shared_ptr<Type> joined = node.args[0]->type;
+                for (size_t i = 1; i < node.args.size(); ++i)
+                    joined = joinBranchTypes(joined, node.args[i]->type);
+                if (joined && joined->kind() != Type::Kind::Unknown &&
+                    joined->kind() != Type::Kind::Boxed) {
+                    node.type = joined;
+                    return;
+                }
+            }
             if (cn->name == "map" && node.args.size() == 2) {
-                std::shared_ptr<Type> elem = impl_->anyType;
+                std::shared_ptr<Type> elem = impl_->boxedType;
                 if (node.args[0]->type &&
                     node.args[0]->type->kind() == Type::Kind::Function) {
                     auto rt = static_cast<FunctionType&>(*node.args[0]->type).returnType;
@@ -885,15 +947,15 @@ void TypeChecker::visit(CallExpr& node) {
             return;
         }
         if (n == "list" || n == "sorted" || n == "reversed") {
-            std::shared_ptr<Type> elem = impl_->anyType;
+            std::shared_ptr<Type> elem = impl_->boxedType;
             if (!node.args.empty() && node.args[0]->type &&
                 node.args[0]->type->kind() == Type::Kind::List)
                 elem = static_cast<ListType&>(*node.args[0]->type).elementType;
-            node.type = std::make_shared<ListType>(elem ? elem : impl_->anyType);
+            node.type = std::make_shared<ListType>(elem ? elem : impl_->boxedType);
             return;
         }
         if (n == "filter" || n == "enumerate" || n == "zip") {
-            node.type = std::make_shared<ListType>(impl_->anyType);
+            node.type = std::make_shared<ListType>(impl_->boxedType);
             return;
         }
         if (n == "divmod") {
@@ -903,7 +965,7 @@ void TypeChecker::visit(CallExpr& node) {
         }
         if (n == "tuple" && node.args.size() == 1) {
             if (auto* le = dynamic_cast<ListExpr*>(node.args[0].get())) {
-                std::shared_ptr<Type> elem = impl_->anyType;
+                std::shared_ptr<Type> elem = impl_->boxedType;
                 if (node.args[0]->type &&
                     node.args[0]->type->kind() == Type::Kind::List) {
                     auto et = static_cast<ListType&>(*node.args[0]->type).elementType;
@@ -1037,7 +1099,7 @@ std::shared_ptr<Type> TypeChecker::dictGetResultType(
     auto value = static_cast<DictType&>(*recv).valueType;
     if (!value) return declared;
     switch (value->kind()) {
-        case Type::Kind::Any:
+        case Type::Kind::Boxed:
         case Type::Kind::Unknown:
         case Type::Kind::Union:
         case Type::Kind::None_:
@@ -1107,7 +1169,7 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         return;
     }
 
-    if (objType->kind() == Type::Kind::Any) {
+    if (objType->kind() == Type::Kind::Boxed) {
         error(node.location(),
               "cannot access '" + node.attribute +
               "' on a value of type `Any`; annotate the concrete type (e.g. "
@@ -1298,7 +1360,7 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             node.attribute == "removesuffix" || node.attribute == "expandtabs" ||
             node.attribute == "casefold") {
             node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->anyType},
+                std::vector<std::shared_ptr<Type>>{impl_->boxedType},
                 impl_->strType);
             return;
         }
@@ -1585,10 +1647,71 @@ void TypeChecker::visit(SubscriptExpr& node) {
 
     bool isSlice = dynamic_cast<SliceExpr*>(node.index.get()) != nullptr;
 
+    // Subscripting a union: the result is the union of what its subscriptable
+    // arms yield. Without this the expression is untyped, and everything
+    // downstream (generic inference, comparisons) has nothing to solve against.
+    if (objType->kind() == Type::Kind::Union && !isSlice) {
+        std::vector<std::shared_ptr<Type>> elems;
+        std::function<void(const std::shared_ptr<Type>&)> addElem =
+            [&](const std::shared_ptr<Type>& t) {
+            if (!t) return;
+            // Flatten: a nested union arm contributes its own arms, so the
+            // result stays a flat domain that a checked downcast can target.
+            if (t->kind() == Type::Kind::Union && t.get() != objType.get()) {
+                for (auto& inner : static_cast<UnionType&>(*t).types) addElem(inner);
+                return;
+            }
+            for (auto& e : elems) if (e->equals(*t)) return;
+            elems.push_back(t);
+        };
+        for (auto& arm : static_cast<UnionType&>(*objType).types) {
+            if (!arm) continue;
+            if (arm->kind() == Type::Kind::List)
+                addElem(static_cast<ListType&>(*arm).elementType);
+            else if (arm->kind() == Type::Kind::Dict)
+                addElem(static_cast<DictType&>(*arm).valueType);
+            else if (arm->kind() == Type::Kind::Str)
+                addElem(impl_->strType);
+            else if (arm->kind() == Type::Kind::Bytes)
+                addElem(impl_->intType);
+        }
+        // A self-referential domain (an arm holds the union itself) indexes
+        // back into itself: report the declared knot rather than an ad-hoc
+        // union that no checked downcast could target.
+        for (auto& e : elems)
+            if (e.get() == objType.get()) { node.type = objType; return; }
+        if (!elems.empty()) {
+            if (elems.size() == 1) {
+                node.type = elems[0];
+            } else {
+                auto joined = std::make_shared<UnionType>(elems);
+                // A closed data domain indexes back into itself; keep the
+                // declared knot so diagnostics name it and recursion ends.
+                node.type = joined->equals(*objType)
+                                ? objType
+                                : std::static_pointer_cast<Type>(joined);
+            }
+            return;
+        }
+    }
+
     if (objType->kind() == Type::Kind::List) {
         if (isSlice) {
             node.type = objType;
         } else {
+            // A sequence index must be an int; without this the wrong type
+            // reached codegen and tripped an LLVM assertion instead of
+            // producing a diagnostic.
+            if (idxType && idxType->kind() != Type::Kind::Unknown &&
+                idxType->kind() != Type::Kind::Int &&
+                idxType->kind() != Type::Kind::Bool &&
+                idxType->kind() != Type::Kind::Boxed &&
+                idxType->kind() != Type::Kind::Union &&
+                idxType->kind() != Type::Kind::TypeVar) {
+                error(node.location(),
+                      "list index must be an int, got '" +
+                      idxType->toString() + "'");
+            }
             node.type = static_cast<ListType&>(*objType).elementType;
         }
         return;
@@ -1598,7 +1721,7 @@ void TypeChecker::visit(SubscriptExpr& node) {
         if (!isSlice && idxType && dt.keyType &&
             idxType->kind() != Type::Kind::Unknown &&
             dt.keyType->kind() != Type::Kind::Unknown &&
-            dt.keyType->kind() != Type::Kind::Any &&
+            dt.keyType->kind() != Type::Kind::Boxed &&
             !idxType->isAssignableTo(*dt.keyType)) {
             error(node.location(), "dict has key type '" + dt.keyType->toString() +
                   "' but is indexed with '" + idxType->toString() + "'");
@@ -1654,7 +1777,7 @@ void TypeChecker::visit(SubscriptExpr& node) {
         node.type = isSlice ? impl_->bytesType : impl_->intType;
         return;
     }
-    if (objType->kind() == Type::Kind::Any) {
+    if (objType->kind() == Type::Kind::Boxed) {
         node.type = objType;
         return;
     }
@@ -1727,7 +1850,7 @@ void TypeChecker::visit(DictExpr& node) {
             if (kt && keyType &&
                 kt->kind() != Type::Kind::Unknown &&
                 keyType->kind() != Type::Kind::Unknown &&
-                keyType->kind() != Type::Kind::Any &&
+                keyType->kind() != Type::Kind::Boxed &&
                 !kt->isAssignableTo(*keyType)) {
                 error(k->location(), "dict literal mixes key types '" +
                       keyType->toString() + "' and '" + kt->toString() +
@@ -1973,7 +2096,7 @@ void TypeChecker::visit(AwaitExpr& node) {
 void TypeChecker::visit(FireExpr& node) {
     if (node.operand) {
         auto opType = inferType(node.operand.get());
-        if (opType && (opType->kind() == Type::Kind::Any ||
+        if (opType && (opType->kind() == Type::Kind::Boxed ||
                        opType->kind() == Type::Kind::Union)) {
             error(node.location(), "cannot fire a call returning '" +
                   opType->toString() +

@@ -1,0 +1,7 @@
+"""Helper module for alias_import_guard: exports a `type` alias."""
+
+type Pair = int | str
+
+def widen(v: int) -> Pair {
+    return v
+}

@@ -257,7 +257,7 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
                     if (ek == Type::Kind::Str) printFn = "dragon_print_list_str_raw";
                     else if (ek == Type::Kind::Float) printFn = "dragon_print_list_float_raw";
                     else if (ek == Type::Kind::Bool) printFn = "dragon_print_list_bool_raw";
-                    else if (ek == Type::Kind::Any) printFn = "dragon_print_list_box_raw";
+                    else if (Impl::isBoxedKind(ek)) printFn = "dragon_print_list_box_raw";
                     else if (ek == Type::Kind::List || ek == Type::Kind::Dict ||
                              ek == Type::Kind::Tuple || ek == Type::Kind::Set)
                         printFn = "dragon_print_list_nested_raw";
@@ -268,7 +268,7 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
             if (auto* nameArg = dynamic_cast<NameExpr*>(argExpr)) {
                 auto vit = impl_->varListElemKinds.find(nameArg->name);
                 if (vit != impl_->varListElemKinds.end() &&
-                    vit->second == Type::Kind::Any)
+                    Impl::isBoxedKind(vit->second))
                     printFn = "dragon_print_list_box_raw";
             }
         }
@@ -470,7 +470,11 @@ bool CodeGen::tryEmitIsinstanceNicheCheck(CallExpr& node, const std::string& typ
             recv, llvm::ConstantInt::get(impl_->i64Type, 0),
             "isinstance.nn");
     else
-        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
+        impl_->addError(
+            "internal error: isinstance on a `T | None` value whose "
+            "representation is neither a nullable pointer nor a box; refusing "
+            "to guess (a guess here silently answers True)",
+            node.location());
     return true;
 }
 

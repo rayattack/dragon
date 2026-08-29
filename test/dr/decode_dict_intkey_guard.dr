@@ -1,6 +1,6 @@
-from json import decode
+from json import decode, Data
 
 const body: bytes = '{"1": true}'.encode("utf-8")
-const d: dict[int, Any] = decode[dict[int, Any]](body)
+const d: dict[int, Data] = decode[dict[int, Data]](body)
 print(len(d))
 

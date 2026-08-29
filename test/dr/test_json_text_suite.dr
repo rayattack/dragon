@@ -1,6 +1,7 @@
 from unittest import TestCase, main
 from json import loads, loadb, dumps, escape, unescape, decode, encode, JsonWriter, JSON
 from json import loads_obj, loads_list, loadb_obj, loadb_list
+from json import Data, as_str, as_int, as_float, as_bool, as_obj, as_list
 import json
 
 
@@ -21,57 +22,57 @@ class Note {
 
 class JsonScalarTests(TestCase) {
     def test_int() {
-        const v: Any = loads("42")
+        const v: Data = loads("42")
         self.assertTrue(isinstance(v, int))
-        const n: int = v
+        const n: int = as_int(v, 0)
         self.assertEqual(n, 42)
     }
 
     def test_negative_int() {
-        const v: Any = loads("-7")
-        const n: int = v
+        const v: Data = loads("-7")
+        const n: int = as_int(v, 0)
         self.assertEqual(n, -7)
     }
 
     def test_float() {
-        const v: Any = loads("3.5")
+        const v: Data = loads("3.5")
         self.assertTrue(isinstance(v, float))
-        const f: float = v
+        const f: float = as_float(v, 0.0)
         self.assertEqual(f, 3.5)
     }
 
     def test_float_exponent() {
-        const v: Any = loads("1.5e3")
-        const f: float = v
+        const v: Data = loads("1.5e3")
+        const f: float = as_float(v, 0.0)
         self.assertEqual(f, 1500.0)
     }
 
     def test_bool_true() {
-        const v: Any = loads("true")
+        const v: Data = loads("true")
         self.assertTrue(isinstance(v, bool))
     }
 
     def test_string_with_escapes() {
-        const v: Any = loads("\"a\\tb\\nc\"")
-        const s: str = v
+        const v: Data = loads("\"a\\tb\\nc\"")
+        const s: str = as_str(v, "")
         self.assertEqual(s, "a\tb\nc")
     }
 
     def test_string_unicode_escape() {
-        const v: Any = loads("\"caf\\u00e9\"")
-        const s: str = v
+        const v: Data = loads("\"caf\\u00e9\"")
+        const s: str = as_str(v, "")
         self.assertEqual(s, "café")
     }
 
     def test_string_surrogate_pair() {
-        const v: Any = loads("\"a\\ud83d\\ude00b\"")
-        const s: str = v
+        const v: Data = loads("\"a\\ud83d\\ude00b\"")
+        const s: str = as_str(v, "")
         self.assertEqual(len(s), 3)
     }
 
     def test_whitespace_tolerated() {
-        const v: Any = loads("   \n 99 \t ")
-        const n: int = v
+        const v: Data = loads("   \n 99 \t ")
+        const n: int = as_int(v, 0)
         self.assertEqual(n, 99)
     }
 }
@@ -79,28 +80,28 @@ class JsonScalarTests(TestCase) {
 
 class JsonObjectTests(TestCase) {
     def test_flat_object() {
-        const v: Any = loads("{\"name\": \"Ada\", \"age\": 36, \"active\": true}")
+        const v: Data = loads("{\"name\": \"Ada\", \"age\": 36, \"active\": true}")
         self.assertTrue(isinstance(v, dict))
-        const m: dict[str, Any] = v
-        const name: str = m["name"]
-        const age: int = m["age"]
+        const m: dict[str, Data] = as_obj(v)
+        const name: str = as_str(m["name"], "")
+        const age: int = as_int(m["age"], 0)
         self.assertEqual(name, "Ada")
         self.assertEqual(age, 36)
         self.assertTrue("active" in m)
     }
 
     def test_empty_object() {
-        const v: Any = loads("{}")
-        const m: dict[str, Any] = v
+        const v: Data = loads("{}")
+        const m: dict[str, Data] = as_obj(v)
         self.assertEqual(len(m), 0)
     }
 
     def test_nested_object() {
-        const v: Any = loads("{\"a\": {\"b\": {\"c\": 5}}}")
-        const m: dict[str, Any] = v
-        const a: dict[str, Any] = m["a"]
-        const b: dict[str, Any] = a["b"]
-        const c: int = b["c"]
+        const v: Data = loads("{\"a\": {\"b\": {\"c\": 5}}}")
+        const m: dict[str, Data] = as_obj(v)
+        const a: dict[str, Data] = as_obj(m["a"])
+        const b: dict[str, Data] = as_obj(a["b"])
+        const c: int = as_int(b["c"], 0)
         self.assertEqual(c, 5)
     }
 }
@@ -108,35 +109,35 @@ class JsonObjectTests(TestCase) {
 
 class JsonArrayTests(TestCase) {
     def test_int_array() {
-        const v: Any = loads("[1, 2, 3]")
+        const v: Data = loads("[1, 2, 3]")
         self.assertTrue(isinstance(v, list))
-        const xs: list[Any] = v
+        const xs: list[Data] = as_list(v)
         self.assertEqual(len(xs), 3)
-        const first: int = xs[0]
+        const first: int = as_int(xs[0], 0)
         self.assertEqual(first, 1)
     }
 
     def test_empty_array() {
-        const v: Any = loads("[]")
-        const xs: list[Any] = v
+        const v: Data = loads("[]")
+        const xs: list[Data] = as_list(v)
         self.assertEqual(len(xs), 0)
     }
 
     def test_array_of_objects() {
-        const v: Any = loads("[{\"x\": 1}, {\"x\": 2}]")
-        const xs: list[Any] = v
+        const v: Data = loads("[{\"x\": 1}, {\"x\": 2}]")
+        const xs: list[Data] = as_list(v)
         const sum: int = _sum_x(xs)
         self.assertEqual(sum, 3)
     }
 }
 
 
-def _sum_x(xs: list[Any]) -> int {
+def _sum_x(xs: list[Data]) -> int {
     total: int = 0
     for item in xs {
         if isinstance(item, dict) {
-            const m: dict[str, Any] = item
-            const x: int = m["x"]
+            const m: dict[str, Data] = item
+            const x: int = as_int(m["x"], 0)
             total = total + x
         }
     }
@@ -146,20 +147,20 @@ def _sum_x(xs: list[Any]) -> int {
 
 class JsonRoundTripTests(TestCase) {
     def test_dumps_loads_object() {
-        const orig: dict[str, Any] = {}
+        const orig: dict[str, Data] = {}
         orig["k"] = "v"
         orig["n"] = 7
-        const back: Any = loads(dumps(orig))
-        const m: dict[str, Any] = back
-        const k: str = m["k"]
-        const n: int = m["n"]
+        const back: Data = loads(dumps(orig))
+        const m: dict[str, Data] = as_obj(back)
+        const k: str = as_str(m["k"], "")
+        const n: int = as_int(m["n"], 0)
         self.assertEqual(k, "v")
         self.assertEqual(n, 7)
     }
 
     def test_loadb() {
-        const v: Any = loadb(b"{\"ok\": true}")
-        const m: dict[str, Any] = v
+        const v: Data = loadb(b"{\"ok\": true}")
+        const m: dict[str, Data] = as_obj(v)
         self.assertTrue("ok" in m)
     }
 }
@@ -167,7 +168,7 @@ class JsonRoundTripTests(TestCase) {
 
 class JsonTypedConstructionTests(TestCase) {
     def test_construct_from_decoded_obj() {
-        const row: dict[str, Any] = decode[dict[str, Any]]("{\"name\": \"Grace\", \"age\": 45}".encode("utf-8"))
+        const row: dict[str, Data] = decode[dict[str, Data]]("{\"name\": \"Grace\", \"age\": 45}".encode("utf-8"))
         const c: CustomerRec = CustomerRec(**row)
         self.assertEqual(c.name, "Grace")
         self.assertEqual(c.age, 45)
@@ -175,61 +176,61 @@ class JsonTypedConstructionTests(TestCase) {
 
     def test_decode_obj_rejects_non_object() {
         self.assertRaises(ValueError, lambda () -> None {
-            const r: dict[str, Any] = decode[dict[str, Any]]("[1, 2, 3]".encode("utf-8"))
+            const r: dict[str, Data] = decode[dict[str, Data]]("[1, 2, 3]".encode("utf-8"))
         })
     }
 }
 
 
 def _bad_escape() {
-    const v: Any = loads("\"a\\xb\"")
+    const v: Data = loads("\"a\\xb\"")
 }
 
 def _raw_newline() {
-    const v: Any = loads("\"a\nb\"")
+    const v: Data = loads("\"a\nb\"")
 }
 
 def _raw_tab() {
-    const v: Any = loads("[\"a\tb\"]")
+    const v: Data = loads("[\"a\tb\"]")
 }
 
 def _bad_unicode() {
-    const v: Any = loads("\"\\uZZZZ\"")
+    const v: Data = loads("\"\\uZZZZ\"")
 }
 
 def _truncated_unicode() {
-    const v: Any = loads("\"\\u12\"")
+    const v: Data = loads("\"\\u12\"")
 }
 
 
 class JsonParseErrorTests(TestCase) {
     def test_empty_input_raises() {
         self.assertRaises(ValueError, lambda () -> None {
-            const v: Any = loads("")
+            const v: Data = loads("")
         })
     }
 
     def test_truncated_array_raises() {
         self.assertRaises(ValueError, lambda () -> None {
-            const v: Any = loads("[1, 2")
+            const v: Data = loads("[1, 2")
         })
     }
 
     def test_unterminated_string_raises() {
         self.assertRaises(ValueError, lambda () -> None {
-            const v: Any = loads("\"abc")
+            const v: Data = loads("\"abc")
         })
     }
 
     def test_trailing_data_raises() {
         self.assertRaises(ValueError, lambda () -> None {
-            const v: Any = loads("42 99")
+            const v: Data = loads("42 99")
         })
     }
 
     def test_missing_value_raises() {
         self.assertRaises(ValueError, lambda () -> None {
-            const v: Any = loads("{\"a\": }")
+            const v: Data = loads("{\"a\": }")
         })
     }
 
@@ -250,7 +251,7 @@ class JsonParseErrorTests(TestCase) {
     def test_error_carries_byte_position() {
         msg: str = ""
         try {
-            const v: Any = loads("\"ok\\x\"")
+            const v: Data = loads("\"ok\\x\"")
         } except ValueError as e {
             msg = str(e)
         }
@@ -258,21 +259,21 @@ class JsonParseErrorTests(TestCase) {
     }
 
     def test_valid_escapes_still_parse() {
-        const v: Any = loads("\"a\\n\\t\\\"\\\\\\/x\\u0041\"")
-        const s: str = v
+        const v: Data = loads("\"a\\n\\t\\\"\\\\\\/x\\u0041\"")
+        const s: str = as_str(v, "")
         self.assertEqual(s, "a\n\t\"\\/xA")
     }
 
     def test_surrogate_pair_still_parses() {
-        const v: Any = loads("\"\\ud83d\\ude00\"")
-        const s: str = v
+        const v: Data = loads("\"\\ud83d\\ude00\"")
+        const s: str = as_str(v, "")
         self.assertEqual(len(s), 1)
     }
 
     def test_escaped_control_still_parses() {
-        const v: Any = loads("{\"k\": \"line1\\nline2\"}")
-        const m: dict[str, Any] = v
-        const s: str = m["k"]
+        const v: Data = loads("{\"k\": \"line1\\nline2\"}")
+        const m: dict[str, Data] = as_obj(v)
+        const s: str = as_str(m["k"], "")
         self.assertEqual(s, "line1\nline2")
     }
 }
@@ -350,8 +351,8 @@ class WriterControlTests(TestCase) {
     def test_writer_output_parses_back() {
         const w: JsonWriter = JsonWriter()
         w.write_str("bell" + chr(7))
-        const v: Any = loads(w.finish().decode("utf-8"))
-        const s: str = v
+        const v: Data = loads(w.finish().decode("utf-8"))
+        const s: str = as_str(v, "")
         self.assertEqual(s, "bell" + chr(7))
     }
 }
@@ -506,26 +507,26 @@ class WriterOwnershipTests(TestCase) {
 
 
 class JsonAnyListTests(TestCase) {
-    """json.dumps of a list[Any] - the box-layout misread.
+    """json.dumps of a list[Data] - the box-layout misread.
 
     Given the code below:
 
-        xs: list[Any] = [1, 2, 3]
+        xs: list[Data] = [1, 2, 3]
         print(json.dumps(xs))
 
-    The result is that a `list[Any]` stores each element as a 16-byte {tag, payload} box,
+    The result is that a `list[Data]` stores each element as a 16-byte {tag, payload} box,
     a monomorphic `list[int]` stores bare 8-byte slots. Both are stamped TAG_LIST
     in the tag space, and the JSON emitter cast every tag list payload to monomorphic
     layout. Walking 16-byte boxes as 8-byte slots reads tag words as values:
 
-        json.dumps([1, 2, 3] as list[Any])   -> "[0, 1, 0]"        (tags + payload)
-        json.dumps(["a", "b"] as list[Any])  -> "[1, 107168755...]" (tag + raw ptr)
+        json.dumps([1, 2, 3] as list[Data])   -> "[0, 1, 0]"        (tags + payload)
+        json.dumps(["a", "b"] as list[Data])  -> "[1, 107168755...]" (tag + raw ptr)
 
     and runs one stride past the element region (ASan heap-buffer-overflow) ultimatey
     serving garbage to whoever consumes the JSON, or crashing under a hardened allocator.
 
-    WHEN: any json.dumps whose value contains a list[Any] anywhere - a
-    heterogeneous array, a JSON Schema node, a dict[str, Any] holding an array.
+    WHEN: any json.dumps whose value contains a list[Data] anywhere - a
+    heterogeneous array, a JSON Schema node, a dict[str, Data] holding an array.
     Native (monomorphic) lists were always correct.
 
     WHY: dispatch happened on the VALUE tag (TAG_LIST) alone, the header's type taag
@@ -535,31 +536,31 @@ class JsonAnyListTests(TestCase) {
     BEFORE: the values above. AFTER: the emitter dispatches on the header tag
     and walks box elements as {tag, payload}, so the same code prints "[1, 2,3]" and '["a", "b"]'
 
-    One line: json.dumps now reads a list[Any] with the layout it was stored in.
+    One line: json.dumps now reads a list[Data] with the layout it was stored in.
     """
 
     def test_int_any_list() {
-        xs: list[Any] = [1, 2, 3]
+        xs: list[Data] = [1, 2, 3]
         self.assertEqual(json.dumps(xs), "[1, 2, 3]")
     }
 
     def test_str_any_list() {
-        xs: list[Any] = ["a", "b"]
+        xs: list[Data] = ["a", "b"]
         self.assertEqual(json.dumps(xs), '["a", "b"]')
     }
 
     def test_mixed_any_list() {
-        xs: list[Any] = [1, "a", 2.5, True]
+        xs: list[Data] = [1, "a", 2.5, True]
         self.assertEqual(json.dumps(xs), '[1, "a", 2.5, true]')
     }
 
     def test_nested_any_list() {
-        xs: list[Any] = [[1, 2], ["a"]]
+        xs: list[Data] = [[1, 2], ["a"]]
         self.assertEqual(json.dumps(xs), '[[1, 2], ["a"]]')
     }
 
     def test_any_list_inside_dict() {
-        d: dict[str, Any] = {"xs": [1, 2, 3]}
+        d: dict[str, Data] = {"xs": [1, 2, 3]}
         self.assertEqual(json.dumps(d), '{"xs": [1, 2, 3]}')
     }
 
@@ -574,8 +575,8 @@ class JsonAnyListTests(TestCase) {
 
 def _roundtrip(s: str) -> str {
     const out: str = json.dumps({c: s})
-    const d: dict[str, Any] = decode[dict[str, Any]](out.encode("utf-8"))
-    const back: str = d["c"]
+    const d: dict[str, Data] = decode[dict[str, Data]](out.encode("utf-8"))
+    const back: str = as_str(d["c"], "")
     return back
 }
 
@@ -602,8 +603,8 @@ class TestUcs4DumpsRepr(TestCase) {
 
     def test_dumps_nonascii_key() {
         const out: str = json.dumps({"k→ey": "v"})
-        const d: dict[str, Any] = decode[dict[str, Any]](out.encode("utf-8"))
-        const v: str = d["k→ey"]
+        const d: dict[str, Data] = decode[dict[str, Data]](out.encode("utf-8"))
+        const v: str = as_str(d["k→ey"], "")
         self.assertEqual(v, "v")
     }
 
@@ -672,26 +673,26 @@ class TypedTopLevelTests(TestCase) {
 
     def test_loads_list_rejects_object() {
         self.assertRaises(ValueError, lambda () -> None {
-            const xs: list[Any] = loads_list("{\"a\": 1}")
+            const xs: list[Data] = loads_list("{\"a\": 1}")
         })
     }
 
     def test_loadb_obj_bytes_twin() {
-        const m: dict[str, Any] = loadb_obj(b"{\"n\": 7}")
+        const m: dict[str, Data] = loadb_obj(b"{\"n\": 7}")
         self.assertEqual(m["n"], 7)
     }
 
     def test_loadb_list_bytes_twin() {
-        const xs: list[Any] = loadb_list(b"[10, 20]")
+        const xs: list[Data] = loadb_list(b"[10, 20]")
         self.assertEqual(len(xs), 2)
         self.assertEqual(xs[1], 20)
     }
 
     def test_loads_obj_nested_values_stay_boxed() {
-        const m: dict[str, Any] = loads_obj("{\"tags\": [\"a\", \"b\"], \"meta\": {\"depth\": 2}}")
-        const tags: Any = m["tags"]
+        const m: dict[str, Data] = loads_obj("{\"tags\": [\"a\", \"b\"], \"meta\": {\"depth\": 2}}")
+        const tags: Data = m["tags"]
         self.assertTrue(isinstance(tags, list))
-        const meta: Any = m["meta"]
+        const meta: Data = m["meta"]
         self.assertTrue(isinstance(meta, dict))
     }
 }

@@ -15,13 +15,14 @@ both straight-line and concurrent use:
 
 ```dragon
 from http import get, post, Response
+from json import Data
 
 r: Response = await get("https://api.example.com/users?page=2")
 print(r.status)                   # 200
 print(r.header("content-type"))   # application/json
 print(r.text)
 
-payload: dict[str, Any] = {"name": "Ada"}
+payload: dict[str, Data] = {"name": "Ada"}
 created: Response = await post("https://api.example.com/users", json=payload)
 
 a: Task[Response] = get("https://api.example.com/users/1")   # two requests
@@ -35,7 +36,7 @@ inside the verb, so a `Response` never owns a socket - not even one stranded
 in a dropped `Task` (see [Ownership](/docs/1604-ownership) for what happens
 to a dropped task's result). Its surface: `status`, `reason`, `text`, `url`,
 the as-received `headers` dict plus case-insensitive `header(name, default)`,
-`ok()` (status < 400), `json() -> Any` (the boxed decode tier), and
+`ok()` (status < 400), `json() -> Data` (the boxed decode tier), and
 `raise_for_status()`, which raises `HTTPStatusError` on 4xx/5xx and returns
 the response otherwise so it chains:
 
@@ -51,7 +52,7 @@ try {
 ```
 
 Request bodies are mutually exclusive typed keywords: `body: str` (raw, wins),
-`json: dict[str, Any]` (serialized, `Content-Type: application/json`), and
+`json: dict[str, Data]` (serialized, `Content-Type: application/json`), and
 `data: dict[str, str]` (form-encoded). `params: dict[str, str]` appends to
 the query string; `headers: dict[str, str]` adds or overrides per call. An
 empty `json` dict sends no body - send a literal empty object as

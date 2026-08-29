@@ -1145,8 +1145,12 @@ Ship-in types: `HTML`, `CSS`, `XML` (`from html import ...`), `JSON`
 (`from urllib.parse import URL`).
 
 Splice dispatch inside a typed template: same content type -> inserted RAW (no
-double-escape; this is why components compose); `str` -> escaped; other types ->
-`__str__()` then escaped; `!{x | raw}` -> verbatim (explicit opt-out).
+double-escape; this is why components compose); `str` -> escaped; a class ->
+`__str__()` (or `__repr__()`) then escaped; a container -> the same text
+`f"{xs}"` gives, then escaped; `Any` -> dispatched at runtime, then escaped;
+`!{x | raw}` -> verbatim (explicit opt-out). A class with neither `__str__` nor
+`__repr__` has no text form and the splice is a compile error naming the fix
+(section 13); the same rule governs `print`, `str()`, and f-strings.
 
 Components and layouts are just functions:
 

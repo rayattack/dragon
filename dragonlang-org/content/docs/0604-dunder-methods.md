@@ -29,8 +29,15 @@ print(f"got {v}")   # got Vector(1.5, 2.5)
 print(str(v))       # Vector(1.5, 2.5)
 ```
 
-Without a `__str__`, an instance prints as a safe default like
-`<Vector instance>` - never a crash.
+Without a `__str__` (or a `__repr__`), a `Vector` has no text form, so
+`print(v)`, `str(v)`, `f"{v}"`, and `!{v}` in a template are all the same
+compile error, naming the class and the fix. Add one `__str__` and every one of
+them works. `@dataclass`, `NamedTuple`, `Enum`, and exception classes get their
+text form written for them.
+
+The `<Vector instance>` default survives in one place: an instance sitting
+inside a container. `print([v])` walks tagged data with no static element type
+in hand, so it prints `[<Vector instance>]`.
 
 ## Equality and ordering
 

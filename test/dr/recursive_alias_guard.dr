@@ -1,0 +1,18 @@
+"""A recursive `type` alias is the closed, honest spelling for JSON-shaped data:
+it declares its own arms, nests through containers, and narrows by match."""
+
+type Data = str | int | float | bool | none | list[Data] | dict[str, Data]
+
+def depth(v: Data) -> int {
+    match v {
+        case dict() { return 1 }
+        case list() { return 1 }
+        case _      { return 0 }
+    }
+    return 0
+}
+
+d: dict[str, Data] = {"user": {"name": "Ada"}, "id": 7}
+xs: list[Data] = [1, "two", {"k": 3}]
+
+print("recursive alias ok")

@@ -17,6 +17,11 @@ void fillFuncMeta(FunctionType& ft, const std::vector<Parameter>& params,
                   bool isMethod, bool hasImplicitSelf,
                   bool isClassMethod = false);
 
+bool derivesFromBuiltinException(const ClassType* c);
+bool bodyContainsYield(const std::vector<std::unique_ptr<Stmt>>& body);
+bool hasDeclaredBase(const ClassType& ct, const char* baseName);
+bool hasDataclassDecorator(const ClassType& ct);
+
 struct TypeChecker::Impl {
     std::vector<TypeDiagnostic> diagnostics;
 
@@ -26,7 +31,7 @@ struct TypeChecker::Impl {
     std::shared_ptr<PrimitiveType> strType;
     std::shared_ptr<PrimitiveType> bytesType;
     std::shared_ptr<PrimitiveType> noneType;
-    std::shared_ptr<AnyType> anyType;
+    std::shared_ptr<BoxedType> boxedType;
     std::shared_ptr<NeverType> neverType;
     std::shared_ptr<UnknownType> unknownType;
 
@@ -57,7 +62,14 @@ struct TypeChecker::Impl {
         return mt;
     }
 
+    // Set only while the checker resolves compiler-SYNTHESIZED type
+    // expressions (schema decoders and the like), which may still name the box
+    // internally. User source never gets this exemption.
+    bool allowDynamicTierSpelling = false;
+
     std::unordered_map<std::string, std::shared_ptr<Type>> cachedExports;
+    // module-top-level `type` aliases declared in the module being checked
+    std::unordered_map<std::string, std::shared_ptr<Type>> cachedTypeExports;
 
     std::string currentFile;
     std::string currentModuleName;

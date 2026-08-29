@@ -1,6 +1,7 @@
 from unittest import TestCase, main
 
 from json import loads
+from json import Data
 from re import Pattern, findall, split, sub
 from http.websocket import parse_frame, frame_length, Frame, ProtocolError
 from io import open, Reader
@@ -51,7 +52,7 @@ def _udp_oversize() {
 
 class JsonNestingTests(TestCase) {
     def test_nesting_within_limit_parses() {
-        const v: Any = loads("[" * 190 + "]" * 190)
+        const v: Data = loads("[" * 190 + "]" * 190)
         self.assertEqual(len(v), 1)
     }
 

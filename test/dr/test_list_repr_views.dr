@@ -1,37 +1,40 @@
-"""list representation views - the monomorphized/boxed split at the Any boundary.
+"""list representation views - the monomorphized/boxed split at the Boxed boundary.
 
 Dragon monomorphizes concrete lists (list[str] stores raw pointers at 8B/elem)
-and boxes dynamic ones (list[Any] stores {tag, payload} at 16B/elem). The box
+and boxes dynamic ones (list[Boxed] stores {tag, payload} at 16B/elem). The box
 tag alone says "some list", so before this fix ordinary code silently read one
 layout at the other's stride:
 
-    const d: dict[str, Any] = {"required": ["a", "b"]}   # nested literal was
-    const xs: list[Any] = d["required"]                  # built monomorphized,
+    const d: dict[str, Boxed] = {"required": ["a", "b"]}   # nested literal was
+    const xs: list[Boxed] = d["required"]                  # built monomorphized,
     const s: str = xs[0]                                 # read at box stride
                                                          # -> "b", OOB, or SEGV
 
 You did nothing wrong - the fix makes the compiler do two things:
-  1. a container LITERAL flowing into an Any context is BORN boxed
+  1. a container LITERAL flowing into an Boxed context is BORN boxed
      (recursively), so the reads above are correct;
-  2. unboxing an Any into a typed list view verifies the representation
+  2. unboxing an Boxed into a typed list view verifies the representation
      (dragon_list_view_check) and raises TypeError instead of misreading;
-     flowing a concrete list VARIABLE as list[Any] is a compile error.
+     flowing a concrete list VARIABLE as list[Boxed] is a compile error.
 """
 
+type Boxed = int | float | bool | str | bytes | list[int] | list[float] | list[bool] | list[str] | list[list[int]] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed] | dict[str, list[str]]
+
+from json import Data
 from unittest import TestCase, main
 import json
 from json import decode
 
 
-def anylist_returner() -> list[Any] {
+def anylist_returner() -> list[Boxed] {
     return ["r1", "r2"]
 }
 
 
 class TestBornBoxedLiterals(TestCase) {
     def test_nested_in_dict_literal() -> None {
-        const d: dict[str, Any] = {"required": ["a", "b", "c", "d", "e", "f"]}
-        const xs: list[Any] = d["required"]
+        const d: dict[str, Boxed] = {"required": ["a", "b", "c", "d", "e", "f"]}
+        const xs: list[str] = d["required"]
         const first: str = xs[0]
         const last: str = xs[5]
         self.assertEqual(first, "a")
@@ -40,47 +43,47 @@ class TestBornBoxedLiterals(TestCase) {
     }
 
     def test_nested_in_list_literal() -> None {
-        const l: list[Any] = [["a", "b"], [1, 2]]
-        const inner: list[Any] = l[0]
+        const l: list[Boxed] = [["a", "b"], [1, 2]]
+        const inner: list[str] = l[0]
         const s: str = inner[0]
         self.assertEqual(s, "a")
-        const nums: list[Any] = l[1]
+        const nums: list[int] = l[1]
         const n: int = nums[1]
         self.assertEqual(n, 2)
     }
 
     def test_deep_nesting_through_dict_values() -> None {
-        const d: dict[str, Any] = {"outer": {"inner": ["x", "y"]}}
-        const mid: dict[str, Any] = d["outer"]
-        const xs: list[Any] = mid["inner"]
+        const d: dict[str, Boxed] = {"outer": {"inner": ["x", "y"]}}
+        const mid: dict[str, Boxed] = d["outer"]
+        const xs: list[str] = mid["inner"]
         const s: str = xs[1]
         self.assertEqual(s, "y")
     }
 
     def test_subscript_assigned_literal() -> None {
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["k"] = ["a", "b"]
-        const xs: list[Any] = d["k"]
+        const xs: list[str] = d["k"]
         const s: str = xs[1]
         self.assertEqual(s, "b")
     }
 
     def test_appended_literal() -> None {
-        l: list[Any] = []
+        l: list[Boxed] = []
         l.append(["a", "b"])
-        const inner: list[Any] = l[0]
+        const inner: list[str] = l[0]
         const s: str = inner[0]
         self.assertEqual(s, "a")
     }
 
     def test_returned_literal() -> None {
-        const xs: list[Any] = anylist_returner()
+        const xs: list[Boxed] = anylist_returner()
         const s: str = xs[1]
         self.assertEqual(s, "r2")
     }
 
     def test_json_dumps_of_nested_literal() -> None {
-        const d: dict[str, Any] = {"type": "object", "required": ["a", "b"]}
+        const d: dict[str, Boxed] = {"type": "object", "required": ["a", "b"]}
         self.assertEqual(json.dumps(d), '{"type": "object", "required": ["a", "b"]}')
     }
 }
@@ -89,7 +92,7 @@ class TestBornBoxedLiterals(TestCase) {
 class TestMatchingViews(TestCase) {
     def test_native_roundtrip_concrete_type() -> None {
         names: list[str] = ["a", "b"]
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["k"] = names
         const back: list[str] = d["k"]
         self.assertEqual(back[0], "a")
@@ -97,8 +100,8 @@ class TestMatchingViews(TestCase) {
     }
 
     def test_loads_built_as_anylist() -> None {
-        const schema: dict[str, Any] = decode[dict[str, Any]]('{"k": ["a", "b"]}'.encode("utf-8"))
-        const xs: list[Any] = schema["k"]
+        const schema: dict[str, Boxed] = decode[dict[str, Boxed]]('{"k": ["a", "b"]}'.encode("utf-8"))
+        const xs: list[Boxed] = schema["k"]
         out: str = ""
         for r in xs {
             const s: str = r
@@ -109,8 +112,8 @@ class TestMatchingViews(TestCase) {
 
     def test_dict_value_covariance_is_uniform() -> None {
         m: dict[str, int] = {"a": 1, "b": 2}
-        holder: dict[str, Any] = {"m": m}
-        const back: dict[str, Any] = holder["m"]
+        holder: dict[str, Boxed] = {"m": m}
+        const back: dict[str, Boxed] = holder["m"]
         const v: int = back["a"]
         self.assertEqual(v, 1)
     }
@@ -119,7 +122,7 @@ class TestMatchingViews(TestCase) {
 
 class TestCrossViewsRaise(TestCase) {
     def test_boxlist_as_concrete_raises() -> None {
-        const schema: dict[str, Any] = decode[dict[str, Any]]('{"k": ["a", "b"]}'.encode("utf-8"))
+        const schema: dict[str, Boxed] = decode[dict[str, Boxed]]('{"k": ["a", "b"]}'.encode("utf-8"))
         caught: bool = False
         try {
             const names: list[str] = schema["k"]
@@ -132,11 +135,11 @@ class TestCrossViewsRaise(TestCase) {
 
     def test_native_as_anylist_raises() -> None {
         names: list[str] = ["a", "b"]
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["k"] = names
         caught: bool = False
         try {
-            const xs: list[Any] = d["k"]
+            const xs: list[Boxed] = d["k"]
             self.assertEqual(len(xs), -1)
         } except {
             caught = True
@@ -146,7 +149,7 @@ class TestCrossViewsRaise(TestCase) {
 
     def test_wrong_concrete_elem_raises() -> None {
         names: list[str] = ["a", "b"]
-        d: dict[str, Any] = {}
+        d: dict[str, Boxed] = {}
         d["k"] = names
         caught: bool = False
         try {
@@ -159,8 +162,8 @@ class TestCrossViewsRaise(TestCase) {
     }
 
     def test_elem_narrow_tag_check() -> None {
-        const any_l: Any = json.loads('[1, 2]')
-        const xs: list[Any] = any_l
+        const parsed: Data = json.loads('[1, 2]')
+        const xs: list[Data] = parsed
         caught: bool = False
         try {
             const s: str = xs[0]

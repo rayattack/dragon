@@ -1,3 +1,4 @@
+from database.base import Value
 from unittest import TestCase, main
 import database
 from database import SQL, ConnectionError
@@ -13,7 +14,7 @@ class DatabaseTests(TestCase) {
     """D032 database stdlib (SQLite backend) end-to-end.
 
     Exercises the Phase 1 surface via the real driver: template[SQL] parameter
-    binding, native-typed dict[str, Any] rows, the Customer(**row) typed-conversion
+    binding, native-typed dict[str, Value] rows, the Customer(**row) typed-conversion
     gate, and the structural injection-safety guarantee (a payload reaches a bound
     param, never the SQL text - the table survives).
     """
@@ -24,9 +25,9 @@ class DatabaseTests(TestCase) {
         nm: str = "dragon"
         sc: float = 9.5
         db.run(template[SQL] { insert into t(name, score) values(!{nm}, !{sc}) })
-        rows: list[dict[str, Any]] = db.all(template[SQL] { select id, name, score from t })
+        rows: list[dict[str, Value]] = db.all(template[SQL] { select id, name, score from t })
         self.assertEqual(len(rows), 1)
-        r: dict[str, Any] = rows[0]
+        r: dict[str, Value] = rows[0]
         self.assertEqual(r["id"], 1)
         self.assertEqual(r["name"], "dragon")
         got: float = r["score"]
@@ -41,7 +42,7 @@ class DatabaseTests(TestCase) {
         db.run(template[SQL] { insert into t(name) values(!{evil}) })
         cnt: int = db.val(template[SQL] { select count(*) from t })
         self.assertEqual(cnt, 1)
-        row: dict[str, Any] = db.one(template[SQL] { select name from t })
+        row: dict[str, Value] = db.one(template[SQL] { select name from t })
         self.assertEqual(row["name"], "'; DROP TABLE t; --")
         db.close()
     }
@@ -219,11 +220,11 @@ class MySqlTests(TestCase) {
             self.assertEqual(res.xid, 1)
 
             minscore: float = 5.0
-            rows: list[dict[str, Any]] = db.all(template[SQL] {
+            rows: list[dict[str, Value]] = db.all(template[SQL] {
                 select id, name, score, flag from dr_my_test where score > !{minscore}
             })
             self.assertEqual(len(rows), 1)
-            r: dict[str, Any] = rows[0]
+            r: dict[str, Value] = rows[0]
             self.assertEqual(r["id"], 1)
             self.assertEqual(r["name"], "'; drop table dr_my_test; --")
             got: float = r["score"]
@@ -232,7 +233,7 @@ class MySqlTests(TestCase) {
 
             cnt: int = db.val(template[SQL] { select count(*) as n from dr_my_test })
             self.assertEqual(cnt, 1)
-            one: dict[str, Any] = db.one(template[SQL] { select name from dr_my_test })
+            one: dict[str, Value] = db.one(template[SQL] { select name from dr_my_test })
             self.assertEqual(one["name"], "'; drop table dr_my_test; --")
             db.close()
         } except ConnectionError {
@@ -250,7 +251,7 @@ class PostgresTests(TestCase) {
 
     Exercises the real wire-protocol driver: `database.open("postgres://...")`
     SCRAM-SHA-256 auth, the extended query protocol with template[SQL] parameter
-    binding (TEXT format), oid->dragon type mapping into dict[str, Any] rows, and
+    binding (TEXT format), oid->dragon type mapping into dict[str, Value] rows, and
     the shared base-class surface (one / scalar) dispatching to PgConnection.
 
     Self-gating: if no Postgres is reachable at the test DSN the whole body raises
@@ -271,18 +272,18 @@ class PostgresTests(TestCase) {
             b: str = "O'Brien"
             c: float = 2.5
             flag: bool = True
-            rows: list[dict[str, Any]] = db.all(template[SQL] {
+            rows: list[dict[str, Value]] = db.all(template[SQL] {
                 select !{a}::int as a, !{b}::text as b, !{c}::float8 as c, !{flag}::bool as d
             })
             self.assertEqual(len(rows), 1)
-            r: dict[str, Any] = rows[0]
+            r: dict[str, Value] = rows[0]
             self.assertEqual(r["a"], 42)
             self.assertEqual(r["b"], "O'Brien")
             got: float = r["c"]
             self.assertAlmostEqual(got, 2.5)
             self.assertEqual(r["d"], True)
 
-            nrow: dict[str, Any] = db.one(template[SQL] { select null::int as n })
+            nrow: dict[str, Value] = db.one(template[SQL] { select null::int as n })
             self.assertEqual(nrow["n"], none)
 
             db.raw("create temp table dr_pg_test(id serial primary key, name text)")
@@ -294,7 +295,7 @@ class PostgresTests(TestCase) {
 
             cnt: int = db.val(template[SQL] { select count(*) as n from dr_pg_test })
             self.assertEqual(cnt, 1)
-            stored: dict[str, Any] = db.one(template[SQL] { select name from dr_pg_test })
+            stored: dict[str, Value] = db.one(template[SQL] { select name from dr_pg_test })
             self.assertEqual(stored["name"], "'; drop table dr_pg_test; --")
 
             db.raw("drop table dr_pg_test")

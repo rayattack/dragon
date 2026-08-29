@@ -148,7 +148,7 @@ Reading and writing structured data: JSON, CSV, INI, TOML, and binary.
 
 | Module | Purpose | Chapter |
 |--------|---------|---------|
-| `json` | JSON encode/decode/validate (schema-directed `decode[T]`/`encode[T]`; `loads` → `Any`; `dumps(obj)`; the `Schema` registry) | [Data Formats](/docs/1404-stdlib-data) |
+| `json` | JSON encode/decode/validate (schema-directed `decode[T]`/`encode[T]`; `loads` → `Data`; `dumps(obj)`; the `Schema` registry) | [Data Formats](/docs/1404-stdlib-data) |
 | `csv` | CSV `parse_row`/`format_row` with explicit delimiter | [Data Formats](/docs/1404-stdlib-data) |
 | `configparser` | INI files - sections, key-values, comments | [Data Formats](/docs/1404-stdlib-data) |
 | `tomllib` | Read-only TOML, returning a typed `TomlDoc` | [Data Formats](/docs/1404-stdlib-data) |

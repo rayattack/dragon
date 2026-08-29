@@ -100,28 +100,32 @@ std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
     if (auto* g = dynamic_cast<const GenericTypeExpr*>(t)) {
         auto sub = std::make_unique<SubscriptExpr>();
         sub->object = typeExprToValueExpr(g->base.get());
+        if (!sub->object) return nullptr;
+        // A type argument that has no value form (a union) does not stop the
+        // whole expression being usable: in value position a generic is being
+        // CONSTRUCTED (`T(**row)`), and construction depends on the base, not
+        // on the element annotations. Fall back to the bare base rather than
+        // emitting a null the visitors would dereference.
         if (g->typeArgs.size() == 1) {
             sub->index = typeExprToValueExpr(g->typeArgs[0].get());
+            if (!sub->index) return typeExprToValueExpr(g->base.get());
         } else {
             auto tup = std::make_unique<TupleExpr>();
-            for (auto& a : g->typeArgs) tup->elements.push_back(typeExprToValueExpr(a.get()));
+            for (auto& a : g->typeArgs) {
+                auto v = typeExprToValueExpr(a.get());
+                if (!v) return typeExprToValueExpr(g->base.get());
+                tup->elements.push_back(std::move(v));
+            }
             sub->index = std::move(tup);
         }
         return sub;
     }
-    if (auto* u = dynamic_cast<const UnionTypeExpr*>(t)) {
-        std::unique_ptr<Expr> acc;
-        for (auto& mem : u->types) {
-            auto v = typeExprToValueExpr(mem.get());
-            if (!v) return nullptr;
-            if (!acc) { acc = std::move(v); continue; }
-            auto bin = std::make_unique<BinaryExpr>();
-            bin->left = std::move(acc);
-            bin->op = Token(TokenType::PIPE, "|", SourceLocation{});
-            bin->right = std::move(v);
-            acc = std::move(bin);
-        }
-        return acc;
+    if (dynamic_cast<const UnionTypeExpr*>(t)) {
+        // A union names a set of arms; it has no value form. Emitting one built
+        // a `|` over the builtin conversion FUNCTIONS (`int | float`), which is
+        // a bitwise-or on callables, not a type. Decline so the caller keeps
+        // the type-parameter name instead of stamping nonsense.
+        return nullptr;
     }
     return nullptr;
 }
@@ -716,6 +720,111 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         return r;
     }
     return cloneMissingCase("Stmt", *s);
+}
+
+bool typeExprMentionsName(const TypeExpr* t, const std::string& name) {
+    if (!t) return false;
+    if (auto* n = dynamic_cast<const NamedTypeExpr*>(t))
+        return n->name == name;
+    if (auto* g = dynamic_cast<const GenericTypeExpr*>(t)) {
+        if (typeExprMentionsName(g->base.get(), name)) return true;
+        for (auto& a : g->typeArgs)
+            if (typeExprMentionsName(a.get(), name)) return true;
+        return false;
+    }
+    if (auto* o = dynamic_cast<const OptionalTypeExpr*>(t))
+        return typeExprMentionsName(o->inner.get(), name);
+    if (auto* u = dynamic_cast<const UnionTypeExpr*>(t)) {
+        for (auto& m : u->types)
+            if (typeExprMentionsName(m.get(), name)) return true;
+        return false;
+    }
+    if (auto* c = dynamic_cast<const CallableTypeExpr*>(t)) {
+        for (auto& p : c->paramTypes)
+            if (typeExprMentionsName(p.get(), name)) return true;
+        return typeExprMentionsName(c->returnType.get(), name);
+    }
+    if (auto* tt = dynamic_cast<const TupleTypeExpr*>(t)) {
+        for (auto& e : tt->elementTypes)
+            if (typeExprMentionsName(e.get(), name)) return true;
+        return false;
+    }
+    return false;
+}
+
+void canonicalizeTypeAliases(const std::vector<Module*>& modulesInDepOrder) {
+    // module name -> that module's own top-level aliases, expanded
+    std::unordered_map<std::string, TypeSubst> exportedAliases;
+    // Owns every expanded definition; substituted copies are cloned into the
+    // ASTs, so this only needs to live for the duration of the pass.
+    std::vector<std::unique_ptr<TypeExpr>> owned;
+
+    for (Module* m : modulesInDepOrder) {
+        if (!m) continue;
+        TypeSubst visible;
+        TypeSubst own;
+        // Several passes over the module: a use that appears ABOVE its `type`
+        // declaration must still resolve (module-level names resolve before
+        // codegen, so substitution cannot depend on source order), and each
+        // extra round resolves one more level of alias-of-alias chaining.
+        for (int round = 0; round < 4; ++round)
+        for (auto& stmt : m->body) {
+            if (auto* fi = dynamic_cast<FromImportStmt*>(stmt.get())) {
+                auto srcIt = exportedAliases.find(fi->module);
+                if (srcIt == exportedAliases.end()) continue;
+                for (auto& al : fi->names) {
+                    auto aIt = srcIt->second.find(al.name);
+                    if (aIt == srcIt->second.end()) continue;
+                    visible[al.asName.empty() ? al.name : al.asName] = aIt->second;
+                }
+            } else if (auto* ta = dynamic_cast<TypeAliasStmt*>(stmt.get())) {
+                if (!ta->value) continue;
+                if (typeExprMentionsName(ta->value.get(), ta->name)) {
+                    // Recursive alias: textual substitution would never
+                    // terminate. Uses keep (or are renamed back to) the
+                    // canonical name; the checker ties the knot and codegen
+                    // resolves the name through its alias table.
+                    auto canonical = std::make_unique<NamedTypeExpr>();
+                    canonical->name = ta->name;
+                    own[ta->name] = canonical.get();
+                    visible[ta->name] = canonical.get();
+                    owned.push_back(std::move(canonical));
+                    continue;
+                }
+                // Expand with what is visible so far, so alias-of-alias chains
+                // resolve fully (declaration order matters, as in the checker).
+                auto expanded = cloneTypeExpr(ta->value.get(), visible);
+                own[ta->name] = expanded.get();
+                visible[ta->name] = expanded.get();
+                owned.push_back(std::move(expanded));
+            }
+        }
+        if (!visible.empty()) {
+            // A generic's type parameters are not aliases: an alias sharing a
+            // name with any type parameter in this module is left alone rather
+            // than risking substitution inside the generic's own scope.
+            for (auto& stmt : m->body) {
+                auto stripParams = [&](const std::vector<TypeParam>& tps) {
+                    for (auto& tp : tps) visible.erase(tp.name);
+                };
+                if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get()))
+                    stripParams(fd->typeParams);
+                else if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
+                    stripParams(cd->typeParams);
+                    for (auto& ms : cd->body)
+                        if (auto* md = dynamic_cast<FunctionDecl*>(ms.get()))
+                            stripParams(md->typeParams);
+                }
+            }
+        }
+        if (!visible.empty()) {
+            for (auto& stmt : m->body) {
+                auto replaced = cloneStmt(stmt.get(), visible);
+                if (replaced) stmt = std::move(replaced);
+            }
+        }
+        exportedAliases[m->moduleName] = std::move(own);
+    }
 }
 
 }

@@ -1027,7 +1027,7 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                             Type::Kind tk =
                                 elemVarKindToTypeKind(typeExprToKind(p.type.get()));
                             vaInfo.varArgElemTag = typeKindToElemTag(tk);
-                            vaInfo.varArgElemIsAny = (tk == Type::Kind::Any);
+                            vaInfo.varArgElemIsAny = (tk == Type::Kind::Boxed);
                         }
                         paramTypes.push_back(i8PtrType);
                         tagMask.push_back(false);
@@ -1412,7 +1412,7 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                             Type::Kind tk =
                                 elemVarKindToTypeKind(typeExprToKind(p.type.get()));
                             vaInfo.varArgElemTag = typeKindToElemTag(tk);
-                            vaInfo.varArgElemIsAny = (tk == Type::Kind::Any);
+                            vaInfo.varArgElemIsAny = (tk == Type::Kind::Boxed);
                         }
                         methodParamTypes.push_back(i8PtrType);
                         continue;

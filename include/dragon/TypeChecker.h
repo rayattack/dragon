@@ -16,7 +16,7 @@ public:
     enum class Kind {
         Int, Float, Bool, Str, Bytes, None_,
         List, Dict, Set, Tuple, Function, Task, Lock,
-        Class, Instance, Any, Never, Union, Optional, TypeVar, Unknown,
+        Class, Instance, Boxed, Never, Union, Optional, TypeVar, Unknown,
         Contract,
         Ptr,
         Module
@@ -113,6 +113,9 @@ public:
     bool spawnsFreshTask = false;
     bool hasArgMeta = false;
     bool isMethod = false;
+    // A function containing `yield`. Calling it produces a lazy sequence that
+    // only `for` consumes; there is no nameable generator type to bind.
+    bool isGenerator = false;
     FunctionType(std::vector<std::shared_ptr<Type>> params, std::shared_ptr<Type> ret)
         : paramTypes(std::move(params)), returnType(std::move(ret)) {}
     Kind kind() const override { return Kind::Function; }
@@ -171,6 +174,9 @@ public:
 class UnionType : public Type {
 public:
     std::vector<std::shared_ptr<Type>> types;
+    // Set only on a recursive alias's knot (e.g. "Data"): names the union in
+    // diagnostics and keeps toString/equals from recursing through the cycle.
+    std::string aliasName;
     explicit UnionType(std::vector<std::shared_ptr<Type>> ts) : types(std::move(ts)) {}
     Kind kind() const override { return Kind::Union; }
     std::string toString() const override;
@@ -178,11 +184,11 @@ public:
     bool isSubtypeOf(const Type& other) const override;
 };
 
-class AnyType : public Type {
+class BoxedType : public Type {
 public:
-    Kind kind() const override { return Kind::Any; }
-    std::string toString() const override { return "Any"; }
-    bool equals(const Type& other) const override { return other.kind() == Kind::Any; }
+    Kind kind() const override { return Kind::Boxed; }
+    std::string toString() const override { return "<boxed>"; }
+    bool equals(const Type& other) const override { return other.kind() == Kind::Boxed; }
     bool isSubtypeOf(const Type&) const override { return true; }
 };
 
@@ -225,6 +231,9 @@ public:
     std::string name;
     std::string filepath;
     std::unordered_map<std::string, std::shared_ptr<Type>> exports;
+    // `type` aliases declared at the module's top level; imported into the
+    // consumer's type namespace, never as value bindings.
+    std::unordered_map<std::string, std::shared_ptr<Type>> typeExports;
     std::unordered_map<std::string, std::shared_ptr<ModuleType>> submodules;
     explicit ModuleType(std::string n) : name(std::move(n)) {}
     Kind kind() const override { return Kind::Module; }
@@ -250,7 +259,8 @@ public:
 
     void registerExternalModule(const std::string& moduleName,
                                 const std::unordered_map<std::string, std::shared_ptr<Type>>& exports,
-                                const std::string& filepath = "");
+                                const std::string& filepath = "",
+                                const std::unordered_map<std::string, std::shared_ptr<Type>>& typeExports = {});
 
     void registerExternalGenerics(Module& mod);
 
@@ -261,6 +271,7 @@ public:
         const std::shared_ptr<Type>& targetType, SourceLocation loc);
 
     std::unordered_map<std::string, std::shared_ptr<Type>> getExports() const;
+    std::unordered_map<std::string, std::shared_ptr<Type>> getTypeExports() const;
 
     void visit(NamedTypeExpr& node) override;
     void visit(GenericTypeExpr& node) override;
@@ -375,6 +386,8 @@ private:
 
     std::shared_ptr<Type> resolveTemplateContentType(const std::string& contentType,
                                                      const SourceLocation& loc);
+
+    void checkTemplateSplice(TemplatePart& part, const TemplateExpr& node);
 
     void visitClassDeclBody(ClassDecl& node);
 

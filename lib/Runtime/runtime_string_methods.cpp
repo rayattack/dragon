@@ -1036,6 +1036,8 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
 
 const char* dragon_str_join_ptr(const char* sep, DragonListPtr* l) {
     if (!l || l->size == 0) return dragon_string_alloc("", 0);
+    if (l->elem_tag != TAG_STR)
+        dragon_raise_exc_cstr(80, "TypeError: join expects a list of str");
     int64_t n = l->size;
     const char** items = (const char**)dragon_xmalloc_n(n, sizeof(char*));
     for (int64_t i = 0; i < n; ++i) items[i] = (const char*)l->data[i];

@@ -1,6 +1,8 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 import struct
-from struct import pack, unpack, calcsize, error
+from struct import pack, unpack, calcsize, error, Field
 from base64 import b64encode, b64decode, urlsafe_b64decode
 
 
@@ -33,17 +35,21 @@ class StructTests(TestCase) {
     }
 
     def test_unpack_roundtrip() {
-        vals: list[Any] = unpack(">dhb", pack(">dhb", 2.5, -7, 100))
+        vals: list[Field] = unpack(">dhb", pack(">dhb", 2.5, -7, 100))
         self.assertEqual(len(vals), 3)
-        gotd: float = vals[0]
+        v0: Field = vals[0]
+        gotd: float = 0.0
+        if isinstance(v0, float) { gotd = v0 }
         self.assertAlmostEqual(gotd, 2.5)
         self.assertEqual(vals[1], -7)
         self.assertEqual(vals[2], 100)
     }
 
     def test_unpack_known_bytes() {
-        pi: list[Any] = unpack(">d", bytes([0x40, 0x09, 0x21, 0xfb, 0x54, 0x44, 0x2d, 0x18]))
-        got: float = pi[0]
+        pi: list[Field] = unpack(">d", bytes([0x40, 0x09, 0x21, 0xfb, 0x54, 0x44, 0x2d, 0x18]))
+        p0: Field = pi[0]
+        got: float = 0.0
+        if isinstance(p0, float) { got = p0 }
         self.assertAlmostEqual(got, 3.141592653589793)
         self.assertEqual(unpack("<h", bytes([0xFF, 0xFF]))[0], -1)
         self.assertEqual(unpack("<H", bytes([0xFF, 0xFF]))[0], 65535)
@@ -119,9 +125,9 @@ class CharFormatTests(TestCase) {
     }
 
     def test_unpack_c() {
-        const vals: list[Any] = unpack("c", b"A")
+        const vals: list[Field] = unpack("c", b"A")
         self.assertEqual(len(vals), 1)
-        const got: Any = vals[0]
+        const got: Boxed = vals[0]
         self.assertTrue(isinstance(got, bytes))
         self.assertEqual(len(got), 1)
         const b0: int = got[0]
@@ -142,8 +148,8 @@ class CharFormatTests(TestCase) {
     def test_c_roundtrip_mixed() {
         const b: bytes = pack(">ch", b"Z", -2)
         self.assertEqual(b.hex(), "5afffe")
-        const vals: list[Any] = unpack(">ch", b)
-        const c0: Any = vals[0]
+        const vals: list[Field] = unpack(">ch", b)
+        const c0: Boxed = vals[0]
         self.assertTrue(isinstance(c0, bytes))
         const z0: int = c0[0]
         self.assertEqual(z0, 90)

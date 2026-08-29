@@ -1,14 +1,16 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
 from unittest import TestCase, main
 
 
 class Store {
     tag: str = "s"
 
-    def read(**keys: Any) -> int {
+    def read(**keys: Boxed) -> int {
         return len(keys)
     }
 
-    def query(docid: int, **keys: Any) -> int {
+    def query(docid: int, **keys: Boxed) -> int {
         return docid * 100 + len(keys)
     }
 
@@ -28,8 +30,8 @@ class Store {
         return t
     }
 
-    def echo(key: str, **keys: Any) -> str {
-        v: Any = keys[key]
+    def echo(key: str, **keys: Boxed) -> str {
+        v: Boxed = keys[key]
         return str(v)
     }
 }
@@ -37,13 +39,13 @@ class Store {
 
 class Bag {
     saved: str = ""
-    pack: dict[str, Any] = {}
+    pack: dict[str, Boxed] = {}
 
-    def keep_value(key: str, **keys: Any) -> None {
+    def keep_value(key: str, **keys: Boxed) -> None {
         self.saved = str(keys[key])
     }
 
-    def keep_pack(**keys: Any) -> None {
+    def keep_pack(**keys: Boxed) -> None {
         self.pack = keys
     }
 }
@@ -192,7 +194,7 @@ class MethodKwargsTests(TestCase) {
     but were broken on methods: `q.read(id=1)` errored "unexpected keyword
     argument", and a positional-plus-`**keys` call emitted a null LLVM operand
     (verify fail). This is the method-side of the same surface, including the
-    refcount-sensitive `**keys: Any` case where each kwarg value is a heap string:
+    refcount-sensitive `**keys: Boxed` case where each kwarg value is a heap string:
     the packed dict is a call-site-owned temporary and must be released after the
     call, and its owned entries must survive being read back.
     """

@@ -49,16 +49,18 @@ from http.server import Router, Request, Response, Context
 from html import escape, HTML
 import database
 from database import SQL
+from json import Data
+from database.base import Value
 
 db: database.Connection = database.open("sqlite:///tmp/players.db")
 db.raw("create table if not exists players (id integer primary key, name text, score integer)")
 
 def render_page() -> HTML {
-    rows: list[dict[str, Any]] = db.all(template[SQL] { select name, score from players order by score desc })
+    rows: list[dict[str, Value]] = db.all(template[SQL] { select name, score from players order by score desc })
     items: str = ""
     for row in rows {
         nm: str = row["name"]
-        sc: Any = row["score"]
+        sc: Value = row["score"]
         items = items + "<li>" + escape(nm) + ": " + str(sc) + "</li>"
     }
     page: str = template {
@@ -242,6 +244,7 @@ identically:
 from http.server import Router, Request, Response, Context
 import database
 from database import SQL
+from json import Data
 
 db: database.Connection = database.open("sqlite::memory:")
 db.raw("create table t (id integer primary key, n text)")
@@ -249,7 +252,7 @@ db.run(template[SQL] { insert into t (n) values (!{"alpha"}) })
 
 # A named handler function - same signature as the lambda form.
 def home(req: Request, res: Response, ctx: Context) -> None {
-    row: dict[str, Any] = db.one(template[SQL] { select n from t where id = !{1} })
+    row: dict[str, Data] = db.one(template[SQL] { select n from t where id = !{1} })
     name: str = row["n"]
     total: int = db.val(template[SQL] { select count(*) from t })
     res.text("first=" + name + " count=" + str(total))
@@ -292,8 +295,8 @@ Form values are always strings, so coerce the numeric ones with `int(...)`
 or `float(...)` yourself - the wire has no types. For file uploads,
 `req.files()` returns the uploaded parts instead.
 
-`req.json()` *decodes* the request body, returning an `Any` tree - JSON
-objects become `dict[str, Any]`, arrays become `list[Any]`, and scalars
+`req.json()` *decodes* the request body, returning an `Data` tree - JSON
+objects become `dict[str, Data]`, arrays become `list[Data]`, and scalars
 are boxed. It decodes the verbatim body bytes and raises `ValueError`
 (with a byte offset) on malformed JSON. Malformed is not the same as
 wrong-shaped: to enforce a contract on what the decoded JSON *contains*,
@@ -303,7 +306,7 @@ named schemas at startup, validate each body by name; see
 paths on a miss. When you want the undecoded body
 to validate or parse yourself, read `req.body` (the request body as a
 `str`) or `req.body_bytes` (the verbatim bytes). And when you already
-know the shape, skip the `Any` tree entirely: `decode[T](req.body_bytes)`
+know the shape, skip the `Data` tree entirely: `decode[T](req.body_bytes)`
 reads the body straight into your own class, box-free, with missing or
 mismatched fields raising `ValueError` - see the schema-directed decoders
 in [Data Formats](/docs/1404-stdlib-data):
@@ -449,9 +452,9 @@ The connection methods:
 
 | Method | Returns | For |
 |--------|---------|-----|
-| `db.all(sql)` | `list[dict[str, Any]]` | many rows |
-| `db.one(sql)` | `dict[str, Any]` | exactly one row (raises on 0 or >1) |
-| `db.val(sql)` | `Any` | the first column of the one row |
+| `db.all(sql)` | `list[dict[str, Data]]` | many rows |
+| `db.one(sql)` | `dict[str, Data]` | exactly one row (raises on 0 or >1) |
+| `db.val(sql)` | `Data` | the first column of the one row |
 | `db.run(sql)` | `Results` | INSERT/UPDATE/DELETE |
 | `db.raw(text)` | `Results` | the escape hatch: no params, verbatim |
 
@@ -459,7 +462,7 @@ Each fetch method also takes an optional `[T]` that types the result:
 `db.all[Customer](sql)` returns a `list[Customer]`, `db.one[Customer](sql)`
 a `Customer`, and `db.val[int](sql)` an `int`. When the result is assigned
 to an annotated binding the bare form infers `T` from the annotation, so
-`n: int = db.val(sql)` and `rows: list[dict[str, Any]] = db.all(sql)` need
+`n: int = db.val(sql)` and `rows: list[dict[str, Value]] = db.all(sql)` need
 no explicit `[T]`; supply it where there is no annotation to read from,
 such as in an argument position (`print(db.val[int](sql))`).
 
@@ -470,23 +473,25 @@ data goes through `template[SQL]`. The mutating calls `run` and `raw`
 return a `Results`, whose `.ran` is the number of rows affected and whose
 `.xid` is the last inserted row id.
 
-A result row is a `dict[str, Any]` keyed by column name, in column order.
-Read a column with `row["name"]`; because the value type is `Any`, bind a
+A result row is a `dict[str, Data]` keyed by column name, in column order.
+Read a column with `row["name"]`; because the value type is `Data`, bind a
 known-string column straight into a `str` and a numeric column into an
-`Any` you can `str(...)` for display - exactly what `render_page` does:
+`Data` you can `str(...)` for display - exactly what `render_page` does:
 
 ```dragon
 import database
 from database import SQL
 from html import escape
+from json import Data
+from database.base import Value
 
 db: database.Connection = database.open("sqlite:///tmp/players.db")
 items: str = ""
 
-rows: list[dict[str, Any]] = db.all(template[SQL] { select name, score from players order by score desc })
+rows: list[dict[str, Value]] = db.all(template[SQL] { select name, score from players order by score desc })
 for row in rows {
     nm: str = row["name"]
-    sc: Any = row["score"]
+    sc: Value = row["score"]
     items = items + "<li>" + escape(nm) + ": " + str(sc) + "</li>"
 }
 ```
@@ -646,7 +651,7 @@ documentation you are reading was delivered by the stack it describes.
 | Read a query param | `req.query_str("q", "default")` (typed: `query_int`, ...) |
 | Read a form body | `form: dict[str, str] = req.form()` |
 | Read a JSON body (known shape) | `u: User = decode[User](req.body_bytes)` - box-free |
-| Read a JSON body (unknown shape) | `tree: Any = req.json()` (boxed `Any` tree) |
+| Read a JSON body (unknown shape) | `tree: Data = req.json()` (the declared JSON domain) |
 | Send HTML / text / JSON | `res.html(s)` / `res.text(s)` / `res.json(s)` |
 | Set status + body | `res.out(404, "Not Found")` |
 | Redirect | `res.redirect("/")` (307) / `res.redirect("/", true)` (308) |

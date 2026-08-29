@@ -36,16 +36,16 @@ zs := [1, "a"]         # error: mixed literal has no single element type
 
 The fix is an annotation, never a silent fallback: `ys: list[int] = []`. An empty
 literal is fine the moment its type is given, and genuinely heterogeneous data is
-written `list[Any] = [1, "a", 3.0]` - you opt into the box explicitly. This is the
-honest-types rule from [Any](/docs/0703-any): ambiguity is something you annotate
+written `list[int | str] = [1, "a", 3.0]` - you opt into the box explicitly. This is the
+honest-types rule from [no dynamic tier](/docs/0703-any): ambiguity is something you annotate
 away at compile time, not a box the compiler picks for you behind your back (which
 would quietly cost you the C data layout this whole page is about).
 
 ## One list, two layouts
 
-`list[str]` and `list[Any]` are not the same container with different labels -
+`list[str]` and `list[int | str]` are not the same container with different labels -
 they have different memory layouts. A concrete list stores raw values at 8
-bytes per element; a `list[Any]` stores a 16-byte `{tag, value}` box per
+bytes per element; a `list[int | str]` stores a 16-byte `{tag, value}` box per
 element so every slot can carry its own type. That split is what keeps the
 concrete tier C-fast, and it has one visible consequence: **a list value never
 changes layout by flowing through an annotation.**
@@ -111,6 +111,7 @@ def count_strings(v: Any) -> int {
 names: list[str] = ["a", "b"]     # monomorphized
 print(count_strings(names))       # 2
 import json
+from json import Data
 print(count_strings(json.loads('["c", 1]')))   # 1 - a parsed box list
 ```
 

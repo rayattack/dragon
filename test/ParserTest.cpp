@@ -1048,7 +1048,7 @@ TEST(ParserTest, FunctionKwArgs) {
 TEST(ParserTest, BareVarArgsRequiresAnnotation) {
     EXPECT_FALSE(parseErrors("def f(*args) {\n  pass\n}").empty());
     EXPECT_FALSE(parseErrors("def g(**kwargs) {\n  pass\n}").empty());
-    EXPECT_TRUE(parseErrors("def h(*args: Any) {\n  pass\n}").empty());
+    EXPECT_TRUE(parseErrors("def h(*args: int | str) {\n  pass\n}").empty());
     EXPECT_TRUE(parseErrors("def k(a: int, *, b: int) -> int {\n  return b\n}").empty());
 }
 

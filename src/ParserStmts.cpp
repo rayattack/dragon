@@ -1701,7 +1701,7 @@ std::vector<Parameter> Parser::parseParameters() {
         if ((param.isVarArg || param.isKwArg) && !param.name.empty() && !param.type) {
             std::string sig = param.isKwArg ? "**" : "*";
             error("'" + sig + param.name + "' requires a type annotation: use '" +
-                  sig + param.name + ": Any' for heterogeneous arguments, or a "
+                  sig + param.name + ": int | str' (a declared union) for heterogeneous arguments, or a "
                   "concrete element type such as '" + sig + param.name + ": int'");
         }
         params.push_back(std::move(param));

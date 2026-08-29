@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <unordered_map>
 
+#include "dragon/AstClone.h"
 #include "dragon/DefiniteAssignment.h"
 #include "dragon/OwnershipCheck.h"
 #include "dragon/Platform.h"
@@ -122,6 +123,20 @@ ReplFrontendResult replAnalyze(Module& analysisModule,
 
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::shared_ptr<Type>>> allExports;
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, std::shared_ptr<Type>>> allTypeExports;
+
+    {
+        std::vector<Module*> ordered;
+        ordered.reserve(result.graph->modules.size() + 1);
+        for (auto& mod : result.graph->modules) {
+            mod.ast->moduleName = mod.name;
+            ordered.push_back(mod.ast.get());
+        }
+        ordered.push_back(&analysisModule);
+        canonicalizeTypeAliases(ordered);
+    }
+
     std::unordered_map<std::string, std::string> moduleFilepaths;
     for (auto& mod : result.graph->modules) moduleFilepaths[mod.name] = mod.filepath;
 
@@ -132,7 +147,8 @@ ReplFrontendResult replAnalyze(Module& analysisModule,
 
         TypeChecker modTypeChecker;
         for (auto& [modName, exports] : allExports)
-            modTypeChecker.registerExternalModule(modName, exports, moduleFilepaths[modName]);
+            modTypeChecker.registerExternalModule(modName, exports, moduleFilepaths[modName],
+                                                  allTypeExports[modName]);
         for (auto* prior : result.depModules)
             modTypeChecker.registerExternalGenerics(*prior);
 
@@ -149,6 +165,7 @@ ReplFrontendResult replAnalyze(Module& analysisModule,
         }
 
         allExports[mod.name] = modTypeChecker.getExports();
+        allTypeExports[mod.name] = modTypeChecker.getTypeExports();
         result.depModules.push_back(mod.ast.get());
 
         const bool resident = std::find(alreadyResident.begin(), alreadyResident.end(),
@@ -158,7 +175,8 @@ ReplFrontendResult replAnalyze(Module& analysisModule,
 
     TypeChecker entryTc;
     for (auto& [modName, exports] : allExports)
-        entryTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);
+        entryTc.registerExternalModule(modName, exports, moduleFilepaths[modName],
+                                       allTypeExports[modName]);
     for (auto* dep : result.depModules)
         entryTc.registerExternalGenerics(*dep);
 

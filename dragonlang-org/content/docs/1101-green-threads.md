@@ -150,6 +150,7 @@ A bound `Task[T]` is an ordinary scope-owned value, just like a `str` or a `list
 You never free it by hand, and you cannot leak one by forgetting to collect it:
 
 ```dragon
+from json import Data
 class Data { }
 class Response { }
 class Request {

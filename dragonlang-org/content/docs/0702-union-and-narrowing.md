@@ -138,4 +138,4 @@ just the second, often tidier, tool for the same narrowing job.
 
 A `T | None` over a pointer is free; a multi-type union is a 16-byte box you narrow
 to spend. When the type genuinely isn't known until runtime - not "one of these
-two" but "anything" - that's the next chapter: [Any](/docs/0703-any).
+two" but "anything" - that's the next chapter: [no dynamic tier](/docs/0703-any).

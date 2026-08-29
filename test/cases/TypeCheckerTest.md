@@ -298,13 +298,13 @@ pets: list[Animal] = [Plant()]
 
 ```dr
 names: list[str] = ["a", "b"]
-xs: list[Any] = names
+xs: list[int | str] = names
 ```
 
 #### :concrete_list_arg_not_assignable_to_list_any_param
 
 ```dr
-def first(xs: list[Any]) -> int {
+def first(xs: list[int | str]) -> int {
     return len(xs)
 }
 def run() -> None {
@@ -316,7 +316,7 @@ def run() -> None {
 #### :fresh_literal_arg_still_passable_to_list_any_param
 
 ```dr
-def first(xs: list[Any]) -> int {
+def first(xs: list[int | str]) -> int {
     return len(xs)
 }
 def run() -> None {
@@ -327,15 +327,15 @@ def run() -> None {
 #### :list_any_not_assignable_to_concrete_list
 
 ```dr
-xs: list[Any] = ["a", "b"]
+xs: list[int | float | str | bytes | list[int] | list[str] | list[float] | list[list[int]] | list[list[str]] | dict[str, int] | dict[str, str] | tuple[]] = ["a", "b"]
 names: list[str] = xs
 ```
 
-#### :dict_value_covariance_to_any_still_allowed
+#### :dict_value_covariance_to_union_rejected
 
 ```dr
 m: dict[str, int] = {"a": 1}
-d: dict[str, Any] = m
+d: dict[str, int | str] = m
 ```
 
 #### :str_arg_to_int_param_rejected
@@ -1265,7 +1265,7 @@ print(t.join)
 
 ```dr
 s: str = "abc"
-up: Callable[[Any], str] = s.upper
+up: Callable[[str], str] = s.upper
 ```
 
 #### :builtin_method_calls_still_ok
@@ -1605,7 +1605,7 @@ def go() -> str {
 #### :async_any_return_rejected
 
 ```dr
-async def gives(n: int) -> Any {
+async def gives(n: int) -> int | str {
     return n
 }
 ```
@@ -1613,10 +1613,10 @@ async def gives(n: int) -> Any {
 #### :fire_on_any_returning_callee_rejected
 
 ```dr
-def gives(n: int) -> Any {
+def gives(n: int) -> int | str {
     return n
 }
-t: Task[Any] = fire gives(1)
+t: Task[int | str] = fire gives(1)
 ```
 
 #### :dub_of_task_rejected

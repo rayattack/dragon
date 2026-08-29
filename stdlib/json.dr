@@ -1,10 +1,15 @@
 from template import Template
 
+# The closed value domain of parsed JSON: what `loads` can hand back and
+# what `dumps` can serialize. Declared here so every consumer names the
+# same type instead of widening to the dynamic tier.
+type Data = str | int | float | bool | none | list[Data] | dict[str, Data]
+
 extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
 extern "C" def dragon_int_to_str(value: int) -> str
 extern "C" def dragon_float_to_str(value: float) -> str
-extern "C" def dragon_json_dumps(obj: Any) -> str
+extern "C" def dragon_json_dumps(obj: Data) -> str
 extern "C" def dragon_bytes_get(b: bytes, idx: int) -> int
 extern "C" def dragon_chr(code: int) -> str
 extern "C" def dragon_ord(s: str) -> int
@@ -136,7 +141,7 @@ def unescape(s: str) -> str {
     return "".join(parts)
 }
 
-def dumps(obj: Any) -> str {
+def dumps(obj: Data) -> str {
     return dragon_json_dumps(obj)
 }
 
@@ -218,7 +223,7 @@ class _JsonParser {
         return dragon_bytes_get(self.buf, self.pos)
     }
 
-    def parse_value() -> Any {
+    def parse_value() -> Data {
         self._skip_ws()
         const c: int = self._peek()
         if c < 0 {
@@ -301,7 +306,7 @@ class _JsonParser {
         return text
     }
 
-    def _parse_number() -> Any {
+    def _parse_number() -> Data {
         const start: int = self.pos
         is_float: bool = false
         if self._peek() == _B_MINUS {
@@ -355,8 +360,8 @@ class _JsonParser {
         return dragon_str_to_int(span)
     }
 
-    def _parse_array() -> list[Any] {
-        const arr: list[Any] = []
+    def _parse_array() -> list[Data] {
+        const arr: list[Data] = []
         self._enter()
         self.pos = self.pos + 1
         self._skip_ws()
@@ -366,7 +371,7 @@ class _JsonParser {
             return arr
         }
         while true {
-            const v: Any = self.parse_value()
+            const v: Data = self.parse_value()
             arr.append(v)
             self._skip_ws()
             const c: int = self._peek()
@@ -384,8 +389,8 @@ class _JsonParser {
         return arr
     }
 
-    def _parse_object() -> dict[str, Any] {
-        const obj: dict[str, Any] = {}
+    def _parse_object() -> dict[str, Data] {
+        const obj: dict[str, Data] = {}
         self._enter()
         self.pos = self.pos + 1
         self._skip_ws()
@@ -405,7 +410,7 @@ class _JsonParser {
                 self._fail("expected ':' after object key")
             }
             self.pos = self.pos + 1
-            const v: Any = self.parse_value()
+            const v: Data = self.parse_value()
             obj[key] = v
             self._skip_ws()
             const c: int = self._peek()
@@ -968,9 +973,9 @@ def encode[T](value: T) -> bytes {
 }
 
 
-def loadb(data: bytes) -> Any {
+def loadb(data: bytes) -> Data {
     const p: _JsonParser = _JsonParser(data)
-    const v: Any = p.parse_value()
+    const v: Data = p.parse_value()
     p._skip_ws()
     if p.pos != p.n {
         p._fail("trailing data after JSON value")
@@ -978,33 +983,33 @@ def loadb(data: bytes) -> Any {
     return v
 }
 
-def loads(s: str) -> Any {
+def loads(s: str) -> Data {
     return loadb(s.encode("utf-8"))
 }
 
-def loadb_obj(data: bytes) -> dict[str, Any] {
-    const v: Any = loadb(data)
+def loadb_obj(data: bytes) -> dict[str, Data] {
+    const v: Data = loadb(data)
     if isinstance(v, dict) {
-        const m: dict[str, Any] = v
+        const m: dict[str, Data] = v
         return m
     }
     raise ValueError("JSON top-level value is not an object")
 }
 
-def loadb_list(data: bytes) -> list[Any] {
-    const v: Any = loadb(data)
+def loadb_list(data: bytes) -> list[Data] {
+    const v: Data = loadb(data)
     if isinstance(v, list) {
-        const xs: list[Any] = v
+        const xs: list[Data] = v
         return xs
     }
     raise ValueError("JSON top-level value is not an array")
 }
 
-def loads_obj(s: str) -> dict[str, Any] {
+def loads_obj(s: str) -> dict[str, Data] {
     return loadb_obj(s.encode("utf-8"))
 }
 
-def loads_list(s: str) -> list[Any] {
+def loads_list(s: str) -> list[Data] {
     return loadb_list(s.encode("utf-8"))
 }
 
@@ -1020,7 +1025,7 @@ class JSON(Template) {
 }
 
 
-def _json_kind(v: Any) -> str {
+def _json_kind(v: Data) -> str {
     if isinstance(v, bool) {
         return "boolean"
     }
@@ -1051,74 +1056,75 @@ def _type_matches(want: str, kind: str) -> bool {
 }
 
 
-def _num_val(v: Any) -> float {
+def _num_val(v: Data) -> float {
     if isinstance(v, int) {
         const i: int = v
         return float(i)
     }
-    const f: float = v
-    return f
+    if isinstance(v, float) {
+        const f: float = v
+        return f
+    }
+    return 0.0
 }
 
 
-def _json_eq(a: Any, b: Any) -> bool {
-    const ka: str = _json_kind(a)
-    const kb: str = _json_kind(b)
-    if ka != kb {
-        return False
-    }
-    if ka == "null" {
+def _json_eq(a: Data, b: Data) -> bool {
+    if a is none and b is none {
         return True
     }
-    if ka == "boolean" {
-        const x: bool = a
-        const y: bool = b
-        return x == y
+    if isinstance(a, bool) and isinstance(b, bool) {
+        const xb: bool = a
+        const yb: bool = b
+        return xb == yb
     }
-    if ka == "integer" {
-        const x: int = a
-        const y: int = b
-        return x == y
+    if isinstance(a, int) and isinstance(b, int) {
+        const xi: int = a
+        const yi: int = b
+        return xi == yi
     }
-    if ka == "number" {
-        const x: float = a
-        const y: float = b
-        return x == y
+    if isinstance(a, float) and isinstance(b, float) {
+        const xf: float = a
+        const yf: float = b
+        return xf == yf
     }
-    if ka == "string" {
-        const x: str = a
-        const y: str = b
-        return x == y
+    if isinstance(a, str) and isinstance(b, str) {
+        const xs: str = a
+        const ys: str = b
+        return xs == ys
     }
-    if ka == "array" {
-        if len(a) != len(b) {
+    if isinstance(a, list) and isinstance(b, list) {
+        const xl: list[Data] = a
+        const yl: list[Data] = b
+        if len(xl) != len(yl) {
             return False
         }
         i: int = 0
-        while i < len(a) {
-            const xa: Any = a[i]
-            const xb: Any = b[i]
-            if not _json_eq(xa, xb) {
+        while i < len(xl) {
+            if not _json_eq(xl[i], yl[i]) {
                 return False
             }
             i = i + 1
         }
         return True
     }
-    const xd: dict[str, Any] = a
-    const yd: dict[str, Any] = b
-    if len(xd) != len(yd) {
-        return False
-    }
-    for k in xd {
-        if not (k in yd) {
+    if isinstance(a, dict) and isinstance(b, dict) {
+        const xd: dict[str, Data] = a
+        const yd: dict[str, Data] = b
+        if len(xd) != len(yd) {
             return False
         }
-        if not _json_eq(xd[k], yd[k]) {
-            return False
+        for k in xd {
+            if not (k in yd) {
+                return False
+            }
+            if not _json_eq(xd[k], yd[k]) {
+                return False
+            }
         }
+        return True
     }
-    return True
+    return False
 }
 
 
@@ -1157,7 +1163,7 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
             errors.append(ValidationError(path, f"unknown $ref '{refname}'"))
             return
         }
-        const target: dict[str, Any] = schemas[refname]
+        const target: dict[str, Data] = schemas[refname]
         _schema_check(schemas, target, value, path, refdepth + 1, errors)
         return
     }
@@ -1167,7 +1173,7 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
     if "type" in schema {
         matched: bool = False
         want: str = ""
-        const tv: Any = schema["type"]
+        const tv: Data = schema["type"]
         if isinstance(tv, str) {
             const t: str = tv
             want = t
@@ -1175,8 +1181,8 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
         }
         if isinstance(tv, list) {
             names: list[str] = []
-            for t0 in tv {
-                const t1: str = t0
+            for t0 in as_list(tv) {
+                const t1: str = as_str(t0, "")
                 names.append(t1)
                 if _type_matches(t1, kind) {
                     matched = True
@@ -1191,9 +1197,8 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
     }
 
     if "enum" in schema {
-        const allowed: Any = schema["enum"]
         found: bool = False
-        for a in allowed {
+        for a in as_list(schema["enum"]) {
             if _json_eq(a, value) {
                 found = True
             }
@@ -1203,16 +1208,16 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
         }
     }
 
-    if kind == "string" {
+    if isinstance(value, str) {
         const s: str = value
         if "minLength" in schema {
-            const m: int = schema["minLength"]
+            const m: int = as_int(schema["minLength"], 0)
             if len(s) < m {
                 errors.append(ValidationError(path, f"string shorter than minLength {m}"))
             }
         }
         if "maxLength" in schema {
-            const m: int = schema["maxLength"]
+            const m: int = as_int(schema["maxLength"], 0)
             if len(s) > m {
                 errors.append(ValidationError(path, f"string longer than maxLength {m}"))
             }
@@ -1235,45 +1240,45 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
         }
     }
 
-    if kind == "array" {
+    if isinstance(value, list) {
+        const items: list[Data] = value
         if "minItems" in schema {
-            const m: int = schema["minItems"]
-            if len(value) < m {
+            const m: int = as_int(schema["minItems"], 0)
+            if len(items) < m {
                 errors.append(ValidationError(path, f"fewer than minItems {m}"))
             }
         }
         if "maxItems" in schema {
-            const m: int = schema["maxItems"]
-            if len(value) > m {
+            const m: int = as_int(schema["maxItems"], 0)
+            if len(items) > m {
                 errors.append(ValidationError(path, f"more than maxItems {m}"))
             }
         }
         if "items" in schema {
-            const isch: dict[str, Any] = schema["items"]
+            const isch: dict[str, Data] = as_obj(schema["items"])
             i: int = 0
-            for x in value {
+            for x in items {
                 _schema_check(schemas, isch, x, f"{path}[{i}]", 0, errors)
                 i = i + 1
             }
         }
     }
 
-    if kind == "object" {
-        const obj: dict[str, Any] = value
+    if isinstance(value, dict) {
+        const obj: dict[str, Data] = value
         if "required" in schema {
-            const req: Any = schema["required"]
-            for r in req {
-                const name: str = r
+            for r in as_list(schema["required"]) {
+                const name: str = as_str(r, "")
                 if not (name in obj) {
                     errors.append(ValidationError(f"{path}.{name}", "required property missing"))
                 }
             }
         }
         if "properties" in schema {
-            const props: dict[str, Any] = schema["properties"]
+            const props: dict[str, Data] = as_obj(schema["properties"])
             for name in props {
                 if name in obj {
-                    const sub: dict[str, Any] = props[name]
+                    const sub: dict[str, Data] = as_obj(props[name])
                     _schema_check(schemas, sub, obj[name], f"{path}.{name}", 0, errors)
                 }
             }
@@ -1284,7 +1289,7 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
 
 class Schema {
     _dialect: str
-    _schemas: dict[str, dict[str, Any]]
+    _schemas: dict[str, dict[str, Data]]
 
     def(dialect: str) {
         const d: str = dialect.strip().lower()
@@ -1298,12 +1303,12 @@ class Schema {
         self._schemas = {}
     }
 
-    def register(name: str, schema: dict[str, Any]) -> None {
+    def register(name: str, schema: dict[str, Data]) -> None {
         self._schemas[name] = schema
     }
 
-    def validate(name: str, payload: Any) -> ValidationResult {
-        const s: dict[str, Any] = self._schemas[name]
+    def validate(name: str, payload: Data) -> ValidationResult {
+        const s: dict[str, Data] = self._schemas[name]
         errors: list[ValidationError] = []
         _schema_check(self._schemas, s, payload, "$", 0, errors)
         return ValidationResult(errors)
