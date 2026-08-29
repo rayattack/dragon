@@ -7,13 +7,15 @@ same four collection types with the same method names, indentation in
 by** Python - it is not a superset and not a dialect. It is a typed,
 compiled language that targets LLVM and produces a native binary.
 
-> **Set expectations honestly.** You cannot take an arbitrary Python
-> program - `numpy`, `pandas`, Flask, Django, anything reaching for the
-> CPython C API - and compile it with Dragon. Those do not work, and
-> they never will. What works is a typed file that stays inside the
-> subset Dragon implements, plus a batteries-included
-> [standard library](/docs/2004-appendix-stdlib) that mirrors the Python module
-> shapes Dragon ships.
+> Dragon is not a Python runtime. Flask, Django, `numpy`, and `pandas` do
+> not compile here, and the reason is overlap rather than packaging: they
+> are built on the dynamic half of Python that Dragon leaves out by design
+> (duck typing, monkey-patching, `__dict__` injection, `eval`/`exec`,
+> metaclass magic, untyped `*args`/`**kwargs`, and for the numeric stack,
+> C extension modules). What compiles is a typed file that stays inside
+> the language Dragon implements, against a
+> [standard library](/docs/2004-appendix-stdlib) that mirrors the Python
+> module shapes Dragon ships.
 
 This appendix walks through what carries over unchanged, what you adjust
 slightly, and the handful of places where the mental model genuinely

@@ -306,26 +306,30 @@ def render(md: str) -> str {
     code_lang: str = ""
     code_lines: list[str] = []
     para: list[str] = []
+    quote: list[str] = []
 
     def close_para() -> None {
         nonlocal out, para
         if len(para) > 0 {
-            joined: str = ""
-            j: int = 0
-            while j < len(para) {
-                if j > 0 {
-                    joined = joined + " "
-                }
-                joined = joined + _render_inline(para[j])
-                j = j + 1
-            }
-            out = out + "<p>" + joined + "</p>\n"
+            out = out + "<p>" + _render_inline(" ".join(para)) + "</p>\n"
             para = []
         }
     }
 
+    def close_quote() -> None {
+        nonlocal out, quote, in_quote
+        if len(quote) > 0 {
+            out = out + "<p>" + _render_inline(" ".join(quote)) + "</p>\n"
+            quote = []
+        }
+        if in_quote {
+            out = out + "</blockquote>\n"
+            in_quote = false
+        }
+    }
+
     def close_lists() -> None {
-        nonlocal out, in_ul, in_ol, in_quote
+        nonlocal out, in_ul, in_ol
         if in_ul {
             out = out + "</ul>\n"
             in_ul = false
@@ -334,18 +338,15 @@ def render(md: str) -> str {
             out = out + "</ol>\n"
             in_ol = false
         }
-        if in_quote {
-            out = out + "</blockquote>\n"
-            in_quote = false
-        }
+        close_quote()
     }
 
     i: int = 0
     while i < len(lines) {
-        const raw: str = _rstrip(lines[i])
+        const raw: str = lines[i].rstrip()
 
         if in_code {
-            if _starts_with(_strip(raw), "```") {
+            if raw.strip().startswith("```") {
                 out = out + _render_code_block(code_lang, code_lines)
                 in_code = false
                 code_lines = []
@@ -449,15 +450,15 @@ def render(md: str) -> str {
                 out = out + "<blockquote>\n"
                 in_quote = true
             }
-            out = out + "<p>" + _render_inline(stripped[2:]) + "</p>\n"
+            quote.append(stripped[2:])
             i = i + 1
             continue
         }
 
-        if _starts_with(stripped, "- ") or _starts_with(stripped, "* ") {
+        if stripped.startswith("- ") or stripped.startswith("* ") {
             close_para()
             if in_ol { out = out + "</ol>\n"; in_ol = false }
-            if in_quote { out = out + "</blockquote>\n"; in_quote = false }
+            close_quote()
             if not in_ul {
                 out = out + "<ul>\n"
                 in_ul = true
@@ -494,10 +495,10 @@ def render(md: str) -> str {
         const dot: int = stripped.find(". ")
         if dot > 0 and dot < 4 {
             const prefix: str = stripped[0:dot]
-            if _is_digits(prefix) {
+            if prefix.isdigit() {
                 close_para()
                 if in_ul { out = out + "</ul>\n"; in_ul = false }
-                if in_quote { out = out + "</blockquote>\n"; in_quote = false }
+                close_quote()
                 if not in_ol {
                     out = out + "<ol>\n"
                     in_ol = true
