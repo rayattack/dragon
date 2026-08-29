@@ -45,7 +45,7 @@ def churn() -> int {
 
 
 class TestAnyArgNarrow(TestCase) {
-    """An `Any` handed straight to a typed slot must narrow under a tag check.
+    """An `Boxed` handed straight to a typed slot must narrow under a tag check.
 
     Pre-fix, `out.append(doc["action"])` reached a consumer that never unboxed and
     died in the LLVM verifier, while a user call unboxed with no tag check and

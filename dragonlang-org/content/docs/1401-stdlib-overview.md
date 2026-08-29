@@ -52,7 +52,7 @@ prominent are:
   schema and move JSON straight into and out of native fields, box-free,
   with a decoder synthesized per type at compile time - the serde /
   pydantic idiom with no library and no reflection. The generic `loads`
-  returns `Any` (a boxed value you narrow with `isinstance`), not a
+  returns `Data` (a boxed value you narrow with `isinstance`), not a
   `dict`/`list`; typed scalar decodes are `decode[int]` / `decode[list[str]]`
   and `dumps(obj)` is the one encoder for dynamic values (`encode[T]` for
   known shapes at bytes). It also ships a JSON Schema

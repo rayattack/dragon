@@ -458,6 +458,22 @@ bool CodeGen::tryEmitIsinstanceNicheCheck(CallExpr& node, const std::string& typ
     }
     node.args[0]->accept(*this);
     llvm::Value* recv = impl_->lastValue;
+    // The static type can be a 2-arm `T | None` while the VALUE is still a full
+    // box: complement narrowing (`isinstance` chains over a wide union) shrinks
+    // the type without changing the representation. A null test on a box is
+    // meaningless, so read the tag the value actually carries.
+    if (recv && recv->getType() == impl_->boxType) {
+        int64_t wantTag = Impl::typeKindToTag(nicheT->kind());
+        if (wantTag < 0) {
+            impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
+            return true;
+        }
+        auto* tagVal = impl_->boxTag(recv, "isinstance.tag");
+        impl_->lastValue = impl_->builder->CreateICmpEQ(
+            tagVal, llvm::ConstantInt::get(impl_->i64Type, wantTag),
+            "isinstance.boxtag");
+        return true;
+    }
     if (!matches) {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
         return true;

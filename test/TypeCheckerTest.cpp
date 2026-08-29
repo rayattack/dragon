@@ -1829,3 +1829,51 @@ TEST(TypeCheckerTest, ConstructorOverloadKwargsBindByName) {
     EXPECT_TRUE(checkHasErrors(code("ctor_overload_kwargs_unknown_name_rejected")));
     EXPECT_TRUE(checkHasErrors(code("ctor_overload_kwargs_missing_required_rejected")));
 }
+
+TEST(TypeCheckerTest, UnnarrowedUnionMemberAccessIsRejected) {
+    EXPECT_TRUE(checkHasErrors(code("attr_on_unnarrowed_optional_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("attr_on_plain_union_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("method_call_on_unnarrowed_optional_rejected")));
+}
+
+TEST(TypeCheckerTest, ComplementNarrowingUnlocksMemberAccess) {
+    EXPECT_TRUE(checkOk(code("attr_after_complement_guard_accepted")));
+    EXPECT_TRUE(checkOk(code("attr_after_else_return_accepted")));
+}
+
+TEST(TypeCheckerTest, MinVarargsTypeIsConcrete) {
+    EXPECT_TRUE(checkHasErrors(code("min_varargs_concrete_mismatch_rejected")));
+}
+
+TEST(TypeCheckerTest, ClassWithoutStrCannotBeRendered) {
+    EXPECT_TRUE(checkHasErrors(code("render_class_without_str_print_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("render_class_without_str_str_call_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("render_class_without_str_fstring_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("render_class_without_str_splice_rejected")));
+    EXPECT_TRUE(checkOk(code("render_class_with_str_accepted")));
+    EXPECT_TRUE(checkOk(code("render_container_accepted")));
+    EXPECT_TRUE(checkHasErrors(code("render_contract_typed_value_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateSpreadOperandsMustBeRenderableLists) {
+    EXPECT_TRUE(checkHasErrors(code("spread_of_nested_container_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("spread_of_non_list_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("spread_of_nested_list_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("spread_of_class_without_str_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("join_of_class_without_str_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("join_separator_without_str_rejected")));
+    EXPECT_TRUE(checkOk(code("spread_of_str_list_accepted")));
+}
+
+TEST(TypeCheckerTest, WalrusBindingTypeIsFixedAtDeclaration) {
+    EXPECT_TRUE(checkHasErrors(code("walrus_rebind_wrong_type_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("walrus_rebind_container_wrong_type_rejected")));
+    EXPECT_TRUE(checkOk(code("walrus_rebind_same_type_accepted")));
+}
+
+TEST(TypeCheckerTest, RecursiveTypeAliasesMustBeProductive) {
+    EXPECT_TRUE(checkOk(code("recursive_type_alias_accepted")));
+    EXPECT_TRUE(checkHasErrors(code("recursive_type_alias_self_only_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("recursive_type_alias_bare_arm_rejected")));
+    EXPECT_TRUE(checkOk(code("union_element_nested_literal_accepted")));
+}

@@ -1450,6 +1450,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 return true;
             }
             val = impl_->trackBorrowTempGuarded(node.args[1].get(), val, argTemps, argTempBases);
+            val = impl_->narrowBoxForExpr(node.args[1].get(), val);
+            if (val->getType() == impl_->boxType) {
+                Type::Kind want = impl_->getIterableElementKind(attr.object.get());
+                if (want != Type::Kind::Unknown && !Impl::isBoxedKind(want))
+                    val = impl_->unboxBoxResultChecked(
+                        val, impl_->typeKindToLLVM(want),
+                        Impl::typeKindToVarKind(want), Impl::kNoListElemCheck, want);
+            }
             if (val->getType() == impl_->f64Type) val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             else if (val->getType() == impl_->i1Type) val = impl_->builder->CreateZExt(val, impl_->i64Type);
             else if (val->getType()->isPointerTy()) val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);

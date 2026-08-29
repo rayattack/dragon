@@ -1,0 +1,267 @@
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+
+from unittest import TestCase, main
+
+class Box {
+    name: str
+    def(name: str) { self.name = name }
+    def tag() -> str { return "box:" + self.name }
+    def __str__() -> str { return "box:" + self.name }
+}
+
+def boxed_attr_after_not_isinstance() -> Boxed {
+    ob: Optional[Box] = Box("hello")
+    if not isinstance(ob, Box) {
+        return "unreachable"
+    }
+    d: dict[str, Boxed] = {}
+    d["x"] = ob.name
+    return d["x"]
+}
+
+def boxed_attr_after_else_return() -> Boxed {
+    ob: Optional[Box] = Box("world")
+    if isinstance(ob, Box) {
+        pass
+    } else {
+        return "unreachable"
+    }
+    d: dict[str, Boxed] = {}
+    d["x"] = ob.name
+    return d["x"]
+}
+
+def boxed_attr_after_or_guard(flag: bool) -> Boxed {
+    ob: Optional[Box] = Box("or-compound")
+    if flag or not isinstance(ob, Box) {
+        return "guarded"
+    }
+    d: dict[str, Boxed] = {}
+    d["x"] = ob.name
+    return d["x"]
+}
+
+def boxed_attr_after_is_none_guard() -> Boxed {
+    ob: Optional[Box] = Box("none-guard")
+    if ob is none {
+        return "unreachable"
+    }
+    d: dict[str, Boxed] = {}
+    d["x"] = ob.name
+    return d["x"]
+}
+
+def method_after_guard() -> str {
+    ob: Optional[Box] = Box("m")
+    if not isinstance(ob, Box) {
+        return "unreachable"
+    }
+    return ob.tag()
+}
+
+def attr_inside_and_condition() -> str {
+    ob: Optional[Box] = Box("and-cond")
+    if ob is not none and ob.name == "and-cond" {
+        return ob.name
+    }
+    return "missed"
+}
+
+def boxed_int_after_guard(v: int | str) -> Boxed {
+    if not isinstance(v, int) {
+        return "not-int"
+    }
+    d: dict[str, Boxed] = {}
+    d["n"] = v + 1
+    return d["n"]
+}
+
+def boxed_str_after_else_return(v: int | str) -> Boxed {
+    if isinstance(v, str) {
+        pass
+    } else {
+        return "not-str"
+    }
+    d: dict[str, Boxed] = {}
+    d["s"] = v
+    return d["s"]
+}
+
+def elif_chain_kind(v: int | str | bytes) -> str {
+    if isinstance(v, int) {
+        return "int"
+    } elif isinstance(v, str) {
+        d: dict[str, Boxed] = {}
+        d["s"] = v
+        s: Boxed = d["s"]
+        if isinstance(s, str) {
+            return "str"
+        }
+        return "corrupt"
+    }
+    return "bytes"
+}
+
+def min_max_into_box() -> Boxed {
+    d: dict[str, Boxed] = {}
+    d["m"] = min(5, 2, 8, 1, 9)
+    return d["m"]
+}
+
+class ComplementNarrowing(TestCase) {
+    def test_not_isinstance_guard_keeps_str_tag() {
+        v: Boxed = boxed_attr_after_not_isinstance()
+        self.assertTrue(isinstance(v, str))
+        self.assertEqual(v, "hello")
+    }
+    def test_else_return_keeps_str_tag() {
+        v: Boxed = boxed_attr_after_else_return()
+        self.assertTrue(isinstance(v, str))
+        self.assertEqual(v, "world")
+    }
+    def test_or_compound_guard() {
+        v: Boxed = boxed_attr_after_or_guard(False)
+        self.assertTrue(isinstance(v, str))
+        self.assertEqual(v, "or-compound")
+        self.assertEqual(boxed_attr_after_or_guard(True), "guarded")
+    }
+    def test_is_none_guard() {
+        v: Boxed = boxed_attr_after_is_none_guard()
+        self.assertTrue(isinstance(v, str))
+        self.assertEqual(v, "none-guard")
+    }
+    def test_method_call_after_guard() {
+        self.assertEqual(method_after_guard(), "box:m")
+    }
+    def test_attr_access_inside_and_condition() {
+        self.assertEqual(attr_inside_and_condition(), "and-cond")
+    }
+}
+
+class BoxedUnionNarrowing(TestCase) {
+    def test_int_member_after_guard() {
+        v: Boxed = boxed_int_after_guard(41)
+        self.assertTrue(isinstance(v, int))
+        self.assertEqual(v, 42)
+        self.assertEqual(boxed_int_after_guard("s"), "not-int")
+    }
+    def test_str_member_after_else_return() {
+        v: Boxed = boxed_str_after_else_return("boxed")
+        self.assertTrue(isinstance(v, str))
+        self.assertEqual(v, "boxed")
+        self.assertEqual(boxed_str_after_else_return(7), "not-str")
+    }
+    def test_elif_chain_accumulates() {
+        self.assertEqual(elif_chain_kind(1), "int")
+        self.assertEqual(elif_chain_kind("chain"), "str")
+        self.assertEqual(elif_chain_kind(b"raw"), "bytes")
+    }
+}
+
+class NicheOptionalBoxing(TestCase) {
+    def test_assert_is_none_paths() {
+        absent: Optional[Box] = none
+        self.assertIsNone(absent)
+        present: Optional[Box] = Box("p")
+        self.assertIsNotNone(present)
+    }
+}
+
+class AggregateTyping(TestCase) {
+    def test_min_varargs_boxes_as_int() {
+        v: Boxed = min_max_into_box()
+        self.assertTrue(isinstance(v, int))
+        self.assertEqual(v, 1)
+        self.assertEqual(max(1, 2, 3), 3)
+    }
+}
+
+def branch_write(i: int) -> str {
+    v: int | str = "seed-" + str(i)
+    if isinstance(v, str) {
+        v = "next-" + str(i)
+    }
+    if isinstance(v, str) {
+        return v
+    }
+    return ""
+}
+
+def fall_write(i: int) -> str {
+    v: int | str = "seed-" + str(i)
+    if not isinstance(v, str) {
+        return ""
+    }
+    v = "next-" + str(i)
+    v = "again-" + str(i)
+    return v
+}
+
+def aug_write(i: int) -> str {
+    v: int | str = "seed-" + str(i)
+    if not isinstance(v, str) {
+        return ""
+    }
+    v += "-tail"
+    return v
+}
+
+def unpack_write(i: int) -> str {
+    v: int | str = "seed-" + str(i)
+    if not isinstance(v, str) {
+        return ""
+    }
+    w: str = ""
+    v, w = ("a-" + str(i), "b-" + str(i))
+    return v + w
+}
+
+def self_assign(i: int) -> str {
+    v: int | str = "seed-" + str(i)
+    if not isinstance(v, str) {
+        return ""
+    }
+    v = v
+    return v
+}
+
+class NarrowedAssignWriteThrough(TestCase) {
+    def test_write_inside_branch_persists() {
+        self.assertEqual(branch_write(1), "next-1")
+    }
+    def test_write_after_fallthrough_persists() {
+        self.assertEqual(fall_write(2), "again-2")
+    }
+    def test_aug_append_after_fallthrough() {
+        self.assertEqual(aug_write(3), "seed-3-tail")
+    }
+    def test_tuple_unpack_onto_narrowed_name() {
+        self.assertEqual(unpack_write(4), "a-4b-4")
+    }
+    def test_self_assign_survives() {
+        self.assertEqual(self_assign(5), "seed-5")
+    }
+}
+
+class NarrowingChurn(TestCase) {
+    def test_guard_shapes_leak_free_under_repetition() {
+        i: int = 0
+        while i < 2000 {
+            boxed_attr_after_not_isinstance()
+            boxed_attr_after_or_guard(i % 2 == 0)
+            boxed_int_after_guard(i)
+            boxed_str_after_else_return("s")
+            elif_chain_kind("x")
+            branch_write(i)
+            fall_write(i)
+            aug_write(i)
+            unpack_write(i)
+            self_assign(i)
+            i = i + 1
+        }
+        self.assertEqual(i, 2000)
+    }
+}
+
+main([ComplementNarrowing(), BoxedUnionNarrowing(), NicheOptionalBoxing(),
+      AggregateTyping(), NarrowedAssignWriteThrough(), NarrowingChurn()])

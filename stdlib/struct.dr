@@ -260,8 +260,13 @@ def calcsize(fmt: str) -> int {
     return total
 }
 
-def _emit_one(out: list[int], c: str, a: Any, little: bool) {
-    """Emit one numeric field of code `c` (value `a`, already narrowed to Any) into
+# The closed value domain of a packed field: what `pack` accepts and `unpack`
+# hands back, one arm per format-code family.
+type Field = int | float | bool | str | bytes
+
+
+def _emit_one(out: list[int], c: str, a: Field, little: bool) {
+    """Emit one numeric field of code `c` (value `a`, already narrowed to Field) into
     `out`, honoring endianness `little`."""
     if c == "f" or c == "d" {
         fv: float = 0.0

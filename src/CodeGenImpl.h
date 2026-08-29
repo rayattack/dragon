@@ -67,6 +67,7 @@ struct CodeGen::Impl {
         std::unordered_set<std::string> detachOnExit;
         std::unordered_set<std::string> lockDestroyOnExit;
         std::unordered_map<std::string, llvm::AllocaInst*> cleanupSlots;
+        std::unordered_map<std::string, llvm::Value*> narrowShadowOrigin;
         llvm::AllocaInst* cleanupBaseAlloca = nullptr;
         struct DeferEntry {
             llvm::Function* thunk = nullptr;
@@ -1882,6 +1883,14 @@ struct CodeGen::Impl {
     }
 
     llvm::Value* boxPayloadAsKind(llvm::Value* box, VarKind k);
+
+    // A union-typed receiver narrowed to a container (`case dict()` on a Data)
+    // still arrives as a box; container runtime calls want the payload pointer.
+    llvm::Value* unboxContainerReceiver(llvm::Value* v) {
+        if (!v || v->getType() != boxType) return v;
+        return builder->CreateIntToPtr(boxPayloadI64(v, "recv.payload"),
+                                       i8PtrType, "recv.unboxed");
+    }
 
     int64_t binopOpcodeForToken(TokenType t) {
         switch (t) {

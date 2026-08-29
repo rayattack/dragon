@@ -1874,3 +1874,347 @@ class Box[T] {
 
 b: Box[int] = Box[int](5)
 ```
+
+#### :attr_on_unnarrowed_optional_rejected
+
+An attribute access through `T | None` used to fall through the checker as
+silent Unknown, and the boxing fallback then stamped an int tag on a str
+pointer (DRG-101). Possibly-none receivers must be narrowed first.
+
+```dr
+class Box {
+    name: str
+    def(name: str) { self.name = name }
+}
+
+ob: Optional[Box] = Box("x")
+print(ob.name)
+```
+
+#### :attr_on_plain_union_rejected
+
+```dr
+v: int | str = "x"
+print(v.upper())
+```
+
+#### :method_call_on_unnarrowed_optional_rejected
+
+```dr
+class Box {
+    name: str
+    def(name: str) { self.name = name }
+    def tag() -> str { return self.name }
+}
+
+ob: Optional[Box] = Box("x")
+print(ob.tag())
+```
+
+#### :attr_after_complement_guard_accepted
+
+```dr
+class Box {
+    name: str
+    def(name: str) { self.name = name }
+}
+
+def probe() -> str {
+    ob: Optional[Box] = Box("x")
+    if not isinstance(ob, Box) {
+        return ""
+    }
+    return ob.name
+}
+```
+
+#### :attr_after_else_return_accepted
+
+```dr
+class Box {
+    name: str
+    def(name: str) { self.name = name }
+}
+
+def probe() -> str {
+    ob: Optional[Box] = Box("x")
+    if isinstance(ob, Box) {
+        pass
+    } else {
+        return ""
+    }
+    return ob.name
+}
+```
+
+#### :min_varargs_concrete_mismatch_rejected
+
+`min` over concrete int arguments types as int, so assigning it to str is the
+same compile error as `name: int = "boy"`.
+
+```dr
+s: str = min(5, 2, 8)
+```
+
+#### :render_class_without_str_print_rejected
+
+A class with no `__str__` or `__repr__` has no text form. Printing one used to
+emit `<Point instance>` while `str()` and f-strings pasted the first byte of the
+object header, so one value had three different answers. There is one rule now:
+the compiler refuses, and names the fix.
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+p: Point = Point(1)
+print(p)
+```
+
+#### :render_class_without_str_str_call_rejected
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+p: Point = Point(1)
+s: str = str(p)
+```
+
+#### :render_class_without_str_fstring_rejected
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+p: Point = Point(1)
+s: str = f"{p}"
+```
+
+#### :render_class_without_str_splice_rejected
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+p: Point = Point(1)
+page: str = template {<p>!{p}</p>}
+```
+
+#### :render_class_with_str_accepted
+
+One `__str__` makes the value renderable everywhere: `print`, `str()`,
+f-strings, and template splices share a single rule.
+
+```dr
+class Money {
+    amount: int
+    def(amount: int) {
+        self.amount = amount
+    }
+    def __str__() -> str {
+        return str(self.amount)
+    }
+}
+m: Money = Money(5)
+print(m)
+s: str = str(m)
+f: str = f"{m}"
+page: str = template {<p>!{m}</p>}
+```
+
+#### :render_container_accepted
+
+A container renders structurally, the same text an f-string produces.
+
+```dr
+xs: list[int] = [1, 2]
+d: dict[str, int] = {"a": 1}
+print(xs)
+s: str = str(d)
+page: str = template {<p>!{xs}</p>}
+```
+
+#### :spread_of_nested_container_rejected
+
+A nested-container element cannot be rendered at a known type, so it cannot be
+escaped honestly. Render each element yourself instead.
+
+```dr
+xs: list[list[int]] = [[1], [2]]
+page: str = template {<p>!{*xs}</p>}
+```
+
+#### :spread_of_non_list_rejected
+
+```dr
+d: dict[str, int] = {"a": 1}
+page: str = template {<p>!{*d}</p>}
+```
+
+#### :spread_of_nested_list_rejected
+
+```dr
+rows: list[list[int]] = [[1], [2]]
+page: str = template {<p>!{*rows}</p>}
+```
+
+#### :spread_of_class_without_str_rejected
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+ps: list[Point] = [Point(1)]
+page: str = template {<p>!{*ps}</p>}
+```
+
+#### :join_of_class_without_str_rejected
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+ps: list[Point] = [Point(1)]
+page: str = template {<p>!{ps | join(", ")}</p>}
+```
+
+#### :join_separator_without_str_rejected
+
+The separator travels the same rendering rule as the elements, so an
+unrenderable separator is the same compile error.
+
+```dr
+class Point {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+}
+sep: Point = Point(1)
+parts: list[str] = ["a", "b"]
+page: str = template {<p>!{parts | join(sep)}</p>}
+```
+
+#### :spread_of_str_list_accepted
+
+```dr
+parts: list[str] = ["a", "b"]
+page: str = template {<p>!{*parts}</p>}
+raw_page: str = template {<p>!{*parts | raw}</p>}
+joined: str = template {<p>!{parts | join(", ")}</p>}
+ints: list[int] = [1, 2]
+numbers: str = template {<p>!{*ints}</p>}
+```
+
+#### :render_contract_typed_value_rejected
+
+A contract names a shape, not a class, so there is no `__str__` to dispatch to
+at the splice site. Before, the pointer was pasted as if it were text.
+
+```dr
+type Speaker {
+    def speak() -> str
+}
+
+class Dog -> Speaker {
+    name: str
+    def(name: str) {
+        self.name = name
+    }
+    def speak() -> str {
+        return self.name + " barks"
+    }
+    def __str__() -> str {
+        return self.name
+    }
+}
+
+def render(s: Speaker) -> str {
+    return f"{s}"
+}
+```
+
+#### :walrus_rebind_wrong_type_rejected
+
+A `:=` declaration fixes the binding's type exactly like an annotated one; a
+later `=` at a different type must be refused, not silently reinterpret the
+value's bits.
+
+```dr
+n := 5
+n = "x"
+```
+
+#### :walrus_rebind_container_wrong_type_rejected
+
+```dr
+d: dict[str, int] = {"id": 7}
+cur := d
+cur = 10
+```
+
+#### :walrus_rebind_same_type_accepted
+
+```dr
+n := 5
+n = 6
+xs := [1, 2, 3]
+xs = [4, 5]
+```
+
+#### :recursive_type_alias_accepted
+
+A recursive alias is the honest spelling for JSON-shaped data: the arms are
+closed and every descent is a checked narrowing.
+
+```dr
+type Data = str | int | float | bool | none | list[Data] | dict[str, Data]
+
+d: dict[str, Data] = {"user": {"name": "Ada"}, "id": 7}
+xs: list[Data] = [1, "two", {"k": 3}]
+```
+
+#### :recursive_type_alias_self_only_rejected
+
+```dr
+type T = T
+```
+
+#### :recursive_type_alias_bare_arm_rejected
+
+A recursive reference must sit inside a container; a bare self-arm has no
+base case and no representation.
+
+```dr
+type T = int | T
+```
+
+#### :union_element_nested_literal_accepted
+
+A nested container literal is matched against the union's container arm, so a
+literal can populate a `dict[str, Data]` without an explicit cast.
+
+```dr
+type Data = str | int | list[Data] | dict[str, Data]
+
+d: dict[str, Data] = {"a": {"b": "c"}, "n": 1}
+```

@@ -276,6 +276,22 @@ void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
         }
     }
 
+void CodeGen::Impl::refreshNarrowShadowOrigin(const std::string& name,
+                                              llvm::Value* newPayload) {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+            auto found = it->vars.find(name);
+            if (found == it->vars.end()) continue;
+            auto originIt = it->narrowShadowOrigin.find(name);
+            if (originIt == it->narrowShadowOrigin.end()) return;
+            int64_t tag = varKindToTag(it->varKinds[name]);
+            if (tag < 0) return;
+            builder->CreateStore(
+                makeBox(llvm::ConstantInt::get(i64Type, tag), newPayload),
+                originIt->second);
+            return;
+        }
+    }
+
 void CodeGen::Impl::setVar(const std::string& name, llvm::AllocaInst* alloca,
              VarKind kind) {
         if (scopes.empty()) return;
@@ -650,6 +666,122 @@ int64_t CodeGen::Impl::listViewWantElemTag(TypeExpr* ann) {
             default:
                 return kNoListElemCheck;
         }
+    }
+
+bool CodeGen::Impl::tryNarrowShadowWriteThrough(const std::string& name,
+                                                llvm::Value* val,
+                                                bool rhsBorrowed) {
+        for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+            auto found = it->vars.find(name);
+            if (found == it->vars.end()) continue;
+            auto originIt = it->narrowShadowOrigin.find(name);
+            if (originIt == it->narrowShadowOrigin.end()) return false;
+
+            llvm::AllocaInst* shadow = found->second;
+            VarKind shadowKind = it->varKinds[name];
+            int64_t tag = varKindToTag(shadowKind);
+            if (tag < 0) return false;
+            llvm::Value* originSlot = originIt->second;
+
+            // A value that is not of the narrowed kind also ends the narrow;
+            // box it so the retire path below stores the binding's real type.
+            if (val->getType() != boxType) {
+                int64_t vTag = -1;
+                if (val->getType() == i64Type)       vTag = TAG_INT;
+                else if (val->getType() == f64Type)  vTag = TAG_FLOAT;
+                else if (val->getType() == i1Type)   vTag = TAG_BOOL;
+                if (vTag >= 0 && vTag != tag) {
+                    llvm::Value* pay = nativeToPayloadI64(val);
+                    val = makeBox(llvm::ConstantInt::get(i64Type, vTag), pay);
+                }
+            }
+
+            // Assigning the WIDE value back ends the narrow: the binding holds
+            // its declared union again, so store the box into the real slot and
+            // retire the shadow. Reading the box's payload at the narrowed kind
+            // here (no tag check) is what wrote a scalar into a pointer slot.
+            if (val->getType() == boxType) {
+                if (options.gcMode == GCMode::RC) {
+                    if (!isOwnedBoxResult(val))
+                        emitUnionIncref(boxPayloadI64(val, "wt.newpay"),
+                                        boxTag(val, "wt.newtag"));
+                    // No decref of the old box: applying the narrow marked this
+                    // binding BORROWED and handed its slot's cleanup elsewhere,
+                    // so the binding does not own that reference. Releasing it
+                    // here over-releases (it corrupted memory across the suite).
+                }
+                builder->CreateStore(val, originSlot);
+                if (auto* originAlloca = llvm::dyn_cast<llvm::AllocaInst>(originSlot)) {
+                    it->vars[name] = originAlloca;
+                    it->varKinds[name] = VarKind::Union;
+                    it->borrowed.erase(name);
+                    // The narrow parked the real slot under a stash so scope
+                    // cleanup still released it while the shadow stood in.
+                    // Now that the name owns that slot again, drop the stash or
+                    // cleanup releases the same box twice.
+                    const std::string stash = name + ".narrow.stash";
+                    auto st = it->vars.find(stash);
+                    if (st != it->vars.end() && st->second == originAlloca) {
+                        it->vars.erase(st);
+                        it->varKinds.erase(stash);
+                    }
+                }
+                it->narrowShadowOrigin.erase(name);
+                return true;
+            }
+
+            llvm::Value* coerced = val;
+            llvm::Type* payloadTy = shadow->getAllocatedType();
+            if (coerced->getType() == boxType && payloadTy != boxType)
+                coerced = boxPayloadAsKind(coerced, shadowKind);
+            if (payloadTy == f64Type && coerced->getType() == i64Type)
+                coerced = builder->CreateSIToFP(coerced, f64Type, "wt.i2f");
+            else if (payloadTy == i64Type && coerced->getType() == i1Type)
+                coerced = builder->CreateZExt(coerced, i64Type, "wt.bext");
+            else if (payloadTy == i1Type && coerced->getType() == i64Type)
+                coerced = builder->CreateICmpNE(
+                    coerced, llvm::ConstantInt::get(i64Type, 0), "wt.tobool");
+
+            auto* tagV = llvm::ConstantInt::get(i64Type, tag);
+            llvm::Value* payload = nativeToPayloadI64(coerced);
+            if (options.gcMode == GCMode::RC) {
+                bool rhsOwned = (val->getType() == boxType)
+                    ? isOwnedBoxResult(val) : !rhsBorrowed;
+                if (!rhsOwned) emitUnionIncref(payload, tagV);
+                auto* oldBox = builder->CreateLoad(boxType, originSlot,
+                                                   name + ".wt.oldbox");
+                emitUnionDecref(boxPayloadI64(oldBox, "wt.oldpay"),
+                                boxTag(oldBox, "wt.oldtag"));
+            }
+            builder->CreateStore(makeBox(tagV, coerced), originSlot);
+            builder->CreateStore(coerced, shadow);
+            return true;
+        }
+        return false;
+    }
+
+llvm::Value* CodeGen::Impl::nicheOptionalTagForValue(Expr* argExpr,
+                                                     llvm::Value* val) {
+        if (!argExpr || !argExpr->type ||
+            argExpr->type->kind() != Type::Kind::Union ||
+            !val->getType()->isPointerTy())
+            return nullptr;
+        auto& u = static_cast<UnionType&>(*argExpr->type);
+        if (u.types.size() != 2) return nullptr;
+        Type* inner = nullptr;
+        bool hasNone = false;
+        for (auto& t : u.types) {
+            if (t->kind() == Type::Kind::None_) hasNone = true;
+            else inner = t.get();
+        }
+        int64_t innerTag = inner ? typeKindToTag(inner->kind()) : -1;
+        if (!hasNone || innerTag < 0) return nullptr;
+        auto* nullp = llvm::ConstantPointerNull::get(
+            llvm::cast<llvm::PointerType>(val->getType()));
+        auto* isNull = builder->CreateICmpEQ(val, nullp, "opt.isnull");
+        return builder->CreateSelect(isNull,
+            llvm::ConstantInt::get(i64Type, TAG_NONE),
+            llvm::ConstantInt::get(i64Type, innerTag), "opt.tag");
     }
 
 std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(

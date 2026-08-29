@@ -358,12 +358,29 @@ private:
 
     std::shared_ptr<Type> joinBranchTypes(const std::shared_ptr<Type>& left,
                                           const std::shared_ptr<Type>& right);
+    std::shared_ptr<Type> typeWithoutNone(const std::shared_ptr<Type>& t);
+
+    struct NarrowFacts {
+        std::vector<NarrowBinding> whenTrue;
+        std::vector<NarrowBinding> whenFalse;
+    };
+    NarrowFacts checkGuardCondition(Expr* cond);
+    NarrowFacts guardFactsForLeaf(Expr* cond);
+    std::shared_ptr<Type> narrowTargetTypeFromExpr(Expr* e);
+    void defineNarrowBindings(const std::vector<NarrowBinding>& bindings);
 
     std::shared_ptr<Type> dictGetResultType(CallExpr& node,
                                             const std::shared_ptr<Type>& declared);
     bool tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected);
     static void markNarrowTarget(Expr& value, const std::shared_ptr<Type>& want);
     void boxNestedContainerLiteralForAny(Expr* value);
+    bool isGeneratorCall(Expr* e);
+    void refuseGeneratorBinding(Expr* value, const SourceLocation& loc,
+                                const std::shared_ptr<Type>& declared = nullptr);
+    // Retype a container literal so it satisfies a union-typed sink by
+    // matching it against the union's container arm (recursively, which is
+    // what makes a recursive alias like Data usable as an element type).
+    bool coerceLiteralToUnion(Expr* value, const std::shared_ptr<Type>& target);
     static std::string listReprMismatchHint(const Type& from, const Type& to);
     bool diagnoseHeterogeneousLiteral(Expr* value,
                                       const std::shared_ptr<Type>& annot);

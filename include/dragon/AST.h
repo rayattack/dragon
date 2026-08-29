@@ -390,12 +390,21 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
+struct NarrowBinding {
+    std::string name;
+    std::shared_ptr<Type> type;
+};
+
 class IfStmt : public Stmt {
 public:
     std::unique_ptr<Expr> condition;
     std::vector<std::unique_ptr<Stmt>> thenBody;
     std::vector<std::pair<std::unique_ptr<Expr>, std::vector<std::unique_ptr<Stmt>>>> elifClauses;
     std::vector<std::unique_ptr<Stmt>> elseBody;
+    std::vector<NarrowBinding> thenNarrow;
+    std::vector<std::vector<NarrowBinding>> elifNarrows;
+    std::vector<NarrowBinding> elseNarrow;
+    std::vector<NarrowBinding> afterNarrow;
     void accept(ASTVisitor& visitor) override;
 };
 

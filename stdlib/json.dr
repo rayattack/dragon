@@ -1150,11 +1150,78 @@ class ValidationResult {
 }
 
 
-def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
-                  value: Any, path: str, refdepth: int,
+# Typed accessors: the supported way to get a concrete value out of a Data.
+# Each narrows by runtime tag and falls back to the caller's default, so a
+# shape mismatch is a visible default rather than a crash or a wrong read.
+def as_str(v: Data, dflt: str) -> str {
+    if isinstance(v, str) {
+        const t: str = v
+        return t
+    }
+    return dflt
+}
+
+
+def as_int(v: Data, dflt: int) -> int {
+    if isinstance(v, int) {
+        const i: int = v
+        return i
+    }
+    if isinstance(v, float) {
+        const f: float = v
+        return int(f)
+    }
+    return dflt
+}
+
+
+def as_float(v: Data, dflt: float) -> float {
+    if isinstance(v, float) {
+        const f: float = v
+        return f
+    }
+    if isinstance(v, int) {
+        const i: int = v
+        return float(i)
+    }
+    return dflt
+}
+
+
+def as_bool(v: Data, dflt: bool) -> bool {
+    if isinstance(v, bool) {
+        const b: bool = v
+        return b
+    }
+    return dflt
+}
+
+
+def as_obj(v: Data) -> dict[str, Data] {
+    if isinstance(v, dict) {
+        const d: dict[str, Data] = v
+        return d
+    }
+    empty: dict[str, Data] = {}
+    return empty
+}
+
+
+def as_list(v: Data) -> list[Data] {
+    if isinstance(v, list) {
+        const xs: list[Data] = v
+        return xs
+    }
+    empty: list[Data] = []
+    return empty
+}
+
+
+def _schema_check(schemas: dict[str, dict[str, Data]], schema: dict[str, Data],
+                  value: Data, path: str, refdepth: int,
                   errors: list[ValidationError]) -> None {
     if "$ref" in schema {
-        const refname: str = schema["$ref"]
+        const refname: str = as_str(schema["$ref"], "")
         if refdepth >= 32 {
             errors.append(ValidationError(path, f"circular $ref chain at '{refname}'"))
             return

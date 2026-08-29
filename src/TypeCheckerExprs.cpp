@@ -1156,6 +1156,22 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
+    if (objType && objType->kind() == Type::Kind::Union) {
+        if (unionIncludesNone(objType)) {
+            error(node.location(), "cannot access '" + node.attribute +
+                  "' on a possibly-none value of type '" + objType->toString() +
+                  "'; narrow it first, e.g. `if v is not none { v." +
+                  node.attribute + " }`");
+        } else {
+            error(node.location(), "cannot access '" + node.attribute +
+                  "' on a value of union type '" + objType->toString() +
+                  "'; narrow it first, e.g. `if isinstance(v, T) { v." +
+                  node.attribute + " }`");
+        }
+        node.type = impl_->unknownType;
+        return;
+    }
+
     if (objType && objType->kind() == Type::Kind::Contract) {
         auto& ct = static_cast<ContractType&>(*objType);
         auto mIt = ct.methods.find(node.attribute);

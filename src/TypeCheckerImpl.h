@@ -90,6 +90,46 @@ struct TypeChecker::Impl {
         }
     }
 
+    // The declared type a name had before a flow-narrow replaced it, so the
+    // narrow can be undone when the binding is written.
+    std::unordered_map<std::string, std::shared_ptr<Type>> narrowedFrom;
+
+    // End a flow-narrow: drop the narrowed binding from the innermost scope
+    // that holds it so lookup falls back to the DECLARED type. Returns the
+    // declared type, or null when the name was not narrowed.
+    std::shared_ptr<Type> dropNarrowedBinding(const std::string& name) {
+        for (int i = static_cast<int>(scopes.size()) - 1; i > 0; --i) {
+            auto it = scopes[i].bindings.find(name);
+            if (it == scopes[i].bindings.end()) continue;
+            auto narrowed = it->second;
+            for (int j = i - 1; j >= 0; --j) {
+                auto outer = scopes[j].bindings.find(name);
+                if (outer == scopes[j].bindings.end()) continue;
+                if (outer->second && narrowed && !outer->second->equals(*narrowed)) {
+                    scopes[i].bindings.erase(it);
+                    return outer->second;
+                }
+                return nullptr;
+            }
+            return nullptr;
+        }
+        // A narrow applied in the SAME scope as the declaration overwrote it;
+        // restore from the recorded pre-narrow type.
+        auto nf = narrowedFrom.find(name);
+        if (nf != narrowedFrom.end() && nf->second) {
+            auto declared = nf->second;
+            for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; --i) {
+                auto it = scopes[i].bindings.find(name);
+                if (it == scopes[i].bindings.end()) continue;
+                it->second = declared;
+                break;
+            }
+            narrowedFrom.erase(nf);
+            return declared;
+        }
+        return nullptr;
+    }
+
     std::shared_ptr<Type> lookup(const std::string& name) {
         for (int i = static_cast<int>(scopes.size()) - 1; i >= 0; --i) {
             auto it = scopes[i].bindings.find(name);

@@ -155,87 +155,6 @@ void CodeGen::visit(ExprStmt& node) {
 }
 
 void CodeGen::visit(IfStmt& node) {
-    auto detectNarrowing = [this](Expr* cond) -> std::pair<std::string, Impl::VarKind> {
-        if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
-            auto op = bin->op.type();
-            bool isNe = (op == TokenType::NOT_EQUAL || op == TokenType::IS_NOT);
-            bool isEq = (op == TokenType::EQUAL_EQUAL || op == TokenType::IS);
-            if (isNe || isEq) {
-                auto* lhsName = dynamic_cast<NameExpr*>(bin->left.get());
-                auto* rhsName = dynamic_cast<NameExpr*>(bin->right.get());
-                bool lhsIsNone = dynamic_cast<NoneLiteral*>(bin->left.get()) != nullptr;
-                bool rhsIsNone = dynamic_cast<NoneLiteral*>(bin->right.get()) != nullptr;
-                NameExpr* unionName = nullptr;
-                if (lhsName && rhsIsNone) unionName = lhsName;
-                else if (rhsName && lhsIsNone) unionName = rhsName;
-                if (unionName &&
-                    impl_->lookupVarKind(unionName->name) == Impl::VarKind::Union) {
-                    auto membIt = impl_->unionMemberKinds.find(unionName->name);
-                    if (membIt != impl_->unionMemberKinds.end() &&
-                        membIt->second.size() == 2) {
-                        Impl::VarKind nk = (membIt->second[0] == Impl::VarKind::Other)
-                            ? membIt->second[1] : membIt->second[0];
-                        if (nk != Impl::VarKind::Other)
-                            return {unionName->name, isNe ? nk : Impl::VarKind::Other};
-                    }
-                }
-            }
-        }
-        auto* call = dynamic_cast<CallExpr*>(cond);
-        if (!call) return {"", Impl::VarKind::Other};
-        auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
-        if (!callee || callee->name != "isinstance" || call->args.size() != 2)
-            return {"", Impl::VarKind::Other};
-        auto* argName = dynamic_cast<NameExpr*>(call->args[0].get());
-        if (!argName || impl_->lookupVarKind(argName->name) != Impl::VarKind::Union)
-            return {"", Impl::VarKind::Other};
-        auto* typeName = dynamic_cast<NameExpr*>(call->args[1].get());
-        if (!typeName) return {"", Impl::VarKind::Other};
-        Impl::VarKind nk = Impl::VarKind::Other;
-        if (typeName->name == "int")        nk = Impl::VarKind::Int;
-        else if (typeName->name == "float") nk = Impl::VarKind::Float;
-        else if (typeName->name == "bool")  nk = Impl::VarKind::Bool;
-        else if (typeName->name == "str")   nk = Impl::VarKind::Str;
-        else if (typeName->name == "bytes") nk = Impl::VarKind::List;
-        else if (typeName->name == "list") {
-            auto membIt = impl_->unionMemberKinds.find(argName->name);
-            bool declaredListMember =
-                membIt != impl_->unionMemberKinds.end() &&
-                std::find(membIt->second.begin(), membIt->second.end(),
-                          Impl::VarKind::List) != membIt->second.end();
-            if (!declaredListMember)
-                return {"", Impl::VarKind::Other};
-            nk = Impl::VarKind::List;
-        }
-        else if (typeName->name == "dict")  nk = Impl::VarKind::Dict;
-        else if (typeName->name == "tuple") nk = Impl::VarKind::Tuple;
-        else if (typeName->name == "set")   nk = Impl::VarKind::Set;
-        else if (impl_->classNames.count(typeName->name)) nk = Impl::VarKind::ClassInstance;
-        if (nk == Impl::VarKind::Other) return {"", Impl::VarKind::Other};
-        return {argName->name, nk};
-    };
-
-    auto computeElseKind = [this](const std::string& varName, Impl::VarKind matchedKind) -> Impl::VarKind {
-        auto membIt = impl_->unionMemberKinds.find(varName);
-        if (membIt == impl_->unionMemberKinds.end()) return Impl::VarKind::Union;
-        auto& members = membIt->second;
-        if (members.size() == 2) {
-            return (members[0] == matchedKind) ? members[1] : members[0];
-        }
-        return Impl::VarKind::Union;
-    };
-
-    auto narrowClassName = [this](Expr* cond) -> std::string {
-        auto* call = dynamic_cast<CallExpr*>(cond);
-        if (!call) return "";
-        auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
-        if (!callee || callee->name != "isinstance" || call->args.size() != 2)
-            return "";
-        auto* typeName = dynamic_cast<NameExpr*>(call->args[1].get());
-        if (!typeName) return "";
-        return impl_->classNames.count(typeName->name) ? typeName->name : "";
-    };
-
     auto applyClassNarrow = [this](const std::string& var,
                                    const std::string& cls) -> std::function<void()> {
         if (var.empty() || cls.empty()) return []{};
@@ -253,12 +172,85 @@ void CodeGen::visit(IfStmt& node) {
         };
     };
 
+    auto narrowBindingClassName = [](const NarrowBinding& nb) -> std::string {
+        if (auto* inst = dynamic_cast<InstanceType*>(nb.type.get()))
+            return inst->classType ? inst->classType->name : std::string();
+        if (auto* cls = dynamic_cast<ClassType*>(nb.type.get()))
+            return cls->name;
+        return "";
+    };
+
+    auto narrowBindingKind = [](const NarrowBinding& nb) -> Impl::VarKind {
+        if (!nb.type) return Impl::VarKind::Union;
+        switch (nb.type->kind()) {
+            case Type::Kind::None_:
+            case Type::Kind::Boxed:
+            case Type::Kind::Union:
+            case Type::Kind::Unknown:
+                return Impl::VarKind::Union;
+            case Type::Kind::Class:
+                return Impl::VarKind::ClassInstance;
+            default:
+                return Impl::typeKindToVarKind(nb.type->kind());
+        }
+    };
+
+    auto* func = impl_->currentFunction;
+
+    auto applyNarrowSet = [&, func](const std::vector<NarrowBinding>& bindings,
+                                    const std::string& slotSuffix)
+        -> std::function<void()> {
+        std::vector<std::function<void()>> restores;
+        for (auto& nb : bindings) {
+            Impl::VarKind kind = narrowBindingKind(nb);
+            if (kind == Impl::VarKind::Union) continue;
+            auto* localAlloca = impl_->lookupVar(nb.name);
+            llvm::Value* slotPtr = localAlloca;
+            bool slotIsBox = localAlloca &&
+                localAlloca->getAllocatedType() == impl_->boxType;
+            if (!slotPtr) {
+                if (auto* gv = impl_->lookupModuleGlobal(nb.name)) {
+                    slotPtr = gv;
+                    slotIsBox = (gv->getValueType() == impl_->boxType);
+                }
+            }
+            if (slotPtr && slotIsBox) {
+                auto& currentScope = impl_->scopes.back();
+                auto ownedHere = currentScope.vars.find(nb.name);
+                bool shadowOrphansOwnedBox = localAlloca &&
+                    ownedHere != currentScope.vars.end() &&
+                    ownedHere->second == localAlloca &&
+                    !currentScope.borrowed.count(nb.name);
+                if (shadowOrphansOwnedBox) {
+                    std::string stash = nb.name + ".narrow.stash";
+                    currentScope.vars[stash] = localAlloca;
+                    currentScope.varKinds[stash] = currentScope.varKinds[nb.name];
+                }
+                auto* box = impl_->builder->CreateLoad(
+                    impl_->boxType, slotPtr, nb.name + ".box.narrow" + slotSuffix);
+                llvm::Value* payload = impl_->boxPayloadAsKind(box, kind);
+                auto* narrowedAlloca = impl_->createEntryAlloca(
+                    func, nb.name + ".narrowed" + slotSuffix, payload->getType());
+                impl_->builder->CreateStore(payload, narrowedAlloca);
+                impl_->setVar(nb.name, narrowedAlloca, kind);
+                impl_->scopes.back().borrowed.insert(nb.name);
+                impl_->scopes.back().narrowShadowOrigin[nb.name] = slotPtr;
+            } else if (localAlloca) {
+                impl_->setVar(nb.name, localAlloca, kind);
+            }
+            if (kind == Impl::VarKind::ClassInstance) {
+                std::string cls = narrowBindingClassName(nb);
+                if (!cls.empty())
+                    restores.push_back(applyClassNarrow(nb.name, cls));
+            }
+        }
+        return [restores] { for (auto& r : restores) r(); };
+    };
+    static const std::vector<NarrowBinding> kNoNarrowBindings;
+
     node.condition->accept(*this);
     llvm::Value* cond = impl_->toBool(impl_->lastValue, node.condition.get());
 
-    auto [narrowVar, narrowKind] = detectNarrowing(node.condition.get());
-
-    auto* func = impl_->currentFunction;
     auto* thenBB = llvm::BasicBlock::Create(*impl_->context, "then", func);
     auto* mergeBB = llvm::BasicBlock::Create(*impl_->context, "ifend", func);
 
@@ -278,32 +270,7 @@ void CodeGen::visit(IfStmt& node) {
 
     impl_->builder->SetInsertPoint(thenBB);
     impl_->pushScope();
-    if (!narrowVar.empty() && narrowKind != Impl::VarKind::Other) {
-        auto* localAlloca = impl_->lookupVar(narrowVar);
-        llvm::Value* slotPtr = localAlloca;
-        bool slotIsBox = (localAlloca && localAlloca->getAllocatedType() == impl_->boxType);
-        if (!slotPtr) {
-            if (auto* gv = impl_->lookupModuleGlobal(narrowVar)) {
-                slotPtr = gv;
-                slotIsBox = (gv->getValueType() == impl_->boxType);
-            }
-        }
-        if (slotPtr && slotIsBox) {
-            auto* box = impl_->builder->CreateLoad(
-                impl_->boxType, slotPtr, narrowVar + ".box.narrow");
-            llvm::Value* payload = impl_->boxPayloadAsKind(box, narrowKind);
-            auto* narrowedAlloca = impl_->createEntryAlloca(
-                func, narrowVar + ".narrowed", payload->getType());
-            impl_->builder->CreateStore(payload, narrowedAlloca);
-            impl_->setVar(narrowVar, narrowedAlloca, narrowKind);
-            impl_->scopes.back().borrowed.insert(narrowVar);
-        } else if (localAlloca) {
-            impl_->setVar(narrowVar, localAlloca, narrowKind);
-        }
-    }
-    auto restoreThenNarrow = applyClassNarrow(
-        narrowVar, narrowKind == Impl::VarKind::ClassInstance
-                       ? narrowClassName(node.condition.get()) : std::string());
+    auto restoreThenNarrow = applyNarrowSet(node.thenNarrow, "");
     for (auto& stmt : node.thenBody) stmt->accept(*this);
     impl_->emitScopeCleanup();
     impl_->popScope();
@@ -317,8 +284,6 @@ void CodeGen::visit(IfStmt& node) {
         node.elifClauses[i].first->accept(*this);
         llvm::Value* elifCond = impl_->toBool(impl_->lastValue, node.elifClauses[i].first.get());
 
-        auto [elifNarrowVar, elifNarrowKind] = detectNarrowing(node.elifClauses[i].first.get());
-
         auto* elifThenBB = llvm::BasicBlock::Create(*impl_->context, "elifthen", func);
         llvm::BasicBlock* elifNextBB = (i + 1 < elifBlocks.size())
             ? elifBlocks[i + 1] : (elseBB ? elseBB : mergeBB);
@@ -326,25 +291,9 @@ void CodeGen::visit(IfStmt& node) {
 
         impl_->builder->SetInsertPoint(elifThenBB);
         impl_->pushScope();
-        if (!elifNarrowVar.empty() && elifNarrowKind != Impl::VarKind::Other) {
-            auto* existingAlloca = impl_->lookupVar(elifNarrowVar);
-            if (existingAlloca && existingAlloca->getAllocatedType() == impl_->boxType) {
-                auto* box = impl_->builder->CreateLoad(
-                    impl_->boxType, existingAlloca, elifNarrowVar + ".box.narrow");
-                llvm::Value* payload = impl_->boxPayloadAsKind(box, elifNarrowKind);
-                auto* narrowedAlloca = impl_->createEntryAlloca(
-                    func, elifNarrowVar + ".narrowed", payload->getType());
-                impl_->builder->CreateStore(payload, narrowedAlloca);
-                impl_->setVar(elifNarrowVar, narrowedAlloca, elifNarrowKind);
-                impl_->scopes.back().borrowed.insert(elifNarrowVar);
-            } else if (existingAlloca) {
-                impl_->setVar(elifNarrowVar, existingAlloca, elifNarrowKind);
-            }
-        }
-        auto restoreElifNarrow = applyClassNarrow(
-            elifNarrowVar, elifNarrowKind == Impl::VarKind::ClassInstance
-                               ? narrowClassName(node.elifClauses[i].first.get())
-                               : std::string());
+        auto restoreElifNarrow = applyNarrowSet(
+            i < node.elifNarrows.size() ? node.elifNarrows[i] : kNoNarrowBindings,
+            "");
         for (auto& stmt : node.elifClauses[i].second) stmt->accept(*this);
         impl_->emitScopeCleanup();
         impl_->popScope();
@@ -356,68 +305,18 @@ void CodeGen::visit(IfStmt& node) {
     if (elseBB) {
         impl_->builder->SetInsertPoint(elseBB);
         impl_->pushScope();
-        if (!narrowVar.empty()) {
-            auto elseKind = computeElseKind(narrowVar, narrowKind);
-            if (elseKind != Impl::VarKind::Union) {
-                auto* localAlloca = impl_->lookupVar(narrowVar);
-                llvm::Value* slotPtr = localAlloca;
-                bool slotIsBox = (localAlloca && localAlloca->getAllocatedType() == impl_->boxType);
-                if (!slotPtr) {
-                    if (auto* gv = impl_->lookupModuleGlobal(narrowVar)) {
-                        slotPtr = gv;
-                        slotIsBox = (gv->getValueType() == impl_->boxType);
-                    }
-                }
-                if (slotPtr && slotIsBox) {
-                    auto* box = impl_->builder->CreateLoad(
-                        impl_->boxType, slotPtr, narrowVar + ".box.narrow.else");
-                    llvm::Value* payload = impl_->boxPayloadAsKind(box, elseKind);
-                    auto* narrowedAlloca = impl_->createEntryAlloca(
-                        func, narrowVar + ".narrowed.else", payload->getType());
-                    impl_->builder->CreateStore(payload, narrowedAlloca);
-                    impl_->setVar(narrowVar, narrowedAlloca, elseKind);
-                    impl_->scopes.back().borrowed.insert(narrowVar);
-                } else if (localAlloca) {
-                    impl_->setVar(narrowVar, localAlloca, elseKind);
-                }
-            }
-        }
+        auto restoreElseNarrow = applyNarrowSet(node.elseNarrow, ".else");
         for (auto& stmt : node.elseBody) stmt->accept(*this);
         impl_->emitScopeCleanup();
         impl_->popScope();
+        restoreElseNarrow();
         if (!impl_->builder->GetInsertBlock()->getTerminator())
             impl_->builder->CreateBr(mergeBB);
     }
 
     impl_->builder->SetInsertPoint(mergeBB);
 
-    if (!narrowVar.empty() && stmtsAlwaysTerminate(node.thenBody) &&
-        node.elifClauses.empty() && node.elseBody.empty()) {
-        auto elseKind = computeElseKind(narrowVar, narrowKind);
-        if (elseKind != Impl::VarKind::Union) {
-            auto* localAlloca = impl_->lookupVar(narrowVar);
-            llvm::Value* slotPtr = localAlloca;
-            bool slotIsBox = (localAlloca && localAlloca->getAllocatedType() == impl_->boxType);
-            if (!slotPtr) {
-                if (auto* gv = impl_->lookupModuleGlobal(narrowVar)) {
-                    slotPtr = gv;
-                    slotIsBox = (gv->getValueType() == impl_->boxType);
-                }
-            }
-            if (slotPtr && slotIsBox) {
-                auto* box = impl_->builder->CreateLoad(
-                    impl_->boxType, slotPtr, narrowVar + ".box.narrow.fall");
-                llvm::Value* payload = impl_->boxPayloadAsKind(box, elseKind);
-                auto* narrowedAlloca = impl_->createEntryAlloca(
-                    func, narrowVar + ".narrowed.fall", payload->getType());
-                impl_->builder->CreateStore(payload, narrowedAlloca);
-                impl_->setVar(narrowVar, narrowedAlloca, elseKind);
-                impl_->scopes.back().borrowed.insert(narrowVar);
-            } else if (localAlloca) {
-                impl_->setVar(narrowVar, localAlloca, elseKind);
-            }
-        }
-    }
+    applyNarrowSet(node.afterNarrow, ".fall");
 }
 
 void CodeGen::visit(WhileStmt& node) {

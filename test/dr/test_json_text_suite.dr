@@ -628,43 +628,43 @@ class TestUcs4DumpsRepr(TestCase) {
 
 class TypedTopLevelTests(TestCase) {
     """json.loads_obj / loads_list (and the loadb_* bytes twins) - the public
-    typed entry points for boxed-tier JSON. loads returns Any, so every caller
+    typed entry points for boxed-tier JSON. loads returns Data, so every caller
     that knows the top level is an object used to repeat the same isinstance
-    narrowing boilerplate; these return dict[str, Any] / list[Any] directly and
+    narrowing boilerplate; these return dict[str, Data] / list[Data] directly and
     raise ValueError when the document's top level is a different shape."""
 
     def test_loads_obj_returns_typed_dict() {
-        const m: dict[str, Any] = loads_obj("{\"name\": \"Ada\", \"age\": 36, \"ok\": true}")
+        const m: dict[str, Data] = loads_obj("{\"name\": \"Ada\", \"age\": 36, \"ok\": true}")
         self.assertEqual(m["name"], "Ada")
         self.assertEqual(m["age"], 36)
         self.assertEqual(m["ok"], True)
     }
 
     def test_loads_obj_empty_object() {
-        const m: dict[str, Any] = loads_obj("{}")
+        const m: dict[str, Data] = loads_obj("{}")
         self.assertEqual(len(m), 0)
     }
 
     def test_loads_obj_rejects_array() {
         self.assertRaises(ValueError, lambda () -> None {
-            const m: dict[str, Any] = loads_obj("[1, 2, 3]")
+            const m: dict[str, Data] = loads_obj("[1, 2, 3]")
         })
     }
 
     def test_loads_obj_rejects_scalar() {
         self.assertRaises(ValueError, lambda () -> None {
-            const m: dict[str, Any] = loads_obj("42")
+            const m: dict[str, Data] = loads_obj("42")
         })
     }
 
     def test_loads_obj_rejects_malformed() {
         self.assertRaises(ValueError, lambda () -> None {
-            const m: dict[str, Any] = loads_obj("{\"a\": ")
+            const m: dict[str, Data] = loads_obj("{\"a\": ")
         })
     }
 
     def test_loads_list_returns_typed_list() {
-        const xs: list[Any] = loads_list("[1, \"two\", true, null]")
+        const xs: list[Data] = loads_list("[1, \"two\", true, null]")
         self.assertEqual(len(xs), 4)
         self.assertEqual(xs[0], 1)
         self.assertEqual(xs[1], "two")

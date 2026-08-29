@@ -54,34 +54,35 @@ A fresh literal is fine - the compiler sees it being born and builds the
 layout the annotation asks for:
 
 ```dragon
-xs: list[Any] = ["a", "b"]     # built as a box list from the start
+xs: list[int | str] = ["a", "b"]     # built as a box list from the start
 ```
 
-But a *named* concrete list cannot be passed off as `list[Any]`, and a
-`list[Any]` cannot be passed off as a concrete list - reading one layout at
+But a *named* concrete list cannot be passed off as `list[int | str]`, and a
+`list[int | str]` cannot be passed off as a concrete list - reading one layout at
 the other's stride would corrupt memory, so the compiler stops the value at
 the boundary:
 
 ```dragon
 # doc: no-check
 names: list[str] = ["a", "b"]
-xs: list[Any] = names
-# error: cannot assign 'list[str]' to variable of type 'list[Any]' (the two
+xs: list[int | str] = names
+# error: cannot assign 'list[str]' to variable of type 'list[int | str]' (the two
 # have different element layouts: monomorphized vs boxed; build the value
 # with this element type at its declaration, or copy it element-wise)
 ```
 
-The same rule guards the boundary the compiler cannot see. An `Any` box can
+The same rule guards the boundary the compiler cannot see. An `Data` box can
 hold either kind of list, so unboxing one into a typed list view checks the
 value's actual layout at runtime and raises `TypeError` on a mismatch rather
 than misreading. Parsed JSON arrays are box lists, so reading them as
-`list[Any]` and narrowing per element is the natural path:
+`list[int | str]` and narrowing per element is the natural path:
 
 ```dragon
 from json import decode
+from json import Data
 
-const doc: dict[str, Any] = decode[dict[str, Any]]('{"tags": ["a", "b"]}'.encode("utf-8"))
-const tags: list[Any] = doc["tags"]    # parsed arrays are box lists - ok
+const doc: dict[str, Data] = decode[dict[str, Data]]('{"tags": ["a", "b"]}'.encode("utf-8"))
+const tags: list[Data] = doc["tags"]    # parsed arrays are box lists - ok
 for t in tags {
     const s: str = t                   # narrow each element
     print(s)                           # a, then b
@@ -89,16 +90,16 @@ for t in tags {
 ```
 
 When you genuinely need to cross layouts, copy element-wise - the loop above
-is exactly that shape. And note the rule pins the *typed view* `list[Any]`,
-not dynamism itself: a bare `Any` accepts any list and every operation on it
-dispatches on the value's real layout at runtime. You can `len()` an `Any`
-and iterate it directly - each element arrives as an `Any` to narrow - and
+is exactly that shape. And note the rule pins the *typed view* `list[int | str]`,
+not dynamism itself: a bare `Data` accepts any list and every operation on it
+dispatches on the value's real layout at runtime. You can `len()` a `Data`
+and iterate it directly - each element arrives as a `Data` to narrow - and
 that works for **both** layouts, which makes it the right shape for code
 that must accept any list at all (the stdlib JSON Schema validator walks
 payloads exactly this way):
 
 ```dragon
-def count_strings(v: Any) -> int {
+def count_strings(v: Data) -> int {
     n: int = 0
     for x in v {                  # dispatches per element, either layout
         if isinstance(x, str) {

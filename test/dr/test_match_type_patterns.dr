@@ -69,7 +69,7 @@ def narrow_float(v: int | float) -> float {
     return 0.0
 }
 
-def narrow_any(v: Any) -> str {
+def narrow_any(v: Boxed) -> str {
     match v {
         case int() { return str(v + 10) }
         case str() { return v + "!" }

@@ -393,6 +393,20 @@ void TypeChecker::visit(AssignStmt& node) {
         for (auto& target : node.targets) {
             if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
                 auto existing = impl_->lookup(name->name);
+                // Assigning the DECLARED (wider) type back to a narrowed
+                // binding ends the narrow: the value is no longer of the
+                // narrowed arm, and the fact must not outlive the store.
+                // Writing a value that is not of the narrowed arm ends the
+                // narrow: the binding holds its DECLARED type again. Without
+                // this the narrowed type stands in for the declaration and the
+                // diagnostic blames a type the author never wrote.
+                if (existing && valueType &&
+                    valueType->kind() != Type::Kind::Unknown &&
+                    !valueType->equals(*existing) &&
+                    !valueType->isSubtypeOf(*existing)) {
+                    if (auto declared = impl_->dropNarrowedBinding(name->name))
+                        existing = declared;
+                }
                 if (existing) {
                     propagateAnnotationToEmptyLiteral(node.value.get(), existing);
                     valueType = inferType(node.value.get());
@@ -557,116 +571,323 @@ void TypeChecker::visit(AnnAssignStmt& node) {
     }
 }
 
-void TypeChecker::visit(IfStmt& node) {
-    auto narrowedTypeFromExpr = [&](Expr* e) -> std::shared_ptr<Type> {
-        auto* tn = dynamic_cast<NameExpr*>(e);
-        if (!tn) return nullptr;
-        if (tn->name == "int")   return impl_->intType;
-        if (tn->name == "float") return impl_->floatType;
-        if (tn->name == "bool")  return impl_->boolType;
-        if (tn->name == "str")   return impl_->strType;
-        if (tn->name == "bytes") return impl_->bytesType;
-        auto tit = impl_->typeNames.find(tn->name);
-        if (tit != impl_->typeNames.end()) return tit->second;
-        auto found = impl_->lookup(tn->name);
-        return found;
+static std::shared_ptr<Type> subtractUnionMember(
+        const std::shared_ptr<Type>& cur, const std::shared_ptr<Type>& sub) {
+    if (!cur || cur->kind() != Type::Kind::Union) return nullptr;
+    auto& ut = static_cast<UnionType&>(*cur);
+    std::vector<std::shared_ptr<Type>> remaining;
+    for (auto& m : ut.types) {
+        if (!sub || !m->equals(*sub)) remaining.push_back(m);
+    }
+    if (remaining.empty()) return cur;
+    if (remaining.size() == 1) return remaining[0];
+    return std::make_shared<UnionType>(std::move(remaining));
+}
+
+static const NarrowBinding* findNarrowBinding(
+        const std::vector<NarrowBinding>& bindings, const std::string& name) {
+    for (auto& nb : bindings) {
+        if (nb.name == name) return &nb;
+    }
+    return nullptr;
+}
+
+static std::vector<NarrowBinding> mergeNarrowFacts(
+        const std::vector<NarrowBinding>& base,
+        const std::vector<NarrowBinding>& refinement) {
+    std::vector<NarrowBinding> merged = base;
+    for (auto& nb : refinement) {
+        auto* existing = const_cast<NarrowBinding*>(findNarrowBinding(merged, nb.name));
+        if (existing) existing->type = nb.type;
+        else merged.push_back(nb);
+    }
+    return merged;
+}
+
+static bool exprRebindsName(const Expr* target, const std::string& name) {
+    if (!target) return false;
+    if (auto* n = dynamic_cast<const NameExpr*>(target)) return n->name == name;
+    if (auto* t = dynamic_cast<const TupleExpr*>(target)) {
+        for (auto& e : t->elements)
+            if (exprRebindsName(e.get(), name)) return true;
+        return false;
+    }
+    if (auto* l = dynamic_cast<const ListExpr*>(target)) {
+        for (auto& e : l->elements)
+            if (exprRebindsName(e.get(), name)) return true;
+        return false;
+    }
+    if (auto* s = dynamic_cast<const StarredExpr*>(target))
+        return exprRebindsName(s->value.get(), name);
+    return false;
+}
+
+static bool namesInclude(const std::vector<std::string>& names,
+                         const std::string& name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+static bool matchPatternBindsName(const MatchPattern& p, const std::string& name) {
+    if (p.name == name) return true;
+    for (auto& sub : p.subPatterns)
+        if (matchPatternBindsName(sub, name)) return true;
+    return false;
+}
+
+static bool stmtRebindsName(const Stmt* s, const std::string& name);
+
+static bool stmtsRebindName(const std::vector<std::unique_ptr<Stmt>>& stmts,
+                            const std::string& name) {
+    for (auto& s : stmts)
+        if (stmtRebindsName(s.get(), name)) return true;
+    return false;
+}
+
+static bool stmtRebindsName(const Stmt* s, const std::string& name) {
+    if (auto* a = dynamic_cast<const AssignStmt*>(s)) {
+        for (auto& t : a->targets)
+            if (exprRebindsName(t.get(), name)) return true;
+        return false;
+    }
+    if (auto* a = dynamic_cast<const AugAssignStmt*>(s))
+        return exprRebindsName(a->target.get(), name);
+    if (auto* a = dynamic_cast<const AnnAssignStmt*>(s))
+        return exprRebindsName(a->target.get(), name);
+    if (auto* f = dynamic_cast<const ForStmt*>(s))
+        return exprRebindsName(f->target.get(), name) ||
+               stmtsRebindName(f->body, name) ||
+               stmtsRebindName(f->elseBody, name);
+    if (auto* w = dynamic_cast<const WhileStmt*>(s))
+        return stmtsRebindName(w->body, name) ||
+               stmtsRebindName(w->elseBody, name);
+    if (auto* i = dynamic_cast<const IfStmt*>(s)) {
+        if (stmtsRebindName(i->thenBody, name)) return true;
+        for (auto& clause : i->elifClauses)
+            if (stmtsRebindName(clause.second, name)) return true;
+        return stmtsRebindName(i->elseBody, name);
+    }
+    if (auto* t = dynamic_cast<const TryStmt*>(s)) {
+        if (stmtsRebindName(t->tryBody, name) ||
+            stmtsRebindName(t->elseBody, name) ||
+            stmtsRebindName(t->finallyBody, name)) return true;
+        for (auto& h : t->handlers)
+            if (h.name == name || stmtsRebindName(h.body, name)) return true;
+        return false;
+    }
+    if (auto* w = dynamic_cast<const WithStmt*>(s)) {
+        for (auto& item : w->items)
+            if (exprRebindsName(item.optionalVars.get(), name)) return true;
+        return stmtsRebindName(w->body, name);
+    }
+    if (auto* m = dynamic_cast<const MatchStmt*>(s)) {
+        for (auto& c : m->cases)
+            if (matchPatternBindsName(c.pattern, name) ||
+                stmtsRebindName(c.body, name)) return true;
+        return false;
+    }
+    if (auto* th = dynamic_cast<const ThreadStmt*>(s))
+        return namesInclude(th->mutatedCapturedVars, name) ||
+               stmtsRebindName(th->body, name);
+    if (auto* d = dynamic_cast<const DeleteStmt*>(s)) {
+        for (auto& t : d->targets)
+            if (exprRebindsName(t.get(), name)) return true;
+        return false;
+    }
+    if (auto* fn = dynamic_cast<const FunctionDecl*>(s))
+        return fn->name == name || namesInclude(fn->mutatedCapturedVars, name);
+    if (auto* cd = dynamic_cast<const ClassDecl*>(s))
+        return cd->name == name;
+    if (auto* im = dynamic_cast<const ImportStmt*>(s)) {
+        for (auto& alias : im->names)
+            if (alias.asName == name || (alias.asName.empty() && alias.name == name))
+                return true;
+        return false;
+    }
+    return false;
+}
+
+namespace {
+struct NarrowRegion {
+    const std::vector<NarrowBinding>* entry;
+    const std::vector<std::unique_ptr<Stmt>>* body;
+};
+}
+
+static std::vector<NarrowBinding> survivingNarrowFacts(const IfStmt& node) {
+    std::vector<NarrowRegion> live;
+    auto addRegion = [&live](const std::vector<NarrowBinding>& entry,
+                             const std::vector<std::unique_ptr<Stmt>>& body) {
+        if (!stmtsAlwaysTerminate(body)) live.push_back({&entry, &body});
     };
-    auto subtractFromUnion = [](const std::shared_ptr<Type>& cur,
-                                const std::shared_ptr<Type>& sub) -> std::shared_ptr<Type> {
-        if (!cur || cur->kind() != Type::Kind::Union) return nullptr;
-        auto& ut = static_cast<UnionType&>(*cur);
-        std::vector<std::shared_ptr<Type>> remaining;
-        for (auto& m : ut.types) {
-            if (!sub || !m->equals(*sub)) remaining.push_back(m);
-        }
-        if (remaining.empty()) return cur;
-        if (remaining.size() == 1) return remaining[0];
-        return std::make_shared<UnionType>(std::move(remaining));
-    };
-    auto analyzeIsinstance = [&](Expr* cond, std::string& outName,
-                                 std::shared_ptr<Type>& outThenT,
-                                 std::shared_ptr<Type>& outElseT) -> bool {
-        if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
-            auto op = bin->op.type();
-            bool isEq = (op == TokenType::IS || op == TokenType::EQUAL_EQUAL);
-            bool isNe = (op == TokenType::IS_NOT || op == TokenType::NOT_EQUAL);
-            if (isEq || isNe) {
-                auto* nm = dynamic_cast<NameExpr*>(bin->left.get());
-                bool noneOther = dynamic_cast<NoneLiteral*>(bin->right.get()) != nullptr;
-                if (!nm || !noneOther) {
-                    nm = dynamic_cast<NameExpr*>(bin->right.get());
-                    noneOther = dynamic_cast<NoneLiteral*>(bin->left.get()) != nullptr;
-                }
-                if (nm && noneOther) {
-                    auto curType = impl_->lookup(nm->name);
-                    if (curType && curType->kind() == Type::Kind::Union) {
-                        auto nonNone = subtractFromUnion(curType, impl_->noneType);
-                        outName = nm->name;
-                        if (isEq) { outThenT = impl_->noneType; outElseT = nonNone; }
-                        else      { outThenT = nonNone;         outElseT = impl_->noneType; }
-                        return true;
-                    }
-                }
+    addRegion(node.thenNarrow, node.thenBody);
+    for (size_t i = 0; i < node.elifClauses.size(); ++i)
+        addRegion(node.elifNarrows[i], node.elifClauses[i].second);
+    addRegion(node.elseNarrow, node.elseBody);
+    if (live.empty()) return {};
+
+    std::vector<NarrowBinding> survivors;
+    for (auto& nb : *live[0].entry) {
+        bool holdsOnEveryLivePath = true;
+        for (auto& region : live) {
+            const NarrowBinding* fact = findNarrowBinding(*region.entry, nb.name);
+            if (!fact || !fact->type || !nb.type || !fact->type->equals(*nb.type) ||
+                stmtsRebindName(*region.body, nb.name)) {
+                holdsOnEveryLivePath = false;
+                break;
             }
         }
-        auto* call = dynamic_cast<CallExpr*>(cond);
-        if (!call) return false;
-        auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
-        if (!callee || callee->name != "isinstance" || call->args.size() != 2)
-            return false;
-        auto* argName = dynamic_cast<NameExpr*>(call->args[0].get());
-        if (!argName) return false;
-        auto curType = impl_->lookup(argName->name);
-        auto narrowT = narrowedTypeFromExpr(call->args[1].get());
-        if (!curType || !narrowT) return false;
-        if (curType->kind() == Type::Kind::Union) {
-            outName = argName->name;
-            outThenT = narrowT;
-            outElseT = subtractFromUnion(curType, narrowT);
-            return true;
-        }
-        if (curType->kind() == Type::Kind::Any) {
-            outName = argName->name;
-            outThenT = narrowT;
-            outElseT = curType;
-            return true;
-        }
-        return false;
-    };
+        if (holdsOnEveryLivePath) survivors.push_back(nb);
+    }
+    return survivors;
+}
 
-    if (node.condition) inferType(node.condition.get());
+std::shared_ptr<Type> TypeChecker::narrowTargetTypeFromExpr(Expr* e) {
+    auto* tn = dynamic_cast<NameExpr*>(e);
+    if (!tn) return nullptr;
+    if (tn->name == "int")   return impl_->intType;
+    if (tn->name == "float") return impl_->floatType;
+    if (tn->name == "bool")  return impl_->boolType;
+    if (tn->name == "str")   return impl_->strType;
+    if (tn->name == "bytes") return impl_->bytesType;
+    auto tit = impl_->typeNames.find(tn->name);
+    if (tit != impl_->typeNames.end()) return tit->second;
+    return impl_->lookup(tn->name);
+}
 
-    std::string nName;
-    std::shared_ptr<Type> nThen;
-    std::shared_ptr<Type> nElse;
-    bool narrowedHere = node.condition &&
-                        analyzeIsinstance(node.condition.get(), nName, nThen, nElse);
+void TypeChecker::defineNarrowBindings(const std::vector<NarrowBinding>& bindings) {
+    for (auto& nb : bindings) {
+        if (!nb.type || nb.type->kind() == Type::Kind::Unknown) continue;
+        // Remember what the name was declared as, so writing to it can end the
+        // narrow instead of leaving the narrowed type standing in for the
+        // declaration for the rest of the scope.
+        auto prev = impl_->lookup(nb.name);
+        if (prev && !prev->equals(*nb.type) &&
+            !impl_->narrowedFrom.count(nb.name))
+            impl_->narrowedFrom[nb.name] = prev;
+        impl_->define(nb.name, nb.type);
+    }
+}
+
+TypeChecker::NarrowFacts TypeChecker::guardFactsForLeaf(Expr* cond) {
+    NarrowFacts facts;
+    if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
+        auto op = bin->op.type();
+        bool isEq = (op == TokenType::IS || op == TokenType::EQUAL_EQUAL);
+        bool isNe = (op == TokenType::IS_NOT || op == TokenType::NOT_EQUAL);
+        if (!isEq && !isNe) return facts;
+        auto* nm = dynamic_cast<NameExpr*>(bin->left.get());
+        bool noneOther = dynamic_cast<NoneLiteral*>(bin->right.get()) != nullptr;
+        if (!nm || !noneOther) {
+            nm = dynamic_cast<NameExpr*>(bin->right.get());
+            noneOther = dynamic_cast<NoneLiteral*>(bin->left.get()) != nullptr;
+        }
+        if (!nm || !noneOther) return facts;
+        auto curType = impl_->lookup(nm->name);
+        if (!curType || curType->kind() != Type::Kind::Union) return facts;
+        auto nonNone = subtractUnionMember(curType, impl_->noneType);
+        auto& whenNone    = isEq ? facts.whenTrue : facts.whenFalse;
+        auto& whenPresent = isEq ? facts.whenFalse : facts.whenTrue;
+        whenNone.push_back({nm->name, impl_->noneType});
+        if (nonNone) whenPresent.push_back({nm->name, nonNone});
+        return facts;
+    }
+    auto* call = dynamic_cast<CallExpr*>(cond);
+    if (!call) return facts;
+    auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
+    if (!callee || callee->name != "isinstance" || call->args.size() != 2)
+        return facts;
+    auto* argName = dynamic_cast<NameExpr*>(call->args[0].get());
+    if (!argName) return facts;
+    auto curType = impl_->lookup(argName->name);
+    auto matchType = narrowTargetTypeFromExpr(call->args[1].get());
+    if (!curType || !matchType) return facts;
+    if (curType->kind() == Type::Kind::Union) {
+        // `isinstance(v, dict)` on a union must narrow to that union's OWN dict
+        // arm (dict[str, Data]), not a bare dict: the arm carries the element
+        // types every later read depends on.
+        auto& arms = static_cast<UnionType&>(*curType).types;
+        for (auto& arm : arms) {
+            if (arm && arm->kind() == matchType->kind() &&
+                !arm->equals(*matchType)) {
+                matchType = arm;
+                break;
+            }
+        }
+        facts.whenTrue.push_back({argName->name, matchType});
+        auto rest = subtractUnionMember(curType, matchType);
+        if (rest) facts.whenFalse.push_back({argName->name, rest});
+        return facts;
+    }
+    if (curType->kind() == Type::Kind::Boxed)
+        facts.whenTrue.push_back({argName->name, matchType});
+    return facts;
+}
+
+TypeChecker::NarrowFacts TypeChecker::checkGuardCondition(Expr* cond) {
+    auto* un = dynamic_cast<UnaryExpr*>(cond);
+    if (un && un->op.type() == TokenType::NOT) {
+        NarrowFacts inner = checkGuardCondition(un->operand.get());
+        un->type = impl_->boolType;
+        return {std::move(inner.whenFalse), std::move(inner.whenTrue)};
+    }
+    auto* bin = dynamic_cast<BinaryExpr*>(cond);
+    bool isAnd = bin && bin->op.type() == TokenType::AND;
+    bool isOr  = bin && bin->op.type() == TokenType::OR;
+    if (isAnd || isOr) {
+        NarrowFacts left = checkGuardCondition(bin->left.get());
+        const auto& carried = isAnd ? left.whenTrue : left.whenFalse;
+        impl_->pushScope();
+        defineNarrowBindings(carried);
+        NarrowFacts right = checkGuardCondition(bin->right.get());
+        impl_->popScope();
+        auto effectiveLeft =
+            isOr ? typeWithoutNone(bin->left->type) : bin->left->type;
+        bin->type = joinBranchTypes(effectiveLeft, bin->right->type);
+        NarrowFacts facts;
+        if (isAnd) facts.whenTrue = mergeNarrowFacts(left.whenTrue, right.whenTrue);
+        else facts.whenFalse = mergeNarrowFacts(left.whenFalse, right.whenFalse);
+        return facts;
+    }
+    inferType(cond);
+    return guardFactsForLeaf(cond);
+}
+
+void TypeChecker::visit(IfStmt& node) {
+    NarrowFacts condFacts;
+    if (node.condition) condFacts = checkGuardCondition(node.condition.get());
+
+    node.thenNarrow = condFacts.whenTrue;
     impl_->pushScope();
-    if (narrowedHere) impl_->define(nName, nThen);
+    defineNarrowBindings(node.thenNarrow);
     for (auto& s : node.thenBody) s->accept(*this);
     impl_->popScope();
 
+    node.elifNarrows.clear();
+    std::vector<NarrowBinding> reachingFalse = condFacts.whenFalse;
     for (auto& [cond, body] : node.elifClauses) {
-        if (cond) inferType(cond.get());
-        std::string en;
-        std::shared_ptr<Type> et;
-        std::shared_ptr<Type> ee;
-        bool en_ok = cond && analyzeIsinstance(cond.get(), en, et, ee);
         impl_->pushScope();
-        if (en_ok) impl_->define(en, et);
+        defineNarrowBindings(reachingFalse);
+        NarrowFacts clauseFacts;
+        if (cond) clauseFacts = checkGuardCondition(cond.get());
+        impl_->popScope();
+
+        node.elifNarrows.push_back(
+            mergeNarrowFacts(reachingFalse, clauseFacts.whenTrue));
+        impl_->pushScope();
+        defineNarrowBindings(node.elifNarrows.back());
         for (auto& s : body) s->accept(*this);
         impl_->popScope();
+        reachingFalse = mergeNarrowFacts(reachingFalse, clauseFacts.whenFalse);
     }
 
+    node.elseNarrow = reachingFalse;
     impl_->pushScope();
-    if (narrowedHere) impl_->define(nName, nElse ? nElse : impl_->unknownType);
+    defineNarrowBindings(node.elseNarrow);
     for (auto& s : node.elseBody) s->accept(*this);
     impl_->popScope();
 
-    if (narrowedHere && node.elifClauses.empty() && node.elseBody.empty() &&
-        stmtsAlwaysTerminate(node.thenBody)) {
-        impl_->define(nName, nElse ? nElse : impl_->unknownType);
-    }
+    node.afterNarrow = survivingNarrowFacts(node);
+    defineNarrowBindings(node.afterNarrow);
 }
 
 void TypeChecker::visit(WhileStmt& node) {
@@ -903,11 +1124,27 @@ void TypeChecker::visit(MatchStmt& node) {
     };
 
     auto* subjName = dynamic_cast<NameExpr*>(node.subject.get());
+    auto subjBindingType = subjName ? impl_->lookup(subjName->name) : nullptr;
     auto patternNarrowType = [&](const std::string& tn) -> std::shared_ptr<Type> {
         if (tn == "int")   return impl_->intType;
         if (tn == "float") return impl_->floatType;
         if (tn == "bool")  return impl_->boolType;
         if (tn == "str")   return impl_->strType;
+        // A container pattern narrows a union subject to its arm of that
+        // kind (e.g. `case dict()` on Data narrows to dict[str, Data]).
+        if (subjBindingType && subjBindingType->kind() == Type::Kind::Union) {
+            Type::Kind want = Type::Kind::Unknown;
+            if (tn == "list")       want = Type::Kind::List;
+            else if (tn == "dict")  want = Type::Kind::Dict;
+            else if (tn == "set")   want = Type::Kind::Set;
+            else if (tn == "tuple") want = Type::Kind::Tuple;
+            else if (tn == "bytes") want = Type::Kind::Bytes;
+            if (want != Type::Kind::Unknown) {
+                auto& ut = static_cast<UnionType&>(*subjBindingType);
+                for (auto& m : ut.types)
+                    if (m && m->kind() == want) return m;
+            }
+        }
         return nullptr;
     };
 
