@@ -3,7 +3,7 @@ from colorsys import rgb_to_hsv, hsv_to_rgb, rgb_to_yiq, yiq_to_rgb
 from mimetypes import guess_type, guess_extension
 from functools import reduce, reduce_init, reduce_f
 from itertools import accumulate, chain, repeat, islice, pairwise, take
-from itertools import chain_t, repeat_t, islice_t, pairwise_t, take_t
+import itertools
 from math import factorial, isqrt, log_int
 from statistics import quantiles, median, median_low, median_high, mode_float, mode_int
 from enum import Enum, IntEnum, StrEnum, auto
@@ -119,7 +119,7 @@ class FunctoolsTests(TestCase) {
 
 
 class ItertoolsTests(TestCase) {
-    """itertools - monomorphic int building blocks.
+    """itertools - the building blocks over an int element type.
 
     (list[tuple] whole-list printing is a separate known repr gap; pairwise results
     are verified via indexing/unpacking, which are correct.)
@@ -161,30 +161,41 @@ class ItertoolsTests(TestCase) {
 
 
 class ItertoolsGenericTests(TestCase) {
-    def test_chain_t() {
-        self.assertEqual(chain_t(["a", "b"], ["c"]), ["a", "b", "c"])
-        self.assertEqual(chain_t([1, 2], [3, 4, 5]), [1, 2, 3, 4, 5])
+    def test_chain_non_int() {
+        self.assertEqual(chain(["a", "b"], ["c"]), ["a", "b", "c"])
+        self.assertEqual(chain([1, 2], [3, 4, 5]), [1, 2, 3, 4, 5])
     }
 
-    def test_repeat_t() {
-        self.assertEqual(repeat_t("z", 3), ["z", "z", "z"])
-        self.assertEqual(repeat_t(1.5, 2), [1.5, 1.5])
-        self.assertEqual(len(repeat_t(0, 0)), 0)
+    def test_repeat_non_int() {
+        self.assertEqual(repeat("z", 3), ["z", "z", "z"])
+        self.assertEqual(repeat(1.5, 2), [1.5, 1.5])
+        self.assertEqual(len(repeat(0, 0)), 0)
     }
 
-    def test_islice_t() {
-        self.assertEqual(islice_t(["p", "q", "r", "s"], 1, 3), ["q", "r"])
-        self.assertEqual(islice_t([10, 11, 12, 13, 14], 1, 4), [11, 12, 13])
-        self.assertEqual(len(islice_t(["x"], 5, 9)), 0)
+    def test_islice_non_int() {
+        self.assertEqual(islice(["p", "q", "r", "s"], 1, 3), ["q", "r"])
+        self.assertEqual(islice([10, 11, 12, 13, 14], 1, 4), [11, 12, 13])
+        self.assertEqual(len(islice(["x"], 5, 9)), 0)
     }
 
-    def test_take_t() {
-        self.assertEqual(take_t(["u", "v", "w"], 2), ["u", "v"])
-        self.assertEqual(take_t([5, 6, 7, 8], 9), [5, 6, 7, 8])
+    def test_take_non_int() {
+        self.assertEqual(take(["u", "v", "w"], 2), ["u", "v"])
+        self.assertEqual(take([5, 6, 7, 8], 9), [5, 6, 7, 8])
     }
 
-    def test_pairwise_t() {
-        pairs: list[tuple[str, str]] = pairwise_t(["p", "q", "r"])
+    def test_module_qualified_call_infers() {
+        self.assertEqual(itertools.chain([1, 2], [3, 4]), [1, 2, 3, 4])
+        self.assertEqual(itertools.repeat("x", 2), ["x", "x"])
+        self.assertEqual(itertools.take(["a", "b", "c"], 2), ["a", "b"])
+    }
+
+    def test_module_qualified_call_explicit_type_args() {
+        self.assertEqual(itertools.chain[int]([1], [2]), [1, 2])
+        self.assertEqual(itertools.repeat[str]("z", 2), ["z", "z"])
+    }
+
+    def test_pairwise_non_int() {
+        pairs: list[tuple[str, str]] = pairwise(["p", "q", "r"])
         self.assertEqual(len(pairs), 2)
         a0: str = ""
         b0: str = ""

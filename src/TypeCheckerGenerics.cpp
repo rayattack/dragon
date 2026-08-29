@@ -503,6 +503,17 @@ bool TypeChecker::tryInstantiateGenericCall(
         return nullptr;
     };
 
+    auto moduleGenericFn = [&](Expr* obj, const std::string& attr) -> FunctionDecl* {
+        auto mt = std::dynamic_pointer_cast<ModuleType>(inferType(obj));
+        if (!mt) return nullptr;
+        auto it = impl_->genericFunctions.find(attr);
+        if (it == impl_->genericFunctions.end()) return nullptr;
+        auto owner = impl_->genericTemplateModule.find(it->second);
+        if (owner == impl_->genericTemplateModule.end() || owner->second != mt->name)
+            return nullptr;
+        return it->second;
+    };
+
     if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
         auto it = impl_->genericFunctions.find(nm->name);
         if (it != impl_->genericFunctions.end()) {
@@ -532,11 +543,15 @@ bool TypeChecker::tryInstantiateGenericCall(
                 probeCls = cls.get(); probeMethod = at->attribute;
                 if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
                     decl = m; fnName = at->attribute; methodAttr = at;
-                    if (auto* tup = dynamic_cast<TupleExpr*>(sub->index.get())) {
-                        for (auto& el : tup->elements) explicitArgs.push_back(exprToTypeExpr(el.get()));
-                    } else {
-                        explicitArgs.push_back(exprToTypeExpr(sub->index.get()));
-                    }
+                }
+            } else if (FunctionDecl* mf = moduleGenericFn(at->object.get(), at->attribute)) {
+                decl = mf; fnName = at->attribute;
+            }
+            if (decl) {
+                if (auto* tup = dynamic_cast<TupleExpr*>(sub->index.get())) {
+                    for (auto& el : tup->elements) explicitArgs.push_back(exprToTypeExpr(el.get()));
+                } else {
+                    explicitArgs.push_back(exprToTypeExpr(sub->index.get()));
                 }
             }
         }
@@ -546,6 +561,8 @@ bool TypeChecker::tryInstantiateGenericCall(
             if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
                 decl = m; fnName = at->attribute; methodAttr = at;
             }
+        } else if (FunctionDecl* mf = moduleGenericFn(at->object.get(), at->attribute)) {
+            decl = mf; fnName = at->attribute;
         }
     }
     if (!decl) {
@@ -588,7 +605,8 @@ bool TypeChecker::tryInstantiateGenericCall(
     std::shared_ptr<FunctionType> genericFt;
     if (!isMethodCall) {
         genericFt = std::dynamic_pointer_cast<FunctionType>(impl_->lookup(fnName));
-    } else {
+    }
+    if (!genericFt) {
         bool pushedClassFrame = false;
         if (probeCls && !probeCls->genericOrigin.empty()) {
             if (auto gcIt = impl_->genericClasses.find(probeCls->genericOrigin);

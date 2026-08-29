@@ -30,21 +30,26 @@ they are not always the Python ones.
 ## `itertools` - eager sequence builders
 
 Python's `itertools` returns lazy iterators. Dragon's returns eager
-`list[int]` values (or `list[tuple[int, int]]` for `pairwise`). For
-finite inputs that is the common case, and it keeps everything
-unboxed. There is no `count`, `cycle`, or other infinite form - those
-need a generic, lazy iterator that the language does not yet provide.
+`list` values. For finite inputs that is the common case, and it keeps
+everything unboxed: each builder is generic over its element type and
+monomorphizes at the call site, so `chain([1, 2], [3])` and
+`chain(["a"], ["b"])` compile to separate specialized code with no
+boxing in either. There is no `count`, `cycle`, or other infinite form:
+those need a lazy iterator that the language does not yet provide.
 
 The exported functions are:
 
 | Function | Signature | Result |
 |---|---|---|
 | `accumulate` | `(iterable: list[int]) -> list[int]` | running sums |
-| `chain` | `(a: list[int], b: list[int]) -> list[int]` | concatenation |
-| `repeat` | `(value: int, times: int) -> list[int]` | `value` × `times` |
-| `islice` | `(iterable: list[int], start: int, stop: int) -> list[int]` | the half-open slice `[start, stop)` |
-| `take` | `(iterable: list[int], n: int) -> list[int]` | first `n` elements |
-| `pairwise` | `(iterable: list[int]) -> list[tuple[int, int]]` | overlapping pairs |
+| `chain` | `[T](a: list[T], b: list[T]) -> list[T]` | concatenation |
+| `repeat` | `[T](value: T, times: int) -> list[T]` | `value` × `times` |
+| `islice` | `[T](iterable: list[T], start: int, stop: int) -> list[T]` | the half-open slice `[start, stop)` |
+| `take` | `[T](iterable: list[T], n: int) -> list[T]` | first `n` elements |
+| `pairwise` | `[T](iterable: list[T]) -> list[tuple[T, T]]` | overlapping pairs |
+
+`accumulate` is the one exception: it stays `int`-only, because summing
+needs a `+` that an unbound `T` does not promise.
 
 Because the results are ordinary lists, you consume them with a normal
 `for` loop or index into them directly:
@@ -73,8 +78,8 @@ for a, b in pairwise([1, 2, 3]) {
 ```
 
 **Differs from Python:** results are eager `list` values, not lazy
-iterators; only the finite-input builders above exist (no `count`,
-`cycle`, `product`, `permutations`, etc.); everything is `int`-typed.
+iterators, and only the finite-input builders above exist (no `count`,
+`cycle`, `product`, `permutations`, etc.).
 
 ## `functools` - reduce
 

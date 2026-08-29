@@ -54,7 +54,7 @@ TEST_F(ReplImportTest, ResetRecoversASessionThatImported) {
 }
 
 TEST_F(ReplImportTest, AGenericInstantiatedInTwoTurns) {
-    ASSERT_TRUE(runOk("import_repeat_t"));
+    ASSERT_TRUE(runOk("import_repeat"));
     EXPECT_EQ("[1, 1]\n", echoOf("repeat_one"));
     EXPECT_EQ("[3, 3]\n", echoOf("repeat_three"));
 }

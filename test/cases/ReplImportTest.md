@@ -73,25 +73,25 @@ import this
 ## Monomorphized instantiations
 
 A generic is stamped out per set of type arguments, and the same arguments give
-the same code. Two turns calling `repeat_t(_, _)` with an `int` therefore ask
+the same code. Two turns calling `repeat(_, _)` with an `int` therefore ask
 for one instantiation, not two, and the session must not define it twice.
 
-#### :import_repeat_t
+#### :import_repeat
 
 ```dr
-from itertools import repeat_t
+from itertools import repeat
 ```
 
 #### :repeat_one
 
 ```dr
-repeat_t(1, 2)
+repeat(1, 2)
 ```
 
 #### :repeat_three
 
 ```dr
-repeat_t(3, 2)
+repeat(3, 2)
 ```
 
 A generic defined in the session is stamped the same way, so calling it twice
