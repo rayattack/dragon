@@ -40,14 +40,6 @@ def _is_ident_char(c: str) -> bool {
     return _is_ident_start(c) or (c >= "0" and c <= "9")
 }
 
-def _is_digit(c: str) -> bool {
-    return c >= "0" and c <= "9"
-}
-
-def _is_ws(c: str) -> bool {
-    return c == " " or c == "\t" or c == "\n" or c == "\r"
-}
-
 
 def _esc(s: str) -> str {
     out: str = ""
@@ -146,7 +138,7 @@ def _hl_dragon(code: str) -> str {
     while i < n {
         const c: str = code[i]
 
-        if _is_ws(c) {
+        if c.isspace() {
             out = out + c
             i = i + 1
             continue
@@ -169,7 +161,7 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        if _is_digit(c) {
+        if c.isdigit() {
             j: int = i
             while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
                 j = j + 1
@@ -236,7 +228,7 @@ def _hl_bash(code: str) -> str {
     while i < n {
         const c: str = code[i]
 
-        if _is_ws(c) {
+        if c.isspace() {
             out = out + c
             i = i + 1
             continue
@@ -249,7 +241,7 @@ def _hl_bash(code: str) -> str {
             continue
         }
 
-        if c == "#" and (i == 0 or _is_ws(code[i - 1])) {
+        if c == "#" and (i == 0 or code[i - 1].isspace()) {
             j: int = i
             while j < n and code[j] != "\n" {
                 j = j + 1
@@ -290,7 +282,7 @@ def _hl_bash(code: str) -> str {
             }
         }
 
-        if _is_digit(c) {
+        if c.isdigit() {
             j: int = i
             while j < n and _is_ident_char(code[j]) {
                 j = j + 1
@@ -341,7 +333,7 @@ def _hl_generic(code: str) -> str {
     while i < n {
         const c: str = code[i]
 
-        if _is_ws(c) {
+        if c.isspace() {
             out = out + c
             i = i + 1
             continue
@@ -378,7 +370,7 @@ def _hl_generic(code: str) -> str {
             continue
         }
 
-        if _is_digit(c) {
+        if c.isdigit() {
             j: int = i
             while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
                 j = j + 1

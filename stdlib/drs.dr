@@ -55,9 +55,6 @@ const TK_LPAREN: int = 40
 const TK_RPAREN: int = 41
 const TK_NEWLINE: int = 42
 
-def _is_digit(ch: str) -> bool {
-    return ch in "0123456789"
-}
 
 def _is_alpha(ch: str) -> bool {
     return ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
@@ -65,7 +62,7 @@ def _is_alpha(ch: str) -> bool {
 
 def _is_alnum(ch: str) -> bool {
     if _is_alpha(ch) { return true }
-    if _is_digit(ch) { return true }
+    if ch.isdigit() { return true }
     return false
 }
 
@@ -261,17 +258,17 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        if _is_digit(ch) {
+        if ch.isdigit() {
             num_start: int = i
             is_float: bool = false
             while i < n {
                 c7: str = src[i:i+1]
-                if _is_digit(c7) { i = i + 1; continue }
+                if c7.isdigit() { i = i + 1; continue }
                 if c7 == "." {
                     if is_float { break }
                     if i + 1 < n {
                         nxt2: str = src[i+1:i+2]
-                        if _is_digit(nxt2) {
+                        if nxt2.isdigit() {
                             is_float = true
                             i = i + 1
                             continue

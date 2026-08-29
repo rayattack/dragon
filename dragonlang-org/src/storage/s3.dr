@@ -26,17 +26,11 @@ def _sha256_hex(data: bytes) -> str {
     return hexdigest("sha256", data)
 }
 
-def _pad2(n: int) -> str {
-    if n < 10 {
-        return "0" + str(n)
-    }
-    return str(n)
-}
 
 def amz_timestamp(epoch: int) -> tuple[str, str] {
     const dt: datetime = datetime_fromtimestamp(float(epoch))
-    const ds: str = str(dt.year) + _pad2(dt.month) + _pad2(dt.day)
-    const ts: str = ds + "T" + _pad2(dt.hour) + _pad2(dt.minute) + _pad2(dt.second) + "Z"
+    const ds: str = str(dt.year) + str(dt.month).zfill(2) + str(dt.day).zfill(2)
+    const ts: str = ds + "T" + str(dt.hour).zfill(2) + str(dt.minute).zfill(2) + str(dt.second).zfill(2) + "Z"
     return (ts, ds)
 }
 

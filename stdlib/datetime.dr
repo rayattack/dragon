@@ -70,28 +70,6 @@ def _check_time(hour: int, minute: int, second: int, microsecond: int) -> None {
     }
 }
 
-def _pad2(n: int) -> str {
-    if n < 10 {
-        return "0" + str(n)
-    }
-    return str(n)
-}
-
-def _pad4(n: int) -> str {
-    if n < 10    { return "000" + str(n) }
-    if n < 100   { return "00" + str(n) }
-    if n < 1000  { return "0" + str(n) }
-    return str(n)
-}
-
-def _pad6(n: int) -> str {
-    if n < 10       { return "00000" + str(n) }
-    if n < 100      { return "0000" + str(n) }
-    if n < 1000     { return "000" + str(n) }
-    if n < 10000    { return "00" + str(n) }
-    if n < 100000   { return "0" + str(n) }
-    return str(n)
-}
 
 const SECONDS_PER_DAY: int = 86400
 const MICROS_PER_SECOND: int = 1000000
@@ -181,7 +159,7 @@ class date {
     }
 
     def isoformat() -> str {
-        return _pad4(self.year) + "-" + _pad2(self.month) + "-" + _pad2(self.day)
+        return str(self.year).zfill(4) + "-" + str(self.month).zfill(2) + "-" + str(self.day).zfill(2)
     }
 
     def __repr__() -> str {
@@ -232,9 +210,9 @@ class time_of_day {
     }
 
     def isoformat() -> str {
-        const base: str = _pad2(self.hour) + ":" + _pad2(self.minute) + ":" + _pad2(self.second)
+        const base: str = str(self.hour).zfill(2) + ":" + str(self.minute).zfill(2) + ":" + str(self.second).zfill(2)
         if self.microsecond > 0 {
-            return base + "." + _pad6(self.microsecond)
+            return base + "." + str(self.microsecond).zfill(6)
         }
         return base
     }
@@ -282,10 +260,10 @@ class datetime {
     }
 
     def isoformat() -> str {
-        const base: str = (_pad4(self.year) + "-" + _pad2(self.month) + "-" + _pad2(self.day)
-                         + "T" + _pad2(self.hour) + ":" + _pad2(self.minute) + ":" + _pad2(self.second))
+        const base: str = (str(self.year).zfill(4) + "-" + str(self.month).zfill(2) + "-" + str(self.day).zfill(2)
+                         + "T" + str(self.hour).zfill(2) + ":" + str(self.minute).zfill(2) + ":" + str(self.second).zfill(2))
         if self.microsecond > 0 {
-            return base + "." + _pad6(self.microsecond)
+            return base + "." + str(self.microsecond).zfill(6)
         }
         return base
     }

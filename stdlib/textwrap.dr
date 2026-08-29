@@ -217,7 +217,7 @@ def dedent(text: str) -> str {
     i = 0
     while i < len(lines) {
         const line: str = lines[i]
-        if _starts_with(line, margin) {
+        if line.startswith(margin) {
             parts.append(line[len(margin):len(line)])
         } else {
             parts.append(line)
@@ -314,15 +314,10 @@ def _replace_whitespace(text: str) -> str {
 }
 
 
-def _is_ws(c: str) -> bool {
-    return c == " " or c == "\t" or c == "\n" or c == "\r"
-}
-
-
 def _lstrip_ws(s: str) -> str {
     i: int = 0
     while i < len(s) {
-        if not _is_ws(s[i]) { break }
+        if not s[i].isspace() { break }
         i = i + 1
     }
     return s[i:len(s)]
@@ -332,7 +327,7 @@ def _lstrip_ws(s: str) -> str {
 def _rstrip_ws(s: str) -> str {
     j: int = len(s)
     while j > 0 {
-        if not _is_ws(s[j - 1]) { break }
+        if not s[j - 1].isspace() { break }
         j = j - 1
     }
     return s[0:j]
@@ -341,12 +336,6 @@ def _rstrip_ws(s: str) -> str {
 
 def _strip_ws(s: str) -> str {
     return _rstrip_ws(_lstrip_ws(s))
-}
-
-
-def _starts_with(s: str, prefix: str) -> bool {
-    if len(prefix) > len(s) { return False }
-    return s[0:len(prefix)] == prefix
 }
 
 

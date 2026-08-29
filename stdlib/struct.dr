@@ -216,9 +216,6 @@ def _body(fmt: str) -> str {
     return fmt
 }
 
-def _is_digit(c: str) -> bool {
-    return c >= "0" and c <= "9"
-}
 
 def calcsize(fmt: str) -> int {
     body: str = _body(fmt)
@@ -233,9 +230,9 @@ def calcsize(fmt: str) -> int {
         }
         count: int = 1
         has_count: bool = False
-        if _is_digit(c) {
+        if c.isdigit() {
             count = 0
-            while i < n and _is_digit(body[i]) {
+            while i < n and body[i].isdigit() {
                 count = count * 10 + (ord(body[i]) - 48)
                 i = i + 1
             }
@@ -329,9 +326,9 @@ def _arg_count(body: str) -> int {
             continue
         }
         count: int = 1
-        if _is_digit(c) {
+        if c.isdigit() {
             count = 0
-            while i < n and _is_digit(body[i]) {
+            while i < n and body[i].isdigit() {
                 count = count * 10 + (ord(body[i]) - 48)
                 i = i + 1
             }
@@ -372,9 +369,9 @@ def pack(fmt: str, *args: Any) -> bytes {
         }
         count: int = 1
         has_count: bool = False
-        if _is_digit(c) {
+        if c.isdigit() {
             count = 0
-            while i < n and _is_digit(body[i]) {
+            while i < n and body[i].isdigit() {
                 count = count * 10 + (ord(body[i]) - 48)
                 i = i + 1
             }
@@ -507,9 +504,9 @@ def unpack(fmt: str, data: bytes) -> list[Any] {
         }
         count: int = 1
         has_count: bool = False
-        if _is_digit(c) {
+        if c.isdigit() {
             count = 0
-            while i < n and _is_digit(body[i]) {
+            while i < n and body[i].isdigit() {
                 count = count * 10 + (ord(body[i]) - 48)
                 i = i + 1
             }

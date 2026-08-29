@@ -51,63 +51,6 @@ def slug(text: str) -> str {
 }
 
 
-def _starts_with(s: str, prefix: str) -> bool {
-    if len(prefix) > len(s) {
-        return false
-    }
-    i: int = 0
-    while i < len(prefix) {
-        if s[i] != prefix[i] {
-            return false
-        }
-        i = i + 1
-    }
-    return true
-}
-
-
-def _strip(s: str) -> str {
-    n: int = len(s)
-    if n == 0 {
-        return s
-    }
-    lo: int = 0
-    while lo < n {
-        const c: str = s[lo]
-        if c == " " or c == "\t" or c == "\r" or c == "\n" {
-            lo = lo + 1
-        } else {
-            break
-        }
-    }
-    hi: int = n
-    while hi > lo {
-        const c: str = s[hi - 1]
-        if c == " " or c == "\t" or c == "\r" or c == "\n" {
-            hi = hi - 1
-        } else {
-            break
-        }
-    }
-    return s[lo:hi]
-}
-
-
-def _rstrip(s: str) -> str {
-    n: int = len(s)
-    hi: int = n
-    while hi > 0 {
-        const c: str = s[hi - 1]
-        if c == " " or c == "\t" or c == "\r" or c == "\n" {
-            hi = hi - 1
-        } else {
-            break
-        }
-    }
-    return s[0:hi]
-}
-
-
 def _render_inline(line: str) -> str {
     out: str = ""
     i: int = 0
@@ -179,7 +122,7 @@ def _render_inline(line: str) -> str {
 
 
 def _is_table_row(line: str) -> bool {
-    const s: str = _strip(line)
+    const s: str = line.strip()
     if len(s) < 2 {
         return false
     }
@@ -190,12 +133,12 @@ def _is_table_row(line: str) -> bool {
 }
 
 def _split_table_row(line: str) -> list[str] {
-    const s: str = _strip(line)
+    const s: str = line.strip()
     const raw: list[str] = s.split("|")
     const out: list[str] = []
     i: int = 0
     while i < len(raw) {
-        const cell: str = _strip(raw[i])
+        const cell: str = raw[i].strip()
         if i == 0 and len(cell) == 0 {
             i = i + 1
             continue
@@ -220,7 +163,7 @@ def _is_table_separator(line: str) -> bool {
     }
     i: int = 0
     while i < len(cells) {
-        const c: str = _strip(cells[i])
+        const c: str = cells[i].strip()
         if len(c) == 0 {
             return false
         }
@@ -241,22 +184,6 @@ def _is_table_separator(line: str) -> bool {
                 return false
             }
             j = j + 1
-        }
-        i = i + 1
-    }
-    return true
-}
-
-
-def _is_digits(s: str) -> bool {
-    if len(s) == 0 {
-        return false
-    }
-    i: int = 0
-    while i < len(s) {
-        const c: str = s[i]
-        if c < "0" or c > "9" {
-            return false
         }
         i = i + 1
     }
@@ -358,10 +285,10 @@ def render(md: str) -> str {
             continue
         }
 
-        if _starts_with(_strip(raw), "```") {
+        if raw.strip().startswith("```") {
             close_para()
             close_lists()
-            const fence: str = _strip(raw)
+            const fence: str = raw.strip()
             code_lang = _first_word(fence[3:]) if len(fence) > 3 else ""
             code_lines = []
             in_code = true
@@ -369,7 +296,7 @@ def render(md: str) -> str {
             continue
         }
 
-        const stripped: str = _strip(raw)
+        const stripped: str = raw.strip()
 
         if len(stripped) == 0 {
             close_para()
@@ -391,8 +318,8 @@ def render(md: str) -> str {
             }
             out = out + "</tr></thead>\n<tbody>\n"
             i = i + 2
-            while i < len(lines) and _is_table_row(_rstrip(lines[i])) {
-                const cells: list[str] = _split_table_row(_rstrip(lines[i]))
+            while i < len(lines) and _is_table_row(lines[i].rstrip()) {
+                const cells: list[str] = _split_table_row(lines[i].rstrip())
                 out = out + "<tr>"
                 c: int = 0
                 while c < len(cells) {
@@ -406,28 +333,28 @@ def render(md: str) -> str {
             continue
         }
 
-        if _starts_with(stripped, "# ") {
+        if stripped.startswith("# ") {
             close_para(); close_lists()
             const t: str = stripped[2:]
             out = out + "<h1 id=\"" + slug(t) + "\">" + _render_inline(t) + "</h1>\n"
             i = i + 1
             continue
         }
-        if _starts_with(stripped, "## ") {
+        if stripped.startswith("## ") {
             close_para(); close_lists()
             const t: str = stripped[3:]
             out = out + "<h2 id=\"" + slug(t) + "\">" + _render_inline(t) + "</h2>\n"
             i = i + 1
             continue
         }
-        if _starts_with(stripped, "### ") {
+        if stripped.startswith("### ") {
             close_para(); close_lists()
             const t: str = stripped[4:]
             out = out + "<h3 id=\"" + slug(t) + "\">" + _render_inline(t) + "</h3>\n"
             i = i + 1
             continue
         }
-        if _starts_with(stripped, "#### ") {
+        if stripped.startswith("#### ") {
             close_para(); close_lists()
             const t: str = stripped[5:]
             out = out + "<h4 id=\"" + slug(t) + "\">" + _render_inline(t) + "</h4>\n"
@@ -442,7 +369,7 @@ def render(md: str) -> str {
             continue
         }
 
-        if _starts_with(stripped, "> ") {
+        if stripped.startswith("> ") {
             close_para()
             if in_ul { out = out + "</ul>\n"; in_ul = false }
             if in_ol { out = out + "</ol>\n"; in_ol = false }
@@ -466,22 +393,22 @@ def render(md: str) -> str {
             item: str = stripped[2:]
             i = i + 1
             while i < len(lines) {
-                const next_raw: str = _rstrip(lines[i])
-                const next_strip: str = _strip(next_raw)
+                const next_raw: str = lines[i].rstrip()
+                const next_strip: str = next_raw.strip()
                 if len(next_strip) == 0 { break }
-                if _starts_with(next_strip, "- ") { break }
-                if _starts_with(next_strip, "* ") { break }
-                if _starts_with(next_strip, "# ") { break }
-                if _starts_with(next_strip, "## ") { break }
-                if _starts_with(next_strip, "### ") { break }
-                if _starts_with(next_strip, "#### ") { break }
-                if _starts_with(next_strip, "```") { break }
-                if _starts_with(next_strip, "> ") { break }
+                if next_strip.startswith("- ") { break }
+                if next_strip.startswith("* ") { break }
+                if next_strip.startswith("# ") { break }
+                if next_strip.startswith("## ") { break }
+                if next_strip.startswith("### ") { break }
+                if next_strip.startswith("#### ") { break }
+                if next_strip.startswith("```") { break }
+                if next_strip.startswith("> ") { break }
                 if next_strip == "---" or next_strip == "***" or next_strip == "___" { break }
                 const ndot: int = next_strip.find(". ")
                 if ndot > 0 and ndot < 4 {
                     const nprefix: str = next_strip[0:ndot]
-                    if _is_digits(nprefix) { break }
+                    if nprefix.isdigit() { break }
                 }
                 const tbl_close: bool = _is_table_row(next_strip) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
                 if tbl_close { break }
@@ -506,22 +433,22 @@ def render(md: str) -> str {
                 item: str = stripped[dot + 2:]
                 i = i + 1
                 while i < len(lines) {
-                    const next_raw: str = _rstrip(lines[i])
-                    const next_strip: str = _strip(next_raw)
+                    const next_raw: str = lines[i].rstrip()
+                    const next_strip: str = next_raw.strip()
                     if len(next_strip) == 0 { break }
-                    if _starts_with(next_strip, "- ") { break }
-                    if _starts_with(next_strip, "* ") { break }
-                    if _starts_with(next_strip, "# ") { break }
-                    if _starts_with(next_strip, "## ") { break }
-                    if _starts_with(next_strip, "### ") { break }
-                    if _starts_with(next_strip, "#### ") { break }
-                    if _starts_with(next_strip, "```") { break }
-                    if _starts_with(next_strip, "> ") { break }
+                    if next_strip.startswith("- ") { break }
+                    if next_strip.startswith("* ") { break }
+                    if next_strip.startswith("# ") { break }
+                    if next_strip.startswith("## ") { break }
+                    if next_strip.startswith("### ") { break }
+                    if next_strip.startswith("#### ") { break }
+                    if next_strip.startswith("```") { break }
+                    if next_strip.startswith("> ") { break }
                     if next_strip == "---" or next_strip == "***" or next_strip == "___" { break }
                     const ndot: int = next_strip.find(". ")
                     if ndot > 0 and ndot < 4 {
                         const nprefix: str = next_strip[0:ndot]
-                        if _is_digits(nprefix) { break }
+                        if nprefix.isdigit() { break }
                     }
                     const tbl_close: bool = _is_table_row(next_strip) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
                     if tbl_close { break }
