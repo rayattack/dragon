@@ -133,6 +133,11 @@ an `i64` from declaration to last use.
 
 ## Block scoping, not function scoping
 
+The Zen of Python calls namespaces one honking great idea and asks for
+more of them. Then it hands you `globals()`, `setattr`, `__dict__`, and a
+`for` loop whose counter outlives the loop. Dragon took the compliment
+literally: every `{ }` is a namespace, and here they are binding.
+
 Python scopes by **function**: a name bound inside an `if` or `for` body
 leaks out to the rest of the function. Dragon scopes by **block**: every
 `{ }` (or every indented suite in `.py` mode) is its own scope, and names

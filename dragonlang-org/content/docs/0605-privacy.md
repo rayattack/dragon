@@ -2,9 +2,11 @@
 
 In Python a leading underscore is pure documentation - `_x` is advisory, `__x` is
 name-mangled but still reachable, and nothing actually stops outside code from
-poking at either. Dragon turns the convention you already write into a guarantee
-the compiler enforces. Privacy is checked entirely at compile time by the type
-checker; it carries no runtime cost.
+poking at either. We're all consenting adults here, as the saying goes, which
+holds up right until the adult is a dependency you did not write. Dragon turns
+the convention you already write into a guarantee the compiler enforces. Privacy
+is checked entirely at compile time by the type checker; it carries no runtime
+cost.
 
 The leading underscores you'd write out of habit now carry meaning:
 

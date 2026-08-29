@@ -138,6 +138,9 @@ if condition {
 print(result)            # error - 'result' went out of scope with the block
 ```
 
+Every block is a namespace. Not most blocks, not the ones that felt
+like it - every one.
+
 Because each block is its own scope, sibling blocks can reuse a name
 freely; they are independent variables that never collide:
 
