@@ -109,16 +109,21 @@ class TlsReader(ConnReader) {
 class MemoryReader(ConnReader) {
     chunks: list[bytes]
     idx: int
-    sent: str
+    _sent_parts: list[str]
     closed: bool
     writes: int
 
     def(chunks: list[bytes]) {
         self.chunks = chunks
         self.idx = 0
-        self.sent = ""
+        self._sent_parts = []
         self.closed = false
         self.writes = 0
+    }
+
+    @property
+    def sent() -> str {
+        return "".join(self._sent_parts)
     }
 
     def recv(max_len: int) -> bytes {
@@ -131,13 +136,13 @@ class MemoryReader(ConnReader) {
     }
 
     def send(data: str) -> int {
-        self.sent = dragon_str_concat(self.sent, data)
+        self._sent_parts.append(data)
         self.writes = self.writes + 1
         return dragon_str_byte_len_pub(data)
     }
 
     def send_bytes(data: bytes) -> int {
-        self.sent = dragon_str_concat(self.sent, data.decode("utf-8"))
+        self._sent_parts.append(data.decode("utf-8"))
         self.writes = self.writes + 1
         return len(data)
     }

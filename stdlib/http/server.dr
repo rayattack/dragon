@@ -79,17 +79,17 @@ const _OMIT_LENGTH: list[str] = ["content-length"]
 const _OMIT_CONNECTION: list[str] = ["connection"]
 
 def _render_headers(headers: dict[str, str], omit: list[str]) -> str {
-    result: str = ""
+    parts: list[str] = []
     for key in headers {
         if dragon_str_lower(key) in omit {
             continue
         }
-        result = dragon_str_concat(result,
-            dragon_str_concat(key,
-                dragon_str_concat(": ",
-                    dragon_str_concat(headers[key], "\r\n"))))
+        parts.append(key)
+        parts.append(": ")
+        parts.append(headers[key])
+        parts.append("\r\n")
     }
-    return result
+    return "".join(parts)
 }
 
 def _build_headers(headers: dict[str, str], body: str) -> str {
@@ -310,13 +310,13 @@ class Response {
     }
 
     def _cookie_lines() -> str {
-        out: str = ""
+        parts: list[str] = []
         for c in self._cookies {
-            out = dragon_str_concat(out,
-                dragon_str_concat("set-cookie: ",
-                    dragon_str_concat(c, "\r\n")))
+            parts.append("set-cookie: ")
+            parts.append(c)
+            parts.append("\r\n")
         }
-        return out
+        return "".join(parts)
     }
 
     def file(filepath: str) -> Response {
