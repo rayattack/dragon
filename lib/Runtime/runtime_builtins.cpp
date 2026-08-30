@@ -561,6 +561,15 @@ const char* dragon_file_read(void* handle) {
     return result;
 }
 
+DragonBytes* dragon_file_read_chunk(void* handle, int64_t size) {
+    if (!handle || size <= 0) return dragon_bytes_new(nullptr, 0);
+    FILE* f = (FILE*)handle;
+    DragonBytes* out = dragon_bytes_new(nullptr, size);
+    size_t n = fread(out->data, 1, (size_t)size, f);
+    out->len = (int64_t)n;
+    return out;
+}
+
 const char* dragon_file_read_bytes(void* handle) {
     if (!handle) return dragon_string_alloc("", 0);
     FILE* f = (FILE*)handle;

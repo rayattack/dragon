@@ -66,6 +66,7 @@ extern "C" def dragon_sockaddr_in_size() -> intc
 extern "C" def dragon_file_open(filename: str, mode: str) -> ptr
 extern "C" def dragon_file_read(handle: ptr) -> str
 extern "C" def dragon_file_read_bytes(handle: ptr) -> str
+extern "C" def dragon_file_read_chunk(handle: ptr, size: int) -> bytes
 extern "C" def dragon_file_close(handle: ptr)
 extern "C" def dragon_stat_isfile(path: str) -> int
 
@@ -317,18 +318,32 @@ class Response {
             self.body = "Not Found"
             return self
         }
+        self._headers["content-type"] = _guess_mime_type(filepath)
         const fsize: int = dragon_stat_size(filepath)
-        if fsize > _MAX_FILE_RESPONSE_BYTES {
-            self.status = 413
-            self.body = "Payload Too Large"
+        if fsize <= _MAX_BUFFERED_FILE_BYTES {
+            const fh: ptr = dragon_file_open(filepath, "rb")
+            self.body = dragon_file_read_bytes(fh)
+            dragon_file_close(fh)
             return self
         }
-        const fh: ptr = dragon_file_open(filepath, "rb")
-        const contents: str = dragon_file_read_bytes(fh)
-        dragon_file_close(fh)
-        self._headers["content-type"] = _guess_mime_type(filepath)
-        self.body = contents
-        return self
+        self._headers["content-length"] = dragon_int_to_str(fsize)
+
+        def pump(conn: ConnReader) -> None {
+            defer conn.close()
+            const fh: ptr = dragon_file_open(filepath, "rb")
+            defer dragon_file_close(fh)
+            while true {
+                const block: bytes = dragon_file_read_chunk(fh, _STREAM_BLOCK_BYTES)
+                if len(block) == 0 {
+                    break
+                }
+                if conn.send_bytes(block) <= 0 {
+                    break
+                }
+            }
+        }
+
+        return self.cede(pump)
     }
 
     def defer(task: Callable[[Router], None]) -> None {
@@ -593,7 +608,8 @@ const _IDLE_TIMEOUT_MS: int = 30000
 
 const _MAX_CONNECTIONS: int = 1024
 
-const _MAX_FILE_RESPONSE_BYTES: int = 52428800
+const _MAX_BUFFERED_FILE_BYTES: int = 8388608
+const _STREAM_BLOCK_BYTES: int = 262144
 
 const _GZIP_MIN_BODY: int = 1400
 

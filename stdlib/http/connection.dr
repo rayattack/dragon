@@ -32,6 +32,10 @@ class ConnReader {
         return 0
     }
 
+    def send_bytes(data: bytes) -> int {
+        return 0
+    }
+
     def close() -> None {
     }
 
@@ -57,6 +61,10 @@ class FdReader(ConnReader) {
 
     def send(data: str) -> int {
         return self._stream.send(data)
+    }
+
+    def send_bytes(data: bytes) -> int {
+        return self._stream.send_bytes(data)
     }
 
     def close() -> None {
@@ -89,6 +97,10 @@ class TlsReader(ConnReader) {
         return self.tls.send(data)
     }
 
+    def send_bytes(data: bytes) -> int {
+        return self.tls.send_bytes(data)
+    }
+
     def close() -> None {
         self.tls.close()
     }
@@ -99,12 +111,14 @@ class MemoryReader(ConnReader) {
     idx: int
     sent: str
     closed: bool
+    writes: int
 
     def(chunks: list[bytes]) {
         self.chunks = chunks
         self.idx = 0
         self.sent = ""
         self.closed = false
+        self.writes = 0
     }
 
     def recv(max_len: int) -> bytes {
@@ -118,7 +132,14 @@ class MemoryReader(ConnReader) {
 
     def send(data: str) -> int {
         self.sent = dragon_str_concat(self.sent, data)
+        self.writes = self.writes + 1
         return dragon_str_byte_len_pub(data)
+    }
+
+    def send_bytes(data: bytes) -> int {
+        self.sent = dragon_str_concat(self.sent, data.decode("utf-8"))
+        self.writes = self.writes + 1
+        return len(data)
     }
 
     def close() -> None {

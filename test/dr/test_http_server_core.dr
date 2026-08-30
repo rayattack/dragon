@@ -3,10 +3,14 @@ from unittest import TestCase, main
 from http.server import Router, Request, Response, Context
 from http.server import MemoryReader, RequestReader, FramedRequest, ConnReader
 from time import monotonic
+from io import make, Writer
+from os import remove
 
 const TINY_CHUNK_COUNT: int = 20000
 const DECHUNK_BUDGET_SECS: float = 2.0
 const MARKER: str = "DRAGON_GZIP_MARKER_"
+const STREAMED_FILE_BYTES: int = 9437184
+const BUFFERED_FILE_BYTES: int = 4096
 
 def _echo_path(req: Request, res: Response, ctx: Context) -> None {
     res.text("hi:" + req.path)
@@ -304,6 +308,75 @@ class CedeSeamTests(TestCase) {
 }
 
 
+def _write_file(path: str, size: int) -> str {
+    const unit: str = "0123456789abcdef"
+    parts: list[str] = []
+    written: int = 0
+    while written < size {
+        parts.append(unit)
+        written = written + len(unit)
+    }
+    const body: str = "".join(parts)
+    const w: Writer = make(path)
+    w.write(body)
+    w.close()
+    return body
+}
+
+
+def _serve_file(path: str) -> MemoryReader {
+    const app: Router = Router()
+
+    def handler(req: Request, res: Response, ctx: Context) -> None {
+        res.file(path)
+    }
+    app.GET("/asset", handler)
+    const mr: MemoryReader = MemoryReader([b"GET /asset HTTP/1.1\r\nHost: h\r\n\r\n"])
+    app.serve_connection(mr)
+    return mr
+}
+
+
+class FileResponseTests(TestCase) {
+    """A file too big to hold in memory goes out in blocks through the cede seam
+    instead of being read whole. Pre-fix res.file() slurped every file into one
+    string, sent it in a single write, and refused anything over 50 MiB with a
+    413, so the wire looked right while the memory did not."""
+
+    def test_large_file_goes_out_in_blocks() {
+        defer remove("stream_asset.bin")
+        const body: str = _write_file("stream_asset.bin", STREAMED_FILE_BYTES)
+        const mr: MemoryReader = _serve_file("stream_asset.bin")
+        self.assertIn("200", mr.sent)
+        self.assertTrue(mr.writes > 8)
+        self.assertIn("content-length: " + str(len(body)), mr.sent)
+    }
+
+    def test_streamed_file_arrives_whole() {
+        defer remove("stream_asset.bin")
+        const body: str = _write_file("stream_asset.bin", STREAMED_FILE_BYTES)
+        const mr: MemoryReader = _serve_file("stream_asset.bin")
+        const marker: int = mr.sent.find("\r\n\r\n")
+        self.assertTrue(marker > 0)
+        self.assertEqual(len(mr.sent) - marker - 4, len(body))
+    }
+
+    def test_small_file_goes_out_in_one_write() {
+        defer remove("small_asset.bin")
+        const body: str = _write_file("small_asset.bin", BUFFERED_FILE_BYTES)
+        const mr: MemoryReader = _serve_file("small_asset.bin")
+        self.assertEqual(mr.writes, 1)
+        self.assertIn("content-length: " + str(len(body)), mr.sent)
+        self.assertIn(body[0:64], mr.sent)
+    }
+
+    def test_missing_file_is_still_a_404() {
+        const mr: MemoryReader = _serve_file("no_such_asset.bin")
+        self.assertIn("404", mr.sent)
+    }
+}
+
+
 class ChunkedDechunkPerfTests(TestCase) {
     def test_many_tiny_chunks_decode_within_time_budget() {
         const wire: bytes = _chunked_wire_of_tiny_chunks(TINY_CHUNK_COUNT)
@@ -504,5 +577,6 @@ class JsonBodyTests(TestCase) {
 
 
 main([RequestReaderTests(), KeepAliveLoopTests(), ChunkedResponseTests(), CedeSeamTests(),
+      FileResponseTests(),
       ChunkedDechunkPerfTests(), ChunkedCorrectnessGuardTests(), HandlerRaisesTests(),
       GzipGateTests(), JsonBodyTests()])
