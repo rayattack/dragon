@@ -426,14 +426,10 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                         if (vit != varClassNames.end()) cls = vit->second;
                     }
                 }
-                if (!cls.empty()) {
-                    auto cit = classFieldListElemKindsBySym.find(classSym(cls));
-                    if (cit != classFieldListElemKindsBySym.end()) {
-                        auto fit = cit->second.find(attr->attribute);
-                        if (fit != cit->second.end())
-                            return kindFromTypeKind(fit->second);
-                    }
-                }
+                auto fieldKind = cls.empty()
+                    ? std::optional<Type::Kind>{}
+                    : fieldListElemKind(classSym(cls), attr->attribute);
+                if (fieldKind) return kindFromTypeKind(*fieldKind);
             }
             // dict[K,V] subscript -> value kind. Without this a borrowed ternary read
             // (`d["k"] if cond else ""`) resolves Other, skips the IfExpr incref, and double-frees on teardown.

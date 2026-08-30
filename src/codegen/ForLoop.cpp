@@ -496,13 +496,9 @@ void CodeGen::visit(ForStmt& node) {
                 }
             }
             if (!ownerClass.empty()) {
-                auto cit = impl_->classFieldListElemKindsBySym.find(impl_->classSym(ownerClass));
-                if (cit != impl_->classFieldListElemKindsBySym.end()) {
-                    auto fit = cit->second.find(iterAttr->attribute);
-                    if (fit != cit->second.end() &&
-                        Impl::isBoxedKind(fit->second))
-                        anyElemList = true;
-                }
+                auto fieldKind = impl_->fieldListElemKind(impl_->classSym(ownerClass),
+                                                          iterAttr->attribute);
+                if (fieldKind && Impl::isBoxedKind(*fieldKind)) anyElemList = true;
             }
         }
         if (anyElemList) iterMayBeBox = true;
@@ -996,11 +992,9 @@ void CodeGen::visit(ForStmt& node) {
                 }
             }
             if (!className.empty()) {
-                auto cit = impl_->classFieldListElemKindsBySym.find(impl_->classSym(className));
-                if (cit != impl_->classFieldListElemKindsBySym.end()) {
-                    auto fit = cit->second.find(iterAttr->attribute);
-                    if (fit != cit->second.end()) elemTypeKind = fit->second;
-                }
+                auto fieldKind = impl_->fieldListElemKind(impl_->classSym(className),
+                                                          iterAttr->attribute);
+                if (fieldKind) elemTypeKind = *fieldKind;
             }
         } else if (auto* iterCall = dynamic_cast<CallExpr*>(node.iterable.get())) {
             if (auto* methAttr = dynamic_cast<AttributeExpr*>(iterCall->callee.get())) {

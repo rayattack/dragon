@@ -1,6 +1,122 @@
 #include "../CodeGenImpl.h"
+#include <cstdlib>
+#include <map>
 
 namespace dragon {
+namespace {
+
+const char* typeKindName(Type::Kind k) {
+    switch (k) {
+        case Type::Kind::Int:      return "Int";
+        case Type::Kind::Float:    return "Float";
+        case Type::Kind::Bool:     return "Bool";
+        case Type::Kind::Str:      return "Str";
+        case Type::Kind::Bytes:    return "Bytes";
+        case Type::Kind::None_:    return "None";
+        case Type::Kind::List:     return "List";
+        case Type::Kind::Deque:    return "Deque";
+        case Type::Kind::Dict:     return "Dict";
+        case Type::Kind::Set:      return "Set";
+        case Type::Kind::Tuple:    return "Tuple";
+        case Type::Kind::Function: return "Function";
+        case Type::Kind::Task:     return "Task";
+        case Type::Kind::Lock:     return "Lock";
+        case Type::Kind::Class:    return "Class";
+        case Type::Kind::Instance: return "Instance";
+        case Type::Kind::Boxed:    return "Boxed";
+        case Type::Kind::Never:    return "Never";
+        case Type::Kind::Union:    return "Union";
+        case Type::Kind::Optional: return "Optional";
+        case Type::Kind::TypeVar:  return "TypeVar";
+        case Type::Kind::Unknown:  return "Unknown";
+        case Type::Kind::Contract: return "Contract";
+        case Type::Kind::Ptr:      return "Ptr";
+        case Type::Kind::Module:   return "Module";
+    }
+    return "?";
+}
+
+std::string slotName(const std::optional<Type::Kind>& k) {
+    return k ? typeKindName(*k) : "absent";
+}
+
+struct AnnotationDifferential {
+    bool enabled = std::getenv("DRAGON_ANNOTATION_DIFF") != nullptr;
+    long annotationLookups = 0;
+    long annotationUnstamped = 0;
+    std::map<std::string, long> unstampedSites;
+    long fieldLookups = 0;
+    long fieldAgree = 0;
+    std::map<std::string, long> fieldSplit;
+    std::map<std::string, std::string> fieldSplitWitness;
+
+    void noteAnnotation(TypeExpr* site, TypeExpr* raw) {
+        if (!enabled) return;
+        ++annotationLookups;
+        const TypeExpr* stampedAt = (site && site->resolved) ? site : nullptr;
+        if (!stampedAt && raw && raw->resolved) stampedAt = raw;
+        if (stampedAt) return;
+        ++annotationUnstamped;
+        const TypeExpr* at = site ? site : raw;
+        std::string where = "<null>";
+        if (at) {
+            where = at->location().filename + ":" +
+                    std::to_string(at->location().line);
+        }
+        ++unstampedSites[where];
+    }
+
+    void noteField(const std::string& clsSym, const std::string& field,
+                   const std::optional<Type::Kind>& mapped,
+                   const std::optional<Type::Kind>& stamped) {
+        if (!enabled) return;
+        ++fieldLookups;
+        if (mapped == stamped) { ++fieldAgree; return; }
+        std::string key = "map=" + slotName(mapped) + " stamp=" + slotName(stamped);
+        ++fieldSplit[key];
+        if (!fieldSplitWitness.count(key))
+            fieldSplitWitness[key] = clsSym + "." + field;
+    }
+
+    ~AnnotationDifferential() {
+        if (!enabled) return;
+        fprintf(stderr, "[annotation-diff] annotation lookups=%ld stamped=%ld unstamped=%ld\n",
+                annotationLookups, annotationLookups - annotationUnstamped,
+                annotationUnstamped);
+        for (auto& kv : unstampedSites)
+            fprintf(stderr, "[annotation-diff]   unstamped at %s x%ld\n",
+                    kv.first.c_str(), kv.second);
+        fprintf(stderr, "[annotation-diff] field lookups=%ld agree=%ld disagree=%ld\n",
+                fieldLookups, fieldAgree, fieldLookups - fieldAgree);
+        for (auto& kv : fieldSplit)
+            fprintf(stderr, "[annotation-diff]   %s x%ld first=%s\n",
+                    kv.first.c_str(), kv.second,
+                    fieldSplitWitness.at(kv.first).c_str());
+    }
+};
+
+AnnotationDifferential& differential() {
+    static AnnotationDifferential d;
+    return d;
+}
+
+GenericTypeExpr* listAnnotationOf(TypeExpr* annotation) {
+    auto* generic = dynamic_cast<GenericTypeExpr*>(annotation);
+    if (!generic || generic->typeArgs.empty()) return nullptr;
+    auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get());
+    if (!base || base->name != "list") return nullptr;
+    return generic;
+}
+
+std::string selfFieldOf(Expr* target) {
+    auto* attr = dynamic_cast<AttributeExpr*>(target);
+    if (!attr) return {};
+    auto* object = dynamic_cast<NameExpr*>(attr->object.get());
+    if (!object || object->name != "self") return {};
+    return attr->attribute;
+}
+
+}
 
 CodeGen::Impl::VarKind CodeGen::Impl::inferYieldKind(const std::vector<std::unique_ptr<Stmt>>& body) {
         struct YieldKindFinder : public DefaultASTVisitor {
@@ -411,7 +527,87 @@ std::string CodeGen::Impl::typeExprCanonicalName(TypeExpr* t) const {
         return "";
     }
 
+void CodeGen::Impl::indexInitFieldListAnnotations(
+        FunctionDecl& init,
+        std::unordered_map<std::string, TypeExpr*>& slots) {
+    for (auto& stmt : init.body) {
+        if (auto* annotated = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
+            std::string field = selfFieldOf(annotated->target.get());
+            auto* listAnn = listAnnotationOf(annotated->annotation.get());
+            if (listAnn && !field.empty()) slots[field] = listAnn;
+        }
+        auto* assign = dynamic_cast<AssignStmt*>(stmt.get());
+        if (!assign || !assign->typeAnnotation) continue;
+        auto* listAnn = listAnnotationOf(assign->typeAnnotation.get());
+        if (!listAnn) continue;
+        for (auto& target : assign->targets) {
+            std::string field = selfFieldOf(target.get());
+            if (!field.empty()) slots[field] = listAnn;
+        }
+    }
+}
+
+void CodeGen::Impl::indexFieldListAnnotations(ClassDecl& node,
+                                              const std::string& clsSym) {
+    auto& slots = classFieldListAnnotationBySym[clsSym];
+    for (auto& stmt : node.body) {
+        auto* annotated = dynamic_cast<AnnAssignStmt*>(stmt.get());
+        if (!annotated || annotated->isStatic) continue;
+        auto* target = dynamic_cast<NameExpr*>(annotated->target.get());
+        auto* listAnn = listAnnotationOf(annotated->annotation.get());
+        if (target && listAnn) slots[target->name] = listAnn;
+    }
+    for (auto& stmt : node.body) {
+        auto* fn = dynamic_cast<FunctionDecl*>(stmt.get());
+        if (!fn || fn->name != "__init__") continue;
+        indexInitFieldListAnnotations(*fn, slots);
+    }
+}
+
+TypeExpr* CodeGen::Impl::fieldListAnnotation(const std::string& clsSym,
+                                             const std::string& field) const {
+    std::string owner = clsSym;
+    for (size_t hop = 0; hop <= classParentNamesBySym.size(); ++hop) {
+        auto cit = classFieldListAnnotationBySym.find(owner);
+        if (cit != classFieldListAnnotationBySym.end()) {
+            auto fit = cit->second.find(field);
+            if (fit != cit->second.end()) return fit->second;
+        }
+        auto pit = classParentNamesBySym.find(owner);
+        if (pit == classParentNamesBySym.end()) return nullptr;
+        owner = pit->second;
+    }
+    return nullptr;
+}
+
+std::optional<Type::Kind>
+CodeGen::Impl::fieldListElemKindStamped(const std::string& clsSym,
+                                        const std::string& field) const {
+    TypeExpr* annotation = fieldListAnnotation(clsSym, field);
+    if (!annotation) return std::nullopt;
+    const Type* annotated = annotation->resolved.get();
+    if (!annotated || annotated->kind() != Type::Kind::List) return std::nullopt;
+    const auto& elem = static_cast<const ListType*>(annotated)->elementType;
+    if (!elem || elem->kind() == Type::Kind::Unknown) return std::nullopt;
+    return elem->kind();
+}
+
+std::optional<Type::Kind>
+CodeGen::Impl::fieldListElemKind(const std::string& clsSym,
+                                 const std::string& field) const {
+    std::optional<Type::Kind> mapped;
+    auto cit = classFieldListElemKindsBySym.find(clsSym);
+    if (cit != classFieldListElemKindsBySym.end()) {
+        auto fit = cit->second.find(field);
+        if (fit != cit->second.end()) mapped = fit->second;
+    }
+    std::optional<Type::Kind> stamped = fieldListElemKindStamped(clsSym, field);
+    differential().noteField(clsSym, field, mapped, stamped);
+    return stamped ? stamped : mapped;
+}
+
 Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
+    differential().noteAnnotation(resolveTypeAliasExpr(typeExpr), typeExpr);
     Type::Kind derived = typeExprToTypeKindDerived(typeExpr);
     if (derived != Type::Kind::Unknown) return derived;
 

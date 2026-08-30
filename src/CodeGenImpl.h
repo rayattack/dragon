@@ -4,6 +4,7 @@
 #include "dragon/ValueTags.h"
 #include <execinfo.h>
 #include <limits>
+#include <optional>
 #include "dragon/CodeGen.h"
 #include "dragon/RenderDiagnostics.h"
 #include "dragon/TemplateSyntax.h"
@@ -292,6 +293,7 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, Type::Kind> varDictValueKinds;
     std::unordered_map<std::string, Type::Kind> varDictKeyKinds;
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldListElemKindsBySym;
+    std::unordered_map<std::string, std::unordered_map<std::string, TypeExpr*>> classFieldListAnnotationBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictValueKindsBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictKeyKindsBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldListElemClassNameBySym;
@@ -1854,6 +1856,16 @@ struct CodeGen::Impl {
 
     Type::Kind typeExprToTypeKind(TypeExpr* typeExpr);
     Type::Kind typeExprToTypeKindDerived(TypeExpr* typeExpr);
+    void indexFieldListAnnotations(ClassDecl& node, const std::string& clsSym);
+    void indexInitFieldListAnnotations(
+        FunctionDecl& init,
+        std::unordered_map<std::string, TypeExpr*>& slots);
+    TypeExpr* fieldListAnnotation(const std::string& clsSym,
+                                  const std::string& field) const;
+    std::optional<Type::Kind> fieldListElemKindStamped(const std::string& clsSym,
+                                                       const std::string& field) const;
+    std::optional<Type::Kind> fieldListElemKind(const std::string& clsSym,
+                                                const std::string& field) const;
 
     VarKind typeExprToKind(TypeExpr* typeExpr);
 

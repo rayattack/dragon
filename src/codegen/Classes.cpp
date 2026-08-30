@@ -105,6 +105,8 @@ void CodeGen::visit(ClassDecl& node) {
         }
     }
 
+    impl_->indexFieldListAnnotations(node, clsSym);
+
     for (auto& bs : node.body) {
         auto* ann = dynamic_cast<AnnAssignStmt*>(bs.get());
         if (!ann || ann->isStatic) continue;

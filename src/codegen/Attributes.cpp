@@ -1162,13 +1162,11 @@ void CodeGen::visit(SubscriptExpr& node) {
                         if (vit != impl_->varClassNames.end()) className = vit->second;
                     }
                 }
-                if (!className.empty()) {
-                    auto cit = impl_->classFieldListElemKindsBySym.find(impl_->classSym(className));
-                    if (cit != impl_->classFieldListElemKindsBySym.end()) {
-                        auto fit = cit->second.find(attrExpr->attribute);
-                        if (fit != cit->second.end()) elemKind = fit->second;
-                    }
-                }
+                elemKind = className.empty()
+                    ? elemKind
+                    : impl_->fieldListElemKind(impl_->classSym(className),
+                                               attrExpr->attribute)
+                          .value_or(elemKind);
             }
         }
         bool isBoolElem  = (elemKind == Type::Kind::Bool);

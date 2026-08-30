@@ -1338,13 +1338,10 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             if (vit != impl_->varClassNames.end()) ownerClass = vit->second;
                         }
                         if (!ownerClass.empty()) {
-                            auto ckIt = impl_->classFieldListElemKindsBySym.find(impl_->classSym(ownerClass));
-                            bool fieldIsAny = false;
-                            if (ckIt != impl_->classFieldListElemKindsBySym.end()) {
-                                auto fIt = ckIt->second.find(listAttr->attribute);
-                                fieldIsAny = fIt != ckIt->second.end() &&
-                                             Impl::isBoxedKind(fIt->second);
-                            }
+                            auto fieldKind = impl_->fieldListElemKind(
+                                impl_->classSym(ownerClass), listAttr->attribute);
+                            bool fieldIsAny =
+                                fieldKind && Impl::isBoxedKind(*fieldKind);
                             if (!fieldIsAny) {
                                 impl_->classFieldListElemKindsBySym[impl_->classSym(ownerClass)][listAttr->attribute] = Type::Kind::Instance;
                                 impl_->classFieldListElemClassNameBySym[impl_->classSym(ownerClass)][listAttr->attribute] = appendedClassName;
