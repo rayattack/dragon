@@ -1012,6 +1012,13 @@ std::vector<std::string> TypeChecker::contractConformanceProblems(
 
 std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
     if (!typeExpr) return impl_->unknownType;
+    auto resolved = resolveTypeUncached(typeExpr);
+    typeExpr->resolved = resolved;
+    return resolved;
+}
+
+std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
+    if (!typeExpr) return impl_->unknownType;
 
     if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
         auto dot = named->name.find('.');

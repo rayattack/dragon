@@ -34,7 +34,10 @@ public:
 
 class Stmt : public ASTNode {};
 
-class TypeExpr : public ASTNode {};
+class TypeExpr : public ASTNode {
+public:
+    std::shared_ptr<Type> resolved;
+};
 
 class NamedTypeExpr : public TypeExpr {
 public:
