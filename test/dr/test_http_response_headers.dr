@@ -1,5 +1,5 @@
 from unittest import TestCase, main
-from http.server import Response
+from http.server import Response, ConnReader
 from http.cookies import parse, SimpleCookie
 from http.cookiejar import Cookie, CookieJar, parse_set_cookie
 
@@ -20,6 +20,11 @@ def _count(haystack: str, needle: str) -> int {
     }
     return count
 }
+
+def _drain(conn: ConnReader) -> None {
+    conn.close()
+}
+
 
 class _NoBodyResponse(Response) {
     def flip_no_body() -> None {
@@ -138,6 +143,68 @@ class HeaderInjectionTests(TestCase) {
             pass
         }
         self.assertNotIn("X-Injected", res.serialize())
+    }
+}
+
+
+class ResponseFramingTests(TestCase) {
+    """A ceded response writes its body by hand after the headers go out, so the
+    headers must never claim a length the serializer computed from the empty
+    body. Pre-fix every ceded response declared content-length: 0, which told
+    the client the stream was empty, and a hand-set length produced two
+    conflicting content-length headers."""
+
+    def test_ceded_response_declares_no_length() {
+        const res: Response = Response()
+        res.set_header("content-type", "text/event-stream")
+        res.cede(_drain)
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "content-length:"), 0)
+        self.assertIn("content-type: text/event-stream", out)
+    }
+
+    def test_ceded_response_is_close_delimited() {
+        const res: Response = Response()
+        res.cede(_drain)
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "connection:"), 1)
+        self.assertIn("connection: close", out)
+    }
+
+    def test_ceded_response_keeps_a_declared_length_once() {
+        const res: Response = Response()
+        res.set_header("content-length", "2048")
+        res.cede(_drain)
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "content-length:"), 1)
+        self.assertIn("content-length: 2048", out)
+    }
+
+    def test_ceded_response_still_carries_cookies() {
+        const res: Response = Response()
+        res.cookie("a", "1")
+        res.cede(_drain)
+        const out: str = res.serialize()
+        self.assertIn("set-cookie: a=1", out)
+    }
+
+    def test_hand_set_length_never_doubles_on_the_normal_path() {
+        const res: Response = Response()
+        res.text("hi")
+        res.set_header("content-length", "999")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "content-length:"), 1)
+        self.assertIn("content-length: 2", out)
+    }
+
+    def test_no_body_response_keeps_its_own_connection_header() {
+        const res: _NoBodyResponse = _NoBodyResponse()
+        res.set_header("connection", "Upgrade")
+        res.set_header("upgrade", "websocket")
+        res.flip_no_body()
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "content-length:"), 0)
+        self.assertIn("connection: Upgrade", out)
     }
 }
 
@@ -262,4 +329,4 @@ class CookieJarTests(TestCase) {
 }
 
 
-main([CookieSerializeTests(), HeaderInjectionTests(), HttpCookiesTests(), CookieJarTests()])
+main([CookieSerializeTests(), HeaderInjectionTests(), ResponseFramingTests(), HttpCookiesTests(), CookieJarTests()])

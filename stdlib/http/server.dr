@@ -74,18 +74,27 @@ extern "C" def dragon_str_join(sep: str, parts: list[str]) -> str
 
 extern "C" def dragon_vthread_spawn(fn: ptr, args: ptr, nargs: int) -> ptr
 
-def _build_headers(headers: dict[str, str], body: str) -> str {
+const _OMIT_LENGTH: list[str] = ["content-length"]
+const _OMIT_CONNECTION: list[str] = ["connection"]
+
+def _render_headers(headers: dict[str, str], omit: list[str]) -> str {
     result: str = ""
     for key in headers {
+        if dragon_str_lower(key) in omit {
+            continue
+        }
         result = dragon_str_concat(result,
             dragon_str_concat(key,
                 dragon_str_concat(": ",
                     dragon_str_concat(headers[key], "\r\n"))))
     }
-    result = dragon_str_concat(result,
+    return result
+}
+
+def _build_headers(headers: dict[str, str], body: str) -> str {
+    return dragon_str_concat(_render_headers(headers, _OMIT_LENGTH),
         dragon_str_concat("content-length: ",
             dragon_str_concat(dragon_int_to_str(dragon_str_byte_len_pub(body)), "\r\n")))
-    return result
 }
 
 def _build_mime_types() -> dict[str, str] {
@@ -359,6 +368,9 @@ class Response {
         if self._no_body {
             return self._serialize_no_body()
         }
+        if self._cede {
+            return self._serialize_ceded()
+        }
         if self._chunked {
             return self._serialize_chunked()
         }
@@ -381,16 +393,7 @@ class Response {
     }
 
     def _serialize_chunked() -> str {
-        header_str: str = ""
-        for key in self._headers {
-            if dragon_str_lower(key) == "content-length" {
-                continue
-            }
-            header_str = dragon_str_concat(header_str,
-                dragon_str_concat(key,
-                    dragon_str_concat(": ",
-                        dragon_str_concat(self._headers[key], "\r\n"))))
-        }
+        header_str: str = _render_headers(self._headers, _OMIT_LENGTH)
         header_str = dragon_str_concat(header_str, "transfer-encoding: chunked\r\n")
         header_str = dragon_str_concat(header_str, self._cookie_lines())
         if self._close {
@@ -409,16 +412,14 @@ class Response {
     }
 
     def _serialize_no_body() -> str {
-        header_str: str = ""
-        for key in self._headers {
-            if dragon_str_lower(key) == "content-length" {
-                continue
-            }
-            header_str = dragon_str_concat(header_str,
-                dragon_str_concat(key,
-                    dragon_str_concat(": ",
-                        dragon_str_concat(self._headers[key], "\r\n"))))
-        }
+        header_str: str = dragon_str_concat(
+            _render_headers(self._headers, _OMIT_LENGTH), self._cookie_lines())
+        return dragon_http_build_response(self.status, header_str, "")
+    }
+
+    def _serialize_ceded() -> str {
+        header_str: str = _render_headers(self._headers, _OMIT_CONNECTION)
+        header_str = dragon_str_concat(header_str, "connection: close\r\n")
         header_str = dragon_str_concat(header_str, self._cookie_lines())
         return dragon_http_build_response(self.status, header_str, "")
     }
