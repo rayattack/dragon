@@ -545,11 +545,24 @@ void CodeGen::visit(DeferStmt& node) {
     int deferVtIdx = -1;
     llvm::Value* selfVal = nullptr;
     Expr* selfExpr = nullptr;
+    std::string spelledName;
     if (auto* nameExpr = dynamic_cast<NameExpr*>(call->callee.get())) {
-        targetFn = impl_->module->getFunction(nameExpr->name);
-        calleeName = nameExpr->name;
+        spelledName = nameExpr->name;
+        calleeName = impl_->resolveCalleeSymbol(nameExpr->name);
+        targetFn = impl_->module->getFunction(calleeName);
     } else if (auto* attrExpr =
                dynamic_cast<AttributeExpr*>(call->callee.get())) {
+        if (attrExpr->object->type &&
+            attrExpr->object->type->kind() == Type::Kind::Module) {
+            spelledName = attrExpr->attribute;
+            const std::string& srcModule =
+                static_cast<ModuleType&>(*attrExpr->object->type).name;
+            for (const std::string& sym : {Impl::mangleFunc(srcModule, attrExpr->attribute),
+                                           Impl::userFuncName(attrExpr->attribute)}) {
+                targetFn = impl_->module->getFunction(sym);
+                if (targetFn) { calleeName = sym; break; }
+            }
+        }
         std::string className;
         std::string owningModule;
         if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get())) {
@@ -576,11 +589,12 @@ void CodeGen::visit(DeferStmt& node) {
                 }
             }
         }
-        if (!className.empty()) {
+        if (!targetFn && !className.empty()) {
             std::string methodFuncName;
             targetFn = impl_->resolveMethodFunction(
                 owningModule, className, attrExpr->attribute, &methodFuncName);
             if (targetFn) {
+                spelledName = attrExpr->attribute;
                 calleeName = methodFuncName;
                 isMethodCall = true;
                 attrExpr->object->accept(*this);
@@ -670,7 +684,7 @@ void CodeGen::visit(DeferStmt& node) {
     }
     if (vals.size() != targetTy->getNumParams()) {
         impl_->addError("defer: argument count does not match '" +
-                        calleeName + "'", node.location());
+                        spelledName + "'", node.location());
         return;
     }
 

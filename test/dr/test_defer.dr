@@ -1,4 +1,7 @@
 from unittest import TestCase, main
+from defer_mod import note, deferred_in_own_module
+import defer_mod
+from defer_mod import note as aliased_note
 
 
 def rec(log: list[str], v: str) {
@@ -142,6 +145,24 @@ def try_finally_return(log: list[str]) -> int {
     } finally {
         rec(log, "finally")
     }
+}
+
+
+def defer_via_import(log: list[str]) {
+    defer note(log, "imported-cleanup")
+    log.append("body")
+}
+
+
+def defer_via_qualified(log: list[str]) {
+    defer defer_mod.note(log, "qualified-cleanup")
+    log.append("body")
+}
+
+
+def defer_via_alias(log: list[str]) {
+    defer aliased_note(log, "aliased-cleanup")
+    log.append("body")
 }
 
 
@@ -438,6 +459,38 @@ def raise_churn_once() {
 }
 
 
+class DeferCrossModuleTests(TestCase) {
+    """defer resolves its callee to a linker symbol. Every function outside the
+    entry file answers to a module-mangled name, so defer used to find nothing
+    and reject the call as computed or a closure. Only entry-file functions and
+    extern C names happened to match the name as typed."""
+
+    def test_imported_function() {
+        log: list[str] = []
+        defer_via_import(log)
+        self.assertEqual(log, ["body", "imported-cleanup"])
+    }
+
+    def test_module_qualified_function() {
+        log: list[str] = []
+        defer_via_qualified(log)
+        self.assertEqual(log, ["body", "qualified-cleanup"])
+    }
+
+    def test_aliased_import() {
+        log: list[str] = []
+        defer_via_alias(log)
+        self.assertEqual(log, ["body", "aliased-cleanup"])
+    }
+
+    def test_function_deferred_inside_its_own_module() {
+        log: list[str] = []
+        deferred_in_own_module(log)
+        self.assertEqual(log, ["own-module-body", "own-module-cleanup"])
+    }
+}
+
+
 class DeferOwnTests(TestCase) {
     """defer with ownership: `defer f(own x)` moves x at the STATEMENT, the call
     runs at scope exit, and the deferred call receives the +1. `defer f(dub x)`
@@ -605,4 +658,5 @@ class DeferVirtualDispatchTest(TestCase) {
 }
 
 
-main([DeferBasicTests(), DeferOwnTests(), DeferVirtualDispatchTest()])
+main([DeferBasicTests(), DeferCrossModuleTests(), DeferOwnTests(),
+      DeferVirtualDispatchTest()])

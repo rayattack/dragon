@@ -1,0 +1,13 @@
+"""Deferrable callees living outside the entry file: the module-mangled symbol
+name is what defer used to fail to resolve."""
+
+
+def note(log: list[str], v: str) {
+    log.append(v)
+}
+
+
+def deferred_in_own_module(log: list[str]) {
+    defer note(log, "own-module-cleanup")
+    note(log, "own-module-body")
+}
