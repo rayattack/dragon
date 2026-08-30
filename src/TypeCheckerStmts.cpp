@@ -1456,12 +1456,20 @@ void TypeChecker::visit(FunctionDecl& node) {
     }
 
     std::vector<std::shared_ptr<Type>> paramTypes;
-    for (size_t i = 0; i < node.params.size(); ++i) {
-        if (node.isMethod && !node.hasImplicitSelf && node.params[i].name == "self")
-            continue;
-        paramTypes.push_back(resolveType(node.params[i].type.get()));
+    {
+        Impl::ExternSignatureScope externScope(*impl_, node.isExtern);
+        for (size_t i = 0; i < node.params.size(); ++i) {
+            if (node.isMethod && !node.hasImplicitSelf &&
+                node.params[i].name == "self")
+                continue;
+            paramTypes.push_back(resolveType(node.params[i].type.get()));
+        }
     }
-    auto retType = resolveType(node.returnType.get());
+    std::shared_ptr<Type> retType;
+    {
+        Impl::ExternSignatureScope externScope(*impl_, node.isExtern);
+        retType = resolveType(node.returnType.get());
+    }
     if (node.isAsync && node.isClassMethod) {
         error(node.location(),
               "an async @classmethod is not supported; make it an async "

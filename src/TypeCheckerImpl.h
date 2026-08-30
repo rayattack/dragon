@@ -70,6 +70,17 @@ struct TypeChecker::Impl {
     std::unordered_map<std::string, std::shared_ptr<Type>> cachedExports;
     // module-top-level `type` aliases declared in the module being checked
     std::unordered_map<std::string, std::shared_ptr<Type>> cachedTypeExports;
+    bool inExternSignature = false;
+
+    struct ExternSignatureScope {
+        Impl& impl;
+        bool previous;
+        ExternSignatureScope(Impl& i, bool active)
+            : impl(i), previous(i.inExternSignature) {
+            impl.inExternSignature = active;
+        }
+        ~ExternSignatureScope() { impl.inExternSignature = previous; }
+    };
 
     std::string currentFile;
     std::string currentModuleName;

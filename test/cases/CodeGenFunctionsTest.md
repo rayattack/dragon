@@ -796,10 +796,10 @@ extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
 extern "C" def dragon_file_read(handle: ptr) -> str
 w: ptr = fopen("/tmp/dragon_test_tier210.txt", "w")
 _n: int = dragon_file_write_text(w, "abc\ndef\nghi\n")
-_w: intc = fclose(w)
+_w: int = fclose(w)
 g: ptr = fopen("/tmp/dragon_test_tier210.txt", "r")
 content: str = dragon_file_read(g)
-_g: intc = fclose(g)
+_g: int = fclose(g)
 print(content)
 ```
 
@@ -811,7 +811,7 @@ extern "C" def pclose(stream: ptr) -> intc
 extern "C" def dragon_file_read(handle: ptr) -> str
 p: ptr = popen("printf 'line1\\nline2\\nline3\\n'", "r")
 content: str = dragon_file_read(p)
-_: intc = pclose(p)
+_: int = pclose(p)
 print(content)
 ```
 
@@ -824,7 +824,7 @@ extern "C" def dragon_file_read(handle: ptr) -> str
 extern "C" def dragon_str_len(s: str) -> int
 p: ptr = popen("yes | head -c 20000", "r")
 content: str = dragon_file_read(p)
-_: intc = pclose(p)
+_: int = pclose(p)
 print(dragon_str_len(content))
 ```
 
@@ -837,6 +837,6 @@ extern "C" def dragon_file_read(handle: ptr) -> str
 extern "C" def dragon_str_len(s: str) -> int
 p: ptr = popen("true", "r")
 content: str = dragon_file_read(p)
-_: intc = pclose(p)
+_: int = pclose(p)
 print(dragon_str_len(content))
 ```

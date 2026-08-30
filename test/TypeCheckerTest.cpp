@@ -1877,3 +1877,23 @@ TEST(TypeCheckerTest, RecursiveTypeAliasesMustBeProductive) {
     EXPECT_TRUE(checkHasErrors(code("recursive_type_alias_bare_arm_rejected")));
     EXPECT_TRUE(checkOk(code("union_element_nested_literal_accepted")));
 }
+
+TEST(TypeCheckerTest, IntcLocalRejected) {
+    EXPECT_TRUE(checkHasErrors(code("intc_local_rejected")));
+}
+
+TEST(TypeCheckerTest, IntcFieldRejected) {
+    EXPECT_TRUE(checkHasErrors(code("intc_field_rejected")));
+}
+
+TEST(TypeCheckerTest, IntcParamInDragonFnRejected) {
+    EXPECT_TRUE(checkHasErrors(code("intc_param_in_dragon_fn_rejected")));
+}
+
+TEST(TypeCheckerTest, IntcReturnInDragonFnRejected) {
+    EXPECT_TRUE(checkHasErrors(code("intc_return_in_dragon_fn_rejected")));
+}
+
+TEST(TypeCheckerTest, IntcInExternSignatureOk) {
+    EXPECT_TRUE(checkOk(code("intc_in_extern_signature_ok")));
+}

@@ -2218,3 +2218,59 @@ type Data = str | int | list[Data] | dict[str, Data]
 
 d: dict[str, Data] = {"a": {"b": "c"}, "n": 1}
 ```
+
+#### :intc_local_rejected
+
+`intc` is C's 32-bit int and exists only so `extern "C"` signatures can spell the
+C ABI. As a Dragon local it has no honest meaning: the checker models it as
+`int`, codegen stores it as `i32`, and the widths disagree.
+
+```dr
+def main() {
+    v: intc = 5
+    print(v)
+}
+main()
+```
+
+#### :intc_field_rejected
+
+```dr
+class Holder {
+    n: intc
+    def () {
+        self.n = 7
+    }
+}
+```
+
+#### :intc_param_in_dragon_fn_rejected
+
+```dr
+def take(n: intc) -> int {
+    return 1
+}
+```
+
+#### :intc_return_in_dragon_fn_rejected
+
+```dr
+def give() -> intc {
+    return 1
+}
+```
+
+#### :intc_in_extern_signature_ok
+
+The one place `intc` belongs. Both the parameter and the return type are part of
+the C ABI here, and the value widens back to `int` on the Dragon side.
+
+```dr
+extern "C" def usleep(usec: intc) -> intc
+
+def main() {
+    r: int = usleep(1)
+    print(r)
+}
+main()
+```

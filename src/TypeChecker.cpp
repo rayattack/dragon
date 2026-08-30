@@ -600,6 +600,7 @@ bool TypeChecker::check(Module& module) {
         size_t diagBefore = impl_->diagnostics.size();
         std::vector<std::shared_ptr<Type>> paramTypes;
         bool clean = true;
+        Impl::ExternSignatureScope externScope(*impl_, fd->isExtern);
         for (auto& p : fd->params) {
             if (fd->isMethod && !fd->hasImplicitSelf && p.name == "self")
                 continue;
@@ -1066,6 +1067,14 @@ std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
                   "int | str` and annotate `Shape`, or use `from json import "
                   "Data` for JSON-shaped data. A generic `[T]` is the right "
                   "tool for \"any type the caller picks\".");
+            return impl_->unknownType;
+        }
+        if (named->name == "intc" && !impl_->inExternSignature) {
+            error(named->location(),
+                  "'intc' is C's 32-bit int and belongs only in an `extern \"C\"` "
+                  "signature, where it spells the C ABI. In Dragon code the type "
+                  "is `int`; a value returned through an `intc` parameter or "
+                  "return type widens to `int` on its own.");
             return impl_->unknownType;
         }
         auto it = impl_->typeNames.find(named->name);
