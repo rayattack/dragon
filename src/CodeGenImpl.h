@@ -1849,6 +1849,7 @@ struct CodeGen::Impl {
     }
 
     Type::Kind typeExprToTypeKind(TypeExpr* typeExpr);
+    Type::Kind typeExprToTypeKindDerived(TypeExpr* typeExpr);
 
     VarKind typeExprToKind(TypeExpr* typeExpr);
 

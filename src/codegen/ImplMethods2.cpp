@@ -412,6 +412,22 @@ std::string CodeGen::Impl::typeExprCanonicalName(TypeExpr* t) const {
     }
 
 Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
+    Type::Kind derived = typeExprToTypeKindDerived(typeExpr);
+    if (derived != Type::Kind::Unknown) return derived;
+
+    TypeExpr* site = resolveTypeAliasExpr(typeExpr);
+    const Type* checked = nullptr;
+    if (site && site->resolved) checked = site->resolved.get();
+    else if (typeExpr && typeExpr->resolved) checked = typeExpr->resolved.get();
+    if (checked && checked->kind() != Type::Kind::Unknown) return checked->kind();
+
+    addError("internal error: annotation has no kind in codegen and the type "
+             "checker resolved none",
+             typeExpr ? typeExpr->location() : SourceLocation{});
+    return Type::Kind::Int;
+}
+
+Type::Kind CodeGen::Impl::typeExprToTypeKindDerived(TypeExpr* typeExpr) {
         typeExpr = resolveTypeAliasExpr(typeExpr);
         if (!typeExpr) return Type::Kind::Int;
         if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
@@ -429,7 +445,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             if (!resolveAnnotationClassName(named->name).empty())
                 return Type::Kind::Instance;
             if (contractTypeNames.count(named->name)) return Type::Kind::Instance;
-            return Type::Kind::Int;
+            return Type::Kind::Unknown;
         }
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
             if (auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
@@ -439,7 +455,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
                 if (base->name == "set")   return Type::Kind::Set;
             }
             if (!genericInstanceClassName(typeExpr).empty()) return Type::Kind::Instance;
-            return Type::Kind::Int;
+            return Type::Kind::Unknown;
         }
         if (dynamic_cast<TupleTypeExpr*>(typeExpr)) return Type::Kind::Tuple;
         if (dynamic_cast<ContractSetTypeExpr*>(typeExpr)) return Type::Kind::Instance;
@@ -453,7 +469,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             // tag 0 or refused to derive one at all.
             return Type::Kind::Boxed;
         }
-        return Type::Kind::Int;
+        return Type::Kind::Unknown;
     }
 
 CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
