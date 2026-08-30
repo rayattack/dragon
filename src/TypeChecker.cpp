@@ -445,6 +445,7 @@ std::unordered_map<std::string, std::shared_ptr<Type>> TypeChecker::getTypeExpor
 bool TypeChecker::check(Module& module) {
     impl_->currentFile = module.filename;
     impl_->currentModuleName = module.moduleName;
+    impl_->templateScopeModule = module.moduleName;
     impl_->currentPackage = impl_->packageKey(module.filename);
     impl_->currentClass = nullptr;
     impl_->pushScope();
@@ -1107,10 +1108,12 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
         if (baseName->name == "Task" && generic->typeArgs.size() == 1) {
             return std::make_shared<TaskType>(resolveType(generic->typeArgs[0].get()));
         }
-        if (auto gIt = impl_->genericClasses.find(baseName->name);
+        const std::string templateKey = impl_->templateKeyInScope(baseName->name);
+        if (auto gIt = impl_->genericClasses.find(templateKey);
             gIt != impl_->genericClasses.end()) {
             std::vector<std::shared_ptr<Type>> args;
             for (auto& a : generic->typeArgs) args.push_back(resolveType(a.get()));
+            baseName->name = templateKey;
             return instantiateGenericClass(gIt->second, std::move(args),
                                            generic->location());
         }

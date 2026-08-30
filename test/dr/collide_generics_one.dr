@@ -1,4 +1,5 @@
-"""Minimal Box[T]; collide_generics_two.dr declares a richer one under the same name."""
+"""Minimal Box[T] and a pick[T]; collide_generics_two.dr declares richer ones
+under the same two names."""
 
 
 class Box[T] {
@@ -21,4 +22,14 @@ def one_box_int() -> int {
 def one_box_str() -> str {
     b: Box[str] = Box[str]("alpha")
     return b.get()
+}
+
+
+def pick[T](xs: list[T]) -> T {
+    return xs[0]
+}
+
+
+def one_pick_int() -> int {
+    return pick([11, 22, 33])
 }

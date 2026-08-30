@@ -243,12 +243,9 @@ std::shared_ptr<Type> TypeChecker::substituteType(
                     if (na.get() != a.get()) changed = true;
                     newArgs.push_back(na);
                 }
-                if (changed) {
-                    auto declIt = impl_->genericClasses.find(ct->genericOrigin);
-                    if (declIt != impl_->genericClasses.end())
-                        return instantiateGenericClass(declIt->second, newArgs,
-                                                       SourceLocation{});
-                }
+                if (changed && ct->originDecl)
+                    return instantiateGenericClass(ct->originDecl, newArgs,
+                                                   SourceLocation{});
             }
             return t;
         }
@@ -431,7 +428,8 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
               std::to_string(args.size()));
         return impl_->unknownType;
     }
-    std::string key = mangleInstantiation(decl->name, args);
+    const std::string templateKey = impl_->templateKeyOf(decl, decl->name);
+    std::string key = mangleInstantiation(templateKey, args);
 
     if (auto it = impl_->typeNames.find(key); it != impl_->typeNames.end())
         return it->second;
@@ -457,9 +455,14 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     }
 
     std::shared_ptr<ClassType> genericCT;
-    if (auto it = impl_->typeNames.find(decl->name); it != impl_->typeNames.end())
-        if (auto inst = std::dynamic_pointer_cast<InstanceType>(it->second))
-            genericCT = inst->classType;
+    if (auto byDecl = impl_->genericClassTypeByDecl.find(decl);
+        byDecl != impl_->genericClassTypeByDecl.end())
+        genericCT = byDecl->second;
+    if (!genericCT)
+        if (auto it = impl_->typeNames.find(decl->name); it != impl_->typeNames.end())
+            if (auto inst = std::dynamic_pointer_cast<InstanceType>(it->second))
+                if (inst->classType && inst->classType->decl == decl)
+                    genericCT = inst->classType;
 
     std::unordered_map<std::string, std::shared_ptr<Type>> bindings;
     bool boundViolated = false;
@@ -495,7 +498,7 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     }
 
     auto ph = std::make_shared<ClassType>(key);
-    ph->genericOrigin = decl->name;
+    ph->genericOrigin = templateKey;
     ph->originDecl = decl;
     ph->genericArgs = args;
     if (genericCT) {
@@ -511,7 +514,7 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     impl_->define(key, ph);
 
     if (argsAreConcrete(args) && !boundViolated)
-        impl_->pendingInsts.push_back({key, decl->name, true, args});
+        impl_->pendingInsts.push_back({key, decl->name, true, args, "", nullptr, decl});
 
     if (genericCT) {
         impl_->instDepth++;
@@ -557,13 +560,13 @@ bool TypeChecker::tryInstantiateGenericCall(
                     }
                 }
             }
-            auto it = impl_->genericMethods.find(c->name + "." + m);
-            if (it != impl_->genericMethods.end()) { declClass = c->name; declCT = c; return it->second; }
-            if (!c->genericOrigin.empty()) {
-                auto oit = impl_->genericMethods.find(c->genericOrigin + "." + m);
-                if (oit != impl_->genericMethods.end()) {
-                    declClass = c->name; declCT = c;
-                    return oit->second;
+            const std::string ownerKey =
+                Impl::qualifyTemplate(c->definingModule, c->name);
+            for (const std::string& mkey : {ownerKey + "." + m,
+                                            c->genericOrigin + "." + m}) {
+                auto it = impl_->genericMethods.find(mkey);
+                if (it != impl_->genericMethods.end()) {
+                    declClass = c->name; declCT = c; return it->second;
                 }
             }
             c = std::dynamic_pointer_cast<ClassType>(c->parentClass);
@@ -574,16 +577,13 @@ bool TypeChecker::tryInstantiateGenericCall(
     auto moduleGenericFn = [&](Expr* obj, const std::string& attr) -> FunctionDecl* {
         auto mt = std::dynamic_pointer_cast<ModuleType>(inferType(obj));
         if (!mt) return nullptr;
-        auto it = impl_->genericFunctions.find(attr);
-        if (it == impl_->genericFunctions.end()) return nullptr;
-        auto owner = impl_->genericTemplateModule.find(it->second);
-        if (owner == impl_->genericTemplateModule.end() || owner->second != mt->name)
-            return nullptr;
-        return it->second;
+        auto it = impl_->genericFunctions.find(
+            Impl::qualifyTemplate(mt->name, attr));
+        return it == impl_->genericFunctions.end() ? nullptr : it->second;
     };
 
     if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
-        auto it = impl_->genericFunctions.find(nm->name);
+        auto it = impl_->genericFunctions.find(impl_->templateKeyInScope(nm->name));
         if (it != impl_->genericFunctions.end()) {
             bool concreteInScope = false;
             if (auto inScope = impl_->lookup(nm->name))
@@ -596,7 +596,7 @@ bool TypeChecker::tryInstantiateGenericCall(
         }
     } else if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get())) {
         if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
-            auto it = impl_->genericFunctions.find(nm->name);
+            auto it = impl_->genericFunctions.find(impl_->templateKeyInScope(nm->name));
             if (it != impl_->genericFunctions.end()) {
                 decl = it->second;
                 fnName = nm->name;
@@ -647,7 +647,8 @@ bool TypeChecker::tryInstantiateGenericCall(
                     const ClassType* c = cls.get();
                     for (int guard = 0; c && guard < 256; ++guard) {
                         auto it = impl_->stampedCallReturnType.find(
-                            c->name + "." + at2->attribute);
+                            Impl::qualifyTemplate(c->definingModule, c->name) +
+                            "." + at2->attribute);
                         if (it != impl_->stampedCallReturnType.end()) {
                             node.type = it->second;
                             return true;
@@ -669,6 +670,8 @@ bool TypeChecker::tryInstantiateGenericCall(
 
     const bool isMethodCall = !owningClass.empty();
     const char* kindWord = isMethodCall ? "method" : "function";
+    const std::string owningClassKey = Impl::qualifyTemplate(
+        owningCT ? owningCT->definingModule : std::string(), owningClass);
 
     std::shared_ptr<FunctionType> genericFt;
     if (!isMethodCall) {
@@ -676,17 +679,14 @@ bool TypeChecker::tryInstantiateGenericCall(
     }
     if (!genericFt) {
         bool pushedClassFrame = false;
-        if (probeCls && !probeCls->genericOrigin.empty()) {
-            if (auto gcIt = impl_->genericClasses.find(probeCls->genericOrigin);
-                gcIt != impl_->genericClasses.end()) {
-                std::unordered_map<std::string, std::shared_ptr<Type>> classFrame;
-                auto& ctps = gcIt->second->typeParams;
-                for (size_t i = 0;
-                     i < ctps.size() && i < probeCls->genericArgs.size(); ++i)
-                    classFrame[ctps[i].name] = probeCls->genericArgs[i];
-                impl_->typeParamScopes.push_back(std::move(classFrame));
-                pushedClassFrame = true;
-            }
+        if (probeCls && probeCls->originDecl) {
+            std::unordered_map<std::string, std::shared_ptr<Type>> classFrame;
+            auto& ctps = probeCls->originDecl->typeParams;
+            for (size_t i = 0;
+                 i < ctps.size() && i < probeCls->genericArgs.size(); ++i)
+                classFrame[ctps[i].name] = probeCls->genericArgs[i];
+            impl_->typeParamScopes.push_back(std::move(classFrame));
+            pushedClassFrame = true;
         }
         std::unordered_map<std::string, std::shared_ptr<Type>> frame;
         for (auto& tp : decl->typeParams) {
@@ -805,16 +805,17 @@ bool TypeChecker::tryInstantiateGenericCall(
         args.push_back(it->second);
     }
 
-    std::string stampedName = mangleInstantiation(fnName, args);
+    std::string stampedName = mangleInstantiation(
+        isMethodCall ? fnName : impl_->templateKeyOf(decl, decl->name), args);
     std::string key = isMethodCall
-                          ? mangleInstantiation(owningClass + "." + fnName, args)
+                          ? mangleInstantiation(owningClassKey + "." + fnName, args)
                           : stampedName;
     if (argsAreConcrete(args) && !impl_->instDone.count(key)) {
         bool pending = false;
         for (auto& r : impl_->pendingInsts) if (r.key == key) { pending = true; break; }
         if (!pending)
             impl_->pendingInsts.push_back(
-                {key, fnName, false, args, owningClass, owningCT});
+                {key, fnName, false, args, owningClass, owningCT, decl});
     }
 
     if (argsAreConcrete(args)) {
@@ -834,7 +835,8 @@ bool TypeChecker::tryInstantiateGenericCall(
                           : impl_->unknownType;
     if (argsAreConcrete(args) && node.type) {
         if (isMethodCall)
-            impl_->stampedCallReturnType[owningClass + "." + stampedName] = node.type;
+            impl_->stampedCallReturnType[owningClassKey + "." + stampedName] =
+                node.type;
         else
             impl_->stampedCallReturnType[stampedName] = node.type;
     }
@@ -847,31 +849,14 @@ bool TypeChecker::tryInstantiateGenericConstruction(
     std::string clsName;
     std::vector<std::shared_ptr<Type>> args;
 
-    auto scopedClassDecl = [&](const std::string& name) -> ClassDecl* {
-        std::shared_ptr<ClassType> cls;
-        if (auto looked = impl_->lookup(name))
-            cls = std::dynamic_pointer_cast<ClassType>(looked);
-        if (!cls)
-            if (auto tn = impl_->typeNames.find(name); tn != impl_->typeNames.end())
-                if (auto inst = std::dynamic_pointer_cast<InstanceType>(tn->second))
-                    cls = inst->classType;
-        if (!cls) return nullptr;
-        return cls->decl ? cls->decl : cls->originDecl;
-    };
-    auto templateInScope = [&](const std::string& name,
-                               ClassDecl* registryTemplate) -> ClassDecl* {
-        ClassDecl* scoped = scopedClassDecl(name);
-        if (!scoped || scoped == registryTemplate) return registryTemplate;
-        if (scoped->typeParams.empty()) return nullptr;
-        return scoped;
+    auto templateInScope = [&](const std::string& name) -> ClassDecl* {
+        auto it = impl_->genericClasses.find(impl_->templateKeyInScope(name));
+        return it == impl_->genericClasses.end() ? nullptr : it->second;
     };
 
     if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get())) {
         if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
-            auto it = impl_->genericClasses.find(nm->name);
-            ClassDecl* templ = it != impl_->genericClasses.end()
-                ? templateInScope(nm->name, it->second) : nullptr;
-            if (templ) {
+            if (ClassDecl* templ = templateInScope(nm->name)) {
                 decl = templ;
                 clsName = nm->name;
                 std::vector<const Expr*> idxs;
@@ -887,13 +872,11 @@ bool TypeChecker::tryInstantiateGenericConstruction(
             }
         }
     } else if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
-        auto it = impl_->genericClasses.find(nm->name);
-        ClassDecl* templ = it != impl_->genericClasses.end() && expected
-            ? templateInScope(nm->name, it->second) : nullptr;
+        ClassDecl* templ = expected ? templateInScope(nm->name) : nullptr;
         if (templ) {
             auto exInst = std::dynamic_pointer_cast<InstanceType>(expected);
             if (exInst && exInst->classType &&
-                exInst->classType->genericOrigin == nm->name) {
+                exInst->classType->originDecl == templ) {
                 decl = templ;
                 clsName = nm->name;
                 args = exInst->classType->genericArgs;
@@ -912,7 +895,8 @@ bool TypeChecker::tryInstantiateGenericConstruction(
 
     auto instType = instantiateGenericClass(decl, args, node.location());
     if (argsAreConcrete(args)) {
-        std::string key = mangleInstantiation(clsName, args);
+        std::string key =
+            mangleInstantiation(impl_->templateKeyOf(decl, decl->name), args);
         auto newCallee = std::make_unique<NameExpr>();
         newCallee->name = key;
         newCallee->setLocation(node.callee->location());
@@ -951,11 +935,19 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                                       mtp.name + "' on generic class '" + cd->name +
                                       "' shadows the class's type parameter '" +
                                       ctp.name + "'; rename the method's parameter");
-                impl_->genericMethods[cd->name + "." + fd->name] = fd;
+                impl_->genericTemplateModule[fd] = module.moduleName;
+                impl_->genericMethods[
+                    Impl::qualifyTemplate(module.moduleName, cd->name) + "." +
+                    fd->name] = fd;
                 impl_->genericMethodsByDecl[cd][fd->name] = fd;
             }
-            if (!cd->typeParams.empty())
-                impl_->genericClasses[cd->name] = cd;
+            if (!cd->typeParams.empty()) {
+                impl_->genericTemplateModule[cd] = module.moduleName;
+                const std::string key =
+                    Impl::qualifyTemplate(module.moduleName, cd->name);
+                impl_->genericClasses[key] = cd;
+                impl_->bindTemplateName(module.moduleName, cd->name, key);
+            }
         } else if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
             if (fd->typeParams.empty()) continue;
             for (auto& other : module.body) {
@@ -969,7 +961,11 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                     break;
                 }
             }
-            impl_->genericFunctions[fd->name] = fd;
+            impl_->genericTemplateModule[fd] = module.moduleName;
+            const std::string key =
+                Impl::qualifyTemplate(module.moduleName, fd->name);
+            impl_->genericFunctions[key] = fd;
+            impl_->bindTemplateName(module.moduleName, fd->name, key);
             if (fd->name == "decode" && module.moduleName == "json")
                 impl_->schemaDecodeFns.insert(fd);
             if (fd->name == "encode" && module.moduleName == "json")
@@ -988,23 +984,45 @@ void TypeChecker::collectGenericTemplates(Module& module) {
 
 void TypeChecker::registerExternalGenerics(Module& mod) {
     for (auto& stmt : mod.body) {
+        auto* fi = dynamic_cast<FromImportStmt*>(stmt.get());
+        if (!fi) continue;
+        for (auto& alias : fi->names) {
+            const std::string bound = alias.asName.empty() ? alias.name : alias.asName;
+            impl_->bindTemplateName(mod.moduleName, bound,
+                                    Impl::qualifyTemplate(fi->module, alias.name));
+        }
+    }
+    for (auto& stmt : mod.body) {
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
             impl_->classDeclByName.emplace(cd->name, cd);
+            const std::string classKey =
+                Impl::qualifyTemplate(mod.moduleName, cd->name);
             for (auto& m : cd->body)
                 if (auto* fd = dynamic_cast<FunctionDecl*>(m.get()))
                     if (!fd->typeParams.empty()) {
-                        impl_->genericMethods.emplace(cd->name + "." + fd->name, fd);
+                        impl_->genericMethods[classKey + "." + fd->name] = fd;
                         impl_->genericMethodsByDecl[cd][fd->name] = fd;
-                        impl_->genericTemplateModule.emplace(fd, mod.moduleName);
+                        impl_->genericTemplateModule[fd] = mod.moduleName;
                     }
             if (!cd->typeParams.empty()) {
-                impl_->genericClasses.emplace(cd->name, cd);
-                impl_->genericTemplateModule.emplace(cd, mod.moduleName);
+                impl_->genericClasses[classKey] = cd;
+                impl_->genericTemplateModule[cd] = mod.moduleName;
+                impl_->bindTemplateName(mod.moduleName, cd->name, classKey);
+                if (auto modIt = impl_->moduleTypes.find(mod.moduleName);
+                    modIt != impl_->moduleTypes.end())
+                    if (auto exIt = modIt->second->exports.find(cd->name);
+                        exIt != modIt->second->exports.end() && exIt->second &&
+                        exIt->second->kind() == Type::Kind::Class)
+                        impl_->genericClassTypeByDecl[cd] =
+                            std::static_pointer_cast<ClassType>(exIt->second);
             }
         } else if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
             if (!fd->typeParams.empty()) {
-                impl_->genericFunctions.emplace(fd->name, fd);
-                impl_->genericTemplateModule.emplace(fd, mod.moduleName);
+                const std::string key =
+                    Impl::qualifyTemplate(mod.moduleName, fd->name);
+                impl_->genericFunctions[key] = fd;
+                impl_->genericTemplateModule[fd] = mod.moduleName;
+                impl_->bindTemplateName(mod.moduleName, fd->name, key);
                 if (fd->name == "decode" && mod.moduleName == "json")
                     impl_->schemaDecodeFns.insert(fd);
                 if (fd->name == "encode" && mod.moduleName == "json")
@@ -1039,57 +1057,18 @@ void TypeChecker::runMonomorphization() {
         const bool isMethodReq = !req.owningClass.empty();
         std::vector<std::unique_ptr<TypeExpr>> owned;
         TypeSubst subst;
-        Stmt* template_ = nullptr;
-        const std::vector<TypeParam>* tps = nullptr;
-        if (req.isClass) {
-            auto it = impl_->genericClasses.find(req.genericName);
-            if (it == impl_->genericClasses.end()) continue;
-            template_ = it->second; tps = &it->second->typeParams;
-        } else if (isMethodReq) {
-            std::shared_ptr<ClassType> ownerCT = req.ownerCT;
-            if (!ownerCT)
-                if (auto tnIt = impl_->typeNames.find(req.owningClass);
-                    tnIt != impl_->typeNames.end())
-                    if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
-                        ownerCT = inst->classType;
-            FunctionDecl* tmplFn = nullptr;
-            if (ownerCT) {
-                for (const ClassDecl* dkey :
-                     {static_cast<const ClassDecl*>(ownerCT->decl),
-                      static_cast<const ClassDecl*>(ownerCT->originDecl)}) {
-                    if (!dkey) continue;
-                    auto dit = impl_->genericMethodsByDecl.find(dkey);
-                    if (dit != impl_->genericMethodsByDecl.end()) {
-                        auto mit = dit->second.find(req.genericName);
-                        if (mit != dit->second.end()) { tmplFn = mit->second; break; }
-                    }
-                }
+        Stmt* template_ = req.template_;
+        if (!template_) continue;
+        const std::vector<TypeParam>* tps =
+            req.isClass ? &static_cast<ClassDecl*>(template_)->typeParams
+                        : &static_cast<FunctionDecl*>(template_)->typeParams;
+        if (isMethodReq && req.ownerCT && req.ownerCT->originDecl) {
+            auto& ctps = req.ownerCT->originDecl->typeParams;
+            for (size_t i = 0;
+                 i < ctps.size() && i < req.ownerCT->genericArgs.size(); ++i) {
+                owned.push_back(typeToTypeExpr(req.ownerCT->genericArgs[i]));
+                subst[ctps[i].name] = owned.back().get();
             }
-            if (!tmplFn) {
-                auto it = impl_->genericMethods.find(req.owningClass + "." + req.genericName);
-                if (it == impl_->genericMethods.end() && ownerCT &&
-                    !ownerCT->genericOrigin.empty())
-                    it = impl_->genericMethods.find(
-                        ownerCT->genericOrigin + "." + req.genericName);
-                if (it == impl_->genericMethods.end()) continue;
-                tmplFn = it->second;
-            }
-            template_ = tmplFn; tps = &tmplFn->typeParams;
-            if (ownerCT && !ownerCT->genericOrigin.empty()) {
-                if (auto gcIt = impl_->genericClasses.find(ownerCT->genericOrigin);
-                    gcIt != impl_->genericClasses.end()) {
-                    auto& ctps = gcIt->second->typeParams;
-                    for (size_t i = 0;
-                         i < ctps.size() && i < ownerCT->genericArgs.size(); ++i) {
-                        owned.push_back(typeToTypeExpr(ownerCT->genericArgs[i]));
-                        subst[ctps[i].name] = owned.back().get();
-                    }
-                }
-            }
-        } else {
-            auto it = impl_->genericFunctions.find(req.genericName);
-            if (it == impl_->genericFunctions.end()) continue;
-            template_ = it->second; tps = &it->second->typeParams;
         }
         for (size_t i = 0; i < tps->size() && i < req.args.size(); ++i) {
             owned.push_back(typeToTypeExpr(req.args[i]));
@@ -1121,10 +1100,8 @@ void TypeChecker::runMonomorphization() {
             }
         }
 
-        std::string homeModule;
-        if (auto modIt = impl_->genericTemplateModule.find(template_);
-            modIt != impl_->genericTemplateModule.end())
-            homeModule = modIt->second;
+        const std::string homeModule = impl_->templateHomeModule(template_);
+        Impl::TemplateScope _templateScope(impl_->templateScopeModule, homeModule);
 
         std::unique_ptr<Stmt> cloned;
         if (!req.isClass && !isMethodReq &&
@@ -1153,8 +1130,7 @@ void TypeChecker::runMonomorphization() {
 
         std::vector<std::pair<std::string, std::shared_ptr<Type>>> savedTypeNames;
         std::vector<std::string> addedTypeNames;
-        if (auto modIt = impl_->genericTemplateModule.find(template_);
-            modIt != impl_->genericTemplateModule.end()) {
+        {
             auto injectClass = [&](const std::string& ename,
                                    const std::shared_ptr<Type>& etype) {
                 if (!etype || etype->kind() != Type::Kind::Class) return;
@@ -1165,19 +1141,21 @@ void TypeChecker::runMonomorphization() {
                 impl_->typeNames[ename] = std::make_shared<InstanceType>(
                     std::static_pointer_cast<ClassType>(etype));
             };
-            if (auto mtIt = impl_->moduleTypes.find(modIt->second);
+            if (auto mtIt = impl_->moduleTypes.find(homeModule);
                 mtIt != impl_->moduleTypes.end())
                 for (auto& [ename, etype] : mtIt->second->exports)
                     injectClass(ename, etype);
-            if (auto imIt = impl_->moduleImportedTypes.find(modIt->second);
+            if (auto imIt = impl_->moduleImportedTypes.find(homeModule);
                 imIt != impl_->moduleImportedTypes.end())
                 for (auto& [ename, etype] : imIt->second)
                     injectClass(ename, etype);
         }
 
         if (isMethodReq) {
-            ClassDecl* ownerDecl =
-                req.ownerCT ? req.ownerCT->decl : nullptr;
+            ClassDecl* ownerDecl = nullptr;
+            if (req.ownerCT)
+                ownerDecl = req.ownerCT->decl ? req.ownerCT->decl
+                                              : req.ownerCT->originDecl;
             if (!ownerDecl) {
                 auto cdIt = impl_->classDeclByName.find(req.owningClass);
                 if (cdIt == impl_->classDeclByName.end()) continue;

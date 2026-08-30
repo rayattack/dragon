@@ -157,6 +157,47 @@ struct TypeChecker::Impl {
     std::unordered_map<const void*, std::string> genericTemplateModule;
 
     std::unordered_map<std::string,
+        std::unordered_map<std::string, std::string>> templateKeysByModule;
+    std::string templateScopeModule;
+    std::unordered_map<const ClassDecl*, std::shared_ptr<ClassType>>
+        genericClassTypeByDecl;
+
+    static std::string qualifyTemplate(const std::string& homeModule,
+                                       const std::string& name) {
+        return homeModule.empty() ? name : homeModule + "." + name;
+    }
+
+    std::string templateHomeModule(const void* decl) const {
+        auto it = genericTemplateModule.find(decl);
+        return it == genericTemplateModule.end() ? std::string() : it->second;
+    }
+
+    std::string templateKeyOf(const void* decl, const std::string& name) const {
+        return qualifyTemplate(templateHomeModule(decl), name);
+    }
+
+    void bindTemplateName(const std::string& scopeModule,
+                          const std::string& localName,
+                          const std::string& key) {
+        templateKeysByModule[scopeModule][localName] = key;
+    }
+
+    std::string templateKeyInScope(const std::string& localName) const {
+        auto scope = templateKeysByModule.find(templateScopeModule);
+        if (scope == templateKeysByModule.end()) return localName;
+        auto it = scope->second.find(localName);
+        return it == scope->second.end() ? localName : it->second;
+    }
+
+    struct TemplateScope {
+        std::string* slot;
+        std::string saved;
+        TemplateScope(std::string& s, const std::string& scopeModule)
+            : slot(&s), saved(s) { s = scopeModule; }
+        ~TemplateScope() { *slot = saved; }
+    };
+
+    std::unordered_map<std::string,
         std::unordered_map<std::string, std::shared_ptr<Type>>> moduleImportedTypes;
 
     std::set<const Stmt*> genericChecked;
@@ -168,6 +209,7 @@ struct TypeChecker::Impl {
         std::vector<std::shared_ptr<Type>> args;
         std::string owningClass;
         std::shared_ptr<ClassType> ownerCT;
+        Stmt* template_ = nullptr;
     };
     std::vector<InstReq> pendingInsts;
     std::set<std::string> instDone;

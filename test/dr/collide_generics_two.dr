@@ -1,4 +1,4 @@
-"""The other Box[T]: extra field and method under the same template name."""
+"""The other Box[T] and pick[T]: same template names, different bodies."""
 
 
 class Box[T] {
@@ -20,4 +20,14 @@ class Box[T] {
 def two_box_int() -> int {
     b: Box[int] = Box[int](5)
     return b.get() + b.stamped()
+}
+
+
+def pick[T](xs: list[T]) -> T {
+    return xs[len(xs) - 1]
+}
+
+
+def two_pick_int() -> int {
+    return pick([11, 22, 33])
 }

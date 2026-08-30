@@ -1355,6 +1355,12 @@ void TypeChecker::visit(ImportStmt& node) {
 }
 
 void TypeChecker::visit(FromImportStmt& node) {
+    for (auto& alias : node.names) {
+        const std::string bound = alias.asName.empty() ? alias.name : alias.asName;
+        impl_->bindTemplateName(impl_->currentModuleName, bound,
+                                Impl::qualifyTemplate(node.module, alias.name));
+    }
+
     auto modIt = impl_->moduleTypes.find(node.module);
     if (modIt == impl_->moduleTypes.end()) return;
 
@@ -1545,6 +1551,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     classType->definingModule = impl_->currentModuleName;
     classType->definingFile = impl_->currentFile;
     classType->decl = &node;
+    if (!node.typeParams.empty()) impl_->genericClassTypeByDecl[&node] = classType;
 
     for (auto& s : node.body) {
         if (auto* func = dynamic_cast<FunctionDecl*>(s.get()))

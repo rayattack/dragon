@@ -1,9 +1,36 @@
-"""Imports two's Box while one's same-named template registered first."""
+"""Binds both modules' same-named templates at once: two's Box and pick under
+their own names, one's Box under an alias, and both picks module-qualified."""
 
-from collide_generics_two import Box
+from collide_generics_two import Box, pick
+from collide_generics_one import Box as AlphaBox
+import collide_generics_one
+import collide_generics_two
 
 
 def importer_box_int() -> int {
     b: Box[int] = Box[int](3)
     return b.get() + b.stamped()
+}
+
+
+def importer_alias_boxes() -> str {
+    alpha: AlphaBox[int] = AlphaBox[int](1)
+    beta: Box[int] = Box[int](2)
+    return str(alpha.get()) + "|" + str(beta.get() + beta.stamped())
+}
+
+
+def importer_pick_int() -> int {
+    return pick([1, 2, 40])
+}
+
+
+def importer_qualified_picks() -> int {
+    return collide_generics_one.pick([2, 3, 4]) * 10 +
+           collide_generics_two.pick([2, 3, 4])
+}
+
+
+def importer_firstish[U](xs: list[U]) -> U {
+    return pick(xs)
 }

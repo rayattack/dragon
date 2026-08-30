@@ -1,9 +1,11 @@
 from unittest import TestCase, main
 from collide_classes_one import one_point, one_greet_via_base
 from collide_classes_two import two_point, two_greet_via_base, probe_two
-from collide_generics_one import one_box_int, one_box_str
-from collide_generics_two import two_box_int
-from collide_generics_importer import importer_box_int
+from collide_generics_one import one_box_int, one_box_str, one_pick_int
+from collide_generics_two import two_box_int, two_pick_int, Box
+from collide_generics_importer import importer_box_int, importer_alias_boxes
+from collide_generics_importer import importer_pick_int, importer_qualified_picks
+from collide_generics_importer import importer_firstish
 from collide_generic_methods_one import one_wrap
 from collide_generic_methods_two import two_wrap
 from collide_generic_methods_importer import importer_wrap
@@ -11,6 +13,8 @@ from collide_decode_one import one_roundtrip
 from collide_decode_two import two_roundtrip
 from collide_decode_importer import importer_decode
 from collide_methret_one import one_poke, one_lift
+import collide_generic_methods_one
+import collide_generic_methods_two
 from collide_methret_two import two_poke
 
 
@@ -42,6 +46,19 @@ def entry_summon() -> str {
 }
 
 
+def entry_box_int() -> int {
+    b: Box[int] = Box[int](3)
+    return b.get() + b.stamped()
+}
+
+
+def entry_wrap_both() -> str {
+    first: collide_generic_methods_one.Holder = collide_generic_methods_one.Holder("one")
+    second: collide_generic_methods_two.Holder = collide_generic_methods_two.Holder(4)
+    return first.wrap[int](5) + "|" + second.wrap[int](6)
+}
+
+
 class CollideClassesTests(TestCase) {
     """Same-named classes in different modules must not share compiler metadata.
     Pre-fix: bare-name layout/vtable/exception maps, last write wins."""
@@ -64,19 +81,37 @@ class CollideClassesTests(TestCase) {
 
 class CollideGenericsTests(TestCase) {
     """Same-named generic templates in different modules must stamp their own.
-    Pre-fix: the template registries folded across modules, first dep wins."""
+    Pre-fix: the template registries folded across modules, first dep wins, so
+    a losing call either failed to bind its type parameter or silently ran the
+    winner's body."""
 
     def test_one_stamps_its_own_template() {
         self.assertEqual(one_box_int(), 7)
         self.assertEqual(one_box_str(), "alpha")
+        self.assertEqual(one_pick_int(), 11)
     }
 
     def test_two_stamps_its_own_template() {
         self.assertEqual(two_box_int(), 104)
+        self.assertEqual(two_pick_int(), 33)
     }
 
     def test_import_pins_template_across_registration_order() {
         self.assertEqual(importer_box_int(), 102)
+        self.assertEqual(importer_pick_int(), 40)
+    }
+
+    def test_both_modules_templates_coexist_in_one_module() {
+        self.assertEqual(importer_alias_boxes(), "1|101")
+        self.assertEqual(importer_qualified_picks(), 24)
+    }
+
+    def test_stamped_body_resolves_names_in_its_own_module() {
+        self.assertEqual(importer_firstish([4, 5, 6]), 6)
+    }
+
+    def test_entry_stamp_is_not_captured_by_a_dependency_stamp() {
+        self.assertEqual(entry_box_int(), 102)
     }
 }
 
@@ -95,6 +130,10 @@ class CollideGenericMethodsTests(TestCase) {
 
     def test_imported_holder_uses_its_own_template() {
         self.assertEqual(importer_wrap(), "4#6")
+    }
+
+    def test_same_argument_stamps_land_in_their_own_class() {
+        self.assertEqual(entry_wrap_both(), "one:5|4#6")
     }
 }
 
