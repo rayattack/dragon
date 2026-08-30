@@ -217,6 +217,11 @@ class Response {
         self._ws_handler: Callable[[WebSocket], None] | None = none
         self._cookies: list[str] = []
         self._accept_encoding: str = ""
+        self._conn: ConnReader | None = none
+        self._finalize: Callable[[], None] | None = none
+        self._streaming: bool = false
+        self._stream_failed: bool = false
+        self._stream_writes: int = 0
     }
 
     @property
@@ -270,6 +275,7 @@ class Response {
     }
 
     def set_header(key: str, value: str) -> Response {
+        self._reject_after_first_chunk("header '" + key + "'")
         _reject_ctl(key, "header name")
         _reject_ctl(value, "header value")
         self._headers[key] = value
@@ -279,6 +285,7 @@ class Response {
     def cookie(name: str, value: str, max_age: int = 0,
                path: str = "/", secure: bool = false,
                httponly: bool = false, samesite: str = "Lax") -> Response {
+        self._reject_after_first_chunk("cookie '" + name + "'")
         _reject_ctl(name, "cookie name")
         _reject_ctl(value, "cookie value")
         _reject_ctl(path, "cookie path")
@@ -363,10 +370,54 @@ class Response {
 
     def chunk(data: str) -> Response {
         self._chunked = true
-        if dragon_str_byte_len_pub(data) > 0 {
-            self._chunks.append(data)
+        if dragon_str_byte_len_pub(data) == 0 {
+            return self
         }
+        const conn: ConnReader | None = self._conn
+        if conn == none {
+            self._chunks.append(data)
+            return self
+        }
+        if not self._streaming {
+            self._open_stream(conn)
+        }
+        conn.send(_encode_chunk(data))
+        self._stream_writes = self._stream_writes + 1
         return self
+    }
+
+    def _reject_after_first_chunk(what: str) -> None {
+        if self._streaming {
+            raise ValueError("cannot set " + what + " after the first chunk: " +
+                             "the header block is already on the wire. Set " +
+                             "every header before the first res.chunk() call.")
+        }
+    }
+
+    def _open_stream(conn: ConnReader) -> None {
+        const finalize: Callable[[], None] | None = self._finalize
+        if finalize != none {
+            finalize()
+        }
+        self._streaming = true
+        conn.send(self._serialize_chunk_headers())
+    }
+
+    def _serialize_chunk_headers() -> str {
+        header_str: str = _render_headers(self._headers, _OMIT_LENGTH)
+        header_str = dragon_str_concat(header_str, "transfer-encoding: chunked\r\n")
+        header_str = dragon_str_concat(header_str, self._cookie_lines())
+        if self._close {
+            header_str = dragon_str_concat(header_str, "connection: close\r\n")
+        }
+        return dragon_http_build_response(self.status, header_str, "")
+    }
+
+    def end_stream() -> None {
+        const conn: ConnReader | None = self._conn
+        if self._streaming and not self._stream_failed and conn != none {
+            conn.send("0\r\n\r\n")
+        }
     }
 
     def cede(fn: Callable[[ConnReader], None]) -> Response {
@@ -415,15 +466,15 @@ class Response {
             header_str = dragon_str_concat(header_str, "connection: close\r\n")
         }
 
-        body_out: str = ""
+        parts: list[str] = []
         if dragon_str_byte_len_pub(self.body) > 0 {
-            body_out = _encode_chunk(self.body)
+            _append_chunk(parts, self.body)
         }
         for piece in self._chunks {
-            body_out = dragon_str_concat(body_out, _encode_chunk(piece))
+            _append_chunk(parts, piece)
         }
-        body_out = dragon_str_concat(body_out, "0\r\n\r\n")
-        return dragon_http_build_response(self.status, header_str, body_out)
+        parts.append("0\r\n\r\n")
+        return dragon_http_build_response(self.status, header_str, "".join(parts))
     }
 
     def _serialize_no_body() -> str {
@@ -439,6 +490,14 @@ class Response {
         return dragon_http_build_response(self.status, header_str, "")
     }
 }
+
+def _append_chunk(parts: list[str], data: str) -> None {
+    parts.append(_int_to_hex(dragon_str_byte_len_pub(data)))
+    parts.append("\r\n")
+    parts.append(data)
+    parts.append("\r\n")
+}
+
 
 def _encode_chunk(data: str) -> str {
     const n: int = dragon_str_byte_len_pub(data)
@@ -1166,7 +1225,8 @@ class Router {
         }
     }
 
-    def _build_response(raw_bytes: bytes, body_bytes: bytes = b"") -> Response {
+    def _build_response(raw_bytes: bytes, body_bytes: bytes = b"",
+                        conn: ConnReader | None = none) -> Response {
         const parsed: ptr = dragon_http_parse_request(dragon_bytes_data(raw_bytes), len(raw_bytes))
         if not dragon_http_parsed_ok(parsed) {
             dragon_http_parsed_free(parsed)
@@ -1286,22 +1346,38 @@ class Router {
                         }
                     }
 
+                    finalized: list[bool] = [false]
+
+                    def finalize_headers() -> None {
+                        if finalized[0] {
+                            return
+                        }
+                        finalized[0] = true
+                        for mw in self._match_after(path, target_sd) {
+                            mw.handler(req, res, ctx)
+                        }
+                        if self._session_enabled {
+                            self._save_session(req, res)
+                        }
+                    }
+
+                    res._conn = conn
+                    res._finalize = finalize_headers
+
                     if not res._aborted {
                         route.handler(req, res, ctx)
                     }
 
-                    const after_mw: list[MiddlewareEntry] = self._match_after(path, target_sd)
-                    for mw in after_mw {
-                        mw.handler(req, res, ctx)
-                    }
-
-                    if self._session_enabled {
-                        self._save_session(req, res)
-                    }
+                    finalize_headers()
                 }
             }
         } except Exception as e {
             dragon_log_stderr("http: " + method + " " + path + " failed: " + str(e))
+            if res._streaming {
+                res._stream_failed = true
+                res._close = true
+                return res
+            }
             const err: Response = Response()
             err.status = 500
             err.text("Internal Server Error")
@@ -1368,7 +1444,7 @@ class Router {
             }
 
             const raw_str: str = dragon_str_from_bytes(fr.raw)
-            const res: Response = self._build_response(fr.raw, fr.body)
+            const res: Response = self._build_response(fr.raw, fr.body, reader)
 
             served = served + 1
 
@@ -1389,8 +1465,12 @@ class Router {
                 res._close = true
             }
 
-            const response_str: str = res.serialize()
-            reader.send(response_str)
+            if res._streaming {
+                res.end_stream()
+            } else {
+                const response_str: str = res.serialize()
+                reader.send(response_str)
+            }
 
             for task in res._deferred {
                 task(self)

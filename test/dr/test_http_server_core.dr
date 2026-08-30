@@ -259,6 +259,64 @@ class ChunkedResponseTests(TestCase) {
 }
 
 
+class ChunkStreamingTests(TestCase) {
+    """res.chunk() writes through the connection as it is called. Pre-fix every
+    chunk was appended to a list, glued into one string when the handler
+    returned, and sent in a single write, so nothing left the server until the
+    whole response existed in memory."""
+
+    def _run(handler: Callable[[Request, Response, Context], None]) -> MemoryReader {
+        const app: Router = Router()
+        app.GET("/stream", handler)
+        const mr: MemoryReader = MemoryReader([
+            b"GET /stream HTTP/1.1\r\nHost: h\r\n\r\n"])
+        app.serve_connection(mr)
+        return mr
+    }
+
+    def test_each_chunk_is_its_own_write() {
+        def handler(req: Request, res: Response, ctx: Context) -> None {
+            res.chunk("one")
+            res.chunk("two")
+            res.chunk("three")
+        }
+        const mr: MemoryReader = self._run(handler)
+        self.assertTrue(mr.writes >= 4)
+        self.assertIn("transfer-encoding: chunked", mr.sent)
+        self.assertIn("one", mr.sent)
+        self.assertIn("three", mr.sent)
+    }
+
+    def test_stream_is_terminated() {
+        def handler(req: Request, res: Response, ctx: Context) -> None {
+            res.chunk("payload")
+        }
+        const mr: MemoryReader = self._run(handler)
+        self.assertTrue(mr.sent.endswith("0\r\n\r\n"))
+    }
+
+    def test_header_after_first_chunk_is_refused() {
+        def handler(req: Request, res: Response, ctx: Context) -> None {
+            res.chunk("already gone")
+            res.set_header("x-late", "nope")
+        }
+        const mr: MemoryReader = self._run(handler)
+        self.assertNotIn("x-late", mr.sent)
+        self.assertNotIn("0\r\n\r\n", mr.sent)
+    }
+
+    def test_failed_stream_is_not_terminated() {
+        def handler(req: Request, res: Response, ctx: Context) -> None {
+            res.chunk("partial")
+            raise ValueError("exploded")
+        }
+        const mr: MemoryReader = self._run(handler)
+        self.assertIn("partial", mr.sent)
+        self.assertNotIn("0\r\n\r\n", mr.sent)
+    }
+}
+
+
 class CedeSeamTests(TestCase) {
     def test_cede_with_body_raises() -> None {
         const res: Response = Response()
@@ -576,7 +634,8 @@ class JsonBodyTests(TestCase) {
 }
 
 
-main([RequestReaderTests(), KeepAliveLoopTests(), ChunkedResponseTests(), CedeSeamTests(),
+main([RequestReaderTests(), KeepAliveLoopTests(), ChunkedResponseTests(),
+      ChunkStreamingTests(), CedeSeamTests(),
       FileResponseTests(),
       ChunkedDechunkPerfTests(), ChunkedCorrectnessGuardTests(), HandlerRaisesTests(),
       GzipGateTests(), JsonBodyTests()])
