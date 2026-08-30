@@ -215,6 +215,25 @@ class DequeHolder {
     }
 }
 
+def fill_queue(n: int) -> deque[str] {
+    q: deque[str] = deque()
+    i: int = 0
+    while i < n {
+        q.append("job-" + str(i))
+        i = i + 1
+    }
+    return q
+}
+
+def drain_queue(q: deque[str]) -> int {
+    n: int = 0
+    while len(q) > 0 {
+        q.popleft()
+        n = n + 1
+    }
+    return n
+}
+
 class DequeRcTests(TestCase) {
     """deque refcount / teardown.
 
@@ -311,6 +330,24 @@ class DequeRcTests(TestCase) {
         self.assertEqual(len(b), 3)
         self.assertEqual(b.popleft(), "v97")
         self.assertEqual(b.pop(), "v99")
+    }
+
+    def test_deque_crosses_function_boundaries() {
+        q: deque[str] = fill_queue(30)
+        self.assertEqual(len(q), 30)
+        self.assertEqual(drain_queue(q), 30)
+        self.assertEqual(len(q), 0)
+    }
+
+    def test_deque_field_round_trips_through_helpers() {
+        h: DequeHolder = DequeHolder()
+        i: int = 0
+        while i < 40 {
+            h.names.append("h-" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(drain_queue(h.names), 40)
+        self.assertEqual(len(h.names), 0)
     }
 }
 

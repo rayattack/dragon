@@ -563,6 +563,7 @@ llvm::Value* CodeGen::Impl::toBool(llvm::Value* val, Expr* exprNode) {
                 switch (exprNode->type->kind()) {
                     case Type::Kind::Str:   lenFn = "dragon_str_len";   break;
                     case Type::Kind::List:  lenFn = "dragon_list_len";  break;
+                    case Type::Kind::Deque: lenFn = "dragon_deque_len"; break;
                     case Type::Kind::Dict:  lenFn = "dragon_dict_len";  break;
                     case Type::Kind::Set:   lenFn = "dragon_set_len";   break;
                     case Type::Kind::Tuple: lenFn = "dragon_tuple_len"; break;
@@ -962,6 +963,7 @@ std::string CodeGen::Impl::containerReprFn(Expr* e) {
         if (vk == VarKind::Tuple || dynamic_cast<TupleExpr*>(e))
             return "dragon_tuple_to_str";
         if (e->type) {
+            if (e->type->kind() == Type::Kind::Deque) return "dragon_deque_to_str";
             if (e->type->kind() == Type::Kind::Dict)
                 return dictKeyUsesIntEngine(e) ? "dragon_dict_int_to_str" : "dragon_dict_to_str";
             if (e->type->kind() == Type::Kind::Tuple) return "dragon_tuple_to_str";
@@ -979,6 +981,7 @@ std::string CodeGen::Impl::containerReprFnForType(const Type* t) {
                     return "dragon_list_box_to_str";
                 return "dragon_list_to_str";
             }
+            case Type::Kind::Deque: return "dragon_deque_to_str";
             case Type::Kind::Set:   return "dragon_set_to_str";
             case Type::Kind::Tuple: return "dragon_tuple_to_str";
             case Type::Kind::Dict: {
@@ -1096,6 +1099,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
             case Type::Kind::Str:      return VarKind::Str;
             case Type::Kind::Bytes:    return VarKind::List;
             case Type::Kind::List:     return VarKind::List;
+            case Type::Kind::Deque:    return VarKind::Deque;
             case Type::Kind::Dict:     return VarKind::Dict;
             case Type::Kind::Tuple:    return VarKind::Tuple;
             case Type::Kind::Set:      return VarKind::Set;
@@ -1116,6 +1120,7 @@ llvm::Type* CodeGen::Impl::typeKindToLLVM(Type::Kind k) const {
             case Type::Kind::Str:
             case Type::Kind::Bytes:
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Dict:
             case Type::Kind::Tuple:
             case Type::Kind::Set:
@@ -1134,6 +1139,7 @@ bool CodeGen::Impl::isHeapTypeKind(Type::Kind k) {
             case Type::Kind::Str:
             case Type::Kind::Bytes:
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Dict:
             case Type::Kind::Tuple:
             case Type::Kind::Set:

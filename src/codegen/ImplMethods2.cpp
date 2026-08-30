@@ -636,6 +636,7 @@ static std::string typeKindDisplayName(Type::Kind k) {
         case Type::Kind::Str:      return "str";
         case Type::Kind::Bytes:    return "bytes";
         case Type::Kind::List:     return "list";
+        case Type::Kind::Deque:    return "deque";
         case Type::Kind::Dict:     return "dict";
         case Type::Kind::Set:      return "set";
         case Type::Kind::Tuple:    return "tuple";
@@ -1017,6 +1018,7 @@ llvm::Value* CodeGen::Impl::taskResultFromI64(llvm::Value* rawI64, Type* resultT
             case Type::Kind::Str:
             case Type::Kind::Bytes:
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Dict:
             case Type::Kind::Set:
             case Type::Kind::Tuple:

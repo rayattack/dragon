@@ -119,10 +119,15 @@ void TypeChecker::visit(CallExpr& node) {
 
     if (auto* builtinName = dynamic_cast<NameExpr*>(node.callee.get())) {
         const auto& bn = builtinName->name;
+        static const std::set<std::string> sequenceBuiltins = {
+            "list", "tuple", "set", "sorted", "reversed", "min", "max", "sum",
+            "any", "all", "map", "filter", "enumerate", "zip"};
         if ((bn == "str" || bn == "repr") && node.args.size() == 1)
             checkRenderable(node.args[0].get(), bn + "()");
         else if (bn == "print")
             for (auto& arg : node.args) checkRenderable(arg.get(), "print()");
+        else if (sequenceBuiltins.count(bn) && nameIsUnshadowedBuiltin(bn))
+            for (auto& arg : node.args) refuseDequeIteration(arg.get());
     }
 
     {
@@ -910,6 +915,7 @@ void TypeChecker::visit(CallExpr& node) {
         case Type::Kind::Bytes:
         case Type::Kind::None_:
         case Type::Kind::List:
+        case Type::Kind::Deque:
         case Type::Kind::Dict:
         case Type::Kind::Set:
         case Type::Kind::Tuple:
@@ -1033,7 +1039,8 @@ void TypeChecker::visit(AttributeExpr& node) {
     switch (objT->kind()) {
         case Type::Kind::Int:   case Type::Kind::Float: case Type::Kind::Bool:
         case Type::Kind::Str:   case Type::Kind::Bytes:
-        case Type::Kind::List:  case Type::Kind::Dict:  case Type::Kind::Set:
+        case Type::Kind::List:  case Type::Kind::Deque: case Type::Kind::Dict:
+        case Type::Kind::Set:
         case Type::Kind::Tuple: case Type::Kind::Task:  case Type::Kind::Lock:
             error(node.location(), "method '" + node.attribute + "' of '" +
                   objT->toString() + "' is not a value; call it (`." +
@@ -1137,6 +1144,7 @@ static bool builtinMembersAreClosed(const std::shared_ptr<Type>& t) {
         case Type::Kind::Str:
         case Type::Kind::Bytes:
         case Type::Kind::List:
+        case Type::Kind::Deque:
         case Type::Kind::Set:
             return true;
         default:
@@ -1477,6 +1485,21 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
+    if (objType->kind() == Type::Kind::Deque) {
+        auto& dq = static_cast<DequeType&>(*objType);
+        if (node.attribute == "append" || node.attribute == "appendleft") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{dq.elementType},
+                impl_->noneType);
+            return;
+        }
+        if (node.attribute == "pop" || node.attribute == "popleft") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{}, dq.elementType);
+            return;
+        }
+    }
+
     if (objType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*objType);
         if (node.attribute == "insert") {
@@ -1741,6 +1764,13 @@ void TypeChecker::visit(SubscriptExpr& node) {
         }
         return;
     }
+    if (objType->kind() == Type::Kind::Deque) {
+        error(node.location(),
+              "a deque has no index access; take from an end with popleft() "
+              "or pop()");
+        node.type = impl_->unknownType;
+        return;
+    }
     if (objType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*objType);
         if (!isSlice && idxType && dt.keyType &&
@@ -1914,6 +1944,22 @@ static std::shared_ptr<Type> iterableElementType(
     return unknown;
 }
 
+bool TypeChecker::nameIsUnshadowedBuiltin(const std::string& name) const {
+    auto bIt = impl_->builtinIdentity.find(name);
+    if (bIt == impl_->builtinIdentity.end()) return false;
+    auto bound = impl_->lookup(name);
+    return bound && bound.get() == bIt->second;
+}
+
+void TypeChecker::refuseDequeIteration(Expr* iterable) {
+    if (!iterable || !iterable->type ||
+        iterable->type->kind() != Type::Kind::Deque)
+        return;
+    error(iterable->location(),
+          "a deque is not iterable; drain it from an end instead, e.g. "
+          "`while len(q) > 0 { v: T = q.popleft() }`");
+}
+
 void TypeChecker::bindCompLoopVars(
     const std::vector<std::string>& names,
     const std::shared_ptr<Type>& iterType) {
@@ -1938,6 +1984,7 @@ void TypeChecker::checkCompExtraClauses(std::vector<CompClause>& clauses) {
     for (auto& c : clauses) {
         if (c.iterable) impl_->rangeValueOkExprs.insert(c.iterable.get());
         auto cIter = c.iterable ? inferType(c.iterable.get()) : impl_->unknownType;
+        refuseDequeIteration(c.iterable.get());
         bindCompLoopVars(c.varNames, cIter);
         if (c.condition) inferType(c.condition.get());
     }
@@ -1947,6 +1994,7 @@ void TypeChecker::visit(ListCompExpr& node) {
     impl_->pushScope();
     if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
+    refuseDequeIteration(node.iterable.get());
     bindCompLoopVars({node.varName}, iterType);
     if (node.condition) inferType(node.condition.get());
     checkCompExtraClauses(node.extraClauses);
@@ -1963,6 +2011,7 @@ void TypeChecker::visit(DictCompExpr& node) {
     impl_->pushScope();
     if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
+    refuseDequeIteration(node.iterable.get());
     bindCompLoopVars(node.varNames, iterType);
     if (node.condition) inferType(node.condition.get());
     checkCompExtraClauses(node.extraClauses);
@@ -1976,6 +2025,7 @@ void TypeChecker::visit(SetCompExpr& node) {
     impl_->pushScope();
     if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
+    refuseDequeIteration(node.iterable.get());
     bindCompLoopVars({node.varName}, iterType);
     if (node.condition) inferType(node.condition.get());
     checkCompExtraClauses(node.extraClauses);
@@ -1991,6 +2041,7 @@ void TypeChecker::visit(GeneratorExpr& node) {
     impl_->pushScope();
     if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
+    refuseDequeIteration(node.iterable.get());
     bindCompLoopVars({node.varName}, iterType);
     if (node.condition) inferType(node.condition.get());
     checkCompExtraClauses(node.extraClauses);

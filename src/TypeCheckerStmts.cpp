@@ -913,6 +913,8 @@ void TypeChecker::visit(ForStmt& node) {
         }
     }
 
+    refuseDequeIteration(node.iterable.get());
+
     impl_->pushScope();
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         if (iterType->kind() == Type::Kind::List) {

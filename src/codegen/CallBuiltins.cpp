@@ -164,6 +164,7 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
         auto svk = argExpr->type->kind();
         staticContainerVal = (svk == Type::Kind::List || svk == Type::Kind::Dict ||
                               svk == Type::Kind::Tuple || svk == Type::Kind::Set ||
+                              svk == Type::Kind::Deque ||
                               svk == Type::Kind::Instance);
     }
 
@@ -205,7 +206,9 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
                       impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Set) ||
                       impl_->resolveExprVarKind(argExpr) == Impl::VarKind::Set;
     bool isPrintDeque = impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Deque) ||
-                        impl_->isDequeExpr(argExpr);
+                        impl_->isDequeExpr(argExpr) ||
+                        (argExpr->type &&
+                         argExpr->type->kind() == Type::Kind::Deque);
     if (!isPrintDeque && argNameExpr) {
         auto dqIt = impl_->varClassNames.find(argNameExpr->name);
         isPrintDeque = dqIt != impl_->varClassNames.end() &&
@@ -369,7 +372,8 @@ bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
         }
     }
     bool isDeque = impl_->exprNameHasVarKind(a0, Impl::VarKind::Deque) ||
-                   impl_->isDequeExpr(a0);
+                   impl_->isDequeExpr(a0) ||
+                   (a0->type && a0->type->kind() == Type::Kind::Deque);
     bool isBytes = impl_->exprIsBytes(a0);
     std::string lenClassName = impl_->resolveExprClassName(a0);
     a0->accept(*this);
@@ -671,6 +675,7 @@ bool CodeGen::emitTypeBuiltin(CallExpr& node, BuiltinLowering& bl) {
         case Type::Kind::Str:   typeName = "str";   break;
         case Type::Kind::Bytes: typeName = "bytes"; break;
         case Type::Kind::List:  typeName = "list";  break;
+        case Type::Kind::Deque: typeName = "deque"; break;
         case Type::Kind::Dict:  typeName = "dict";  break;
         case Type::Kind::Tuple: typeName = "tuple"; break;
         case Type::Kind::Set:   typeName = "set";   break;

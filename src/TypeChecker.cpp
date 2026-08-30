@@ -166,6 +166,19 @@ bool ListType::isSubtypeOf(const Type& other) const {
     return false;
 }
 
+std::string DequeType::toString() const {
+    return "deque[" + elementType->toString() + "]";
+}
+
+bool DequeType::equals(const Type& other) const {
+    if (other.kind() != Kind::Deque) return false;
+    return elementType->equals(*static_cast<const DequeType&>(other).elementType);
+}
+
+bool DequeType::isSubtypeOf(const Type& other) const {
+    return Type::isSubtypeOf(other);
+}
+
 std::string SetType::toString() const {
     return "set[" + elementType->toString() + "]";
 }
@@ -796,7 +809,7 @@ void TypeChecker::initBuiltinTypes() {
     impl_->typeNames["list"] = std::make_shared<ListType>(impl_->boxedType);
     impl_->typeNames["tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->boxedType});
     impl_->typeNames["set"] = std::make_shared<SetType>(impl_->boxedType);
-    impl_->typeNames["deque"] = std::make_shared<ListType>(impl_->boxedType);
+    impl_->typeNames["deque"] = std::make_shared<DequeType>(impl_->boxedType);
     impl_->typeNames["Task"] = std::make_shared<TaskType>(impl_->boxedType);
 }
 
@@ -1119,7 +1132,7 @@ std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
             return std::make_shared<SetType>(resolveType(generic->typeArgs[0].get()));
         }
         if (baseName->name == "deque" && generic->typeArgs.size() == 1) {
-            return std::make_shared<ListType>(resolveType(generic->typeArgs[0].get()));
+            return std::make_shared<DequeType>(resolveType(generic->typeArgs[0].get()));
         }
         if (baseName->name == "Task" && generic->typeArgs.size() == 1) {
             return std::make_shared<TaskType>(resolveType(generic->typeArgs[0].get()));
@@ -1239,6 +1252,7 @@ bool TypeChecker::typeIsRenderable(const Type* t, std::string& what) {
         case Type::Kind::Bytes:
         case Type::Kind::None_:
         case Type::Kind::List:
+        case Type::Kind::Deque:
         case Type::Kind::Dict:
         case Type::Kind::Set:
         case Type::Kind::Tuple:
@@ -1868,6 +1882,7 @@ void TypeChecker::visit(BinaryExpr& node) {
     if ((op == TokenType::IN || op == TokenType::NOT_IN) && rightType) {
         switch (rightType->kind()) {
         case Type::Kind::List:
+        case Type::Kind::Deque:
         case Type::Kind::Dict:
         case Type::Kind::Set:
         case Type::Kind::Bytes:

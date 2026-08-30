@@ -19,6 +19,7 @@ bool typeIsConcrete(const Type* t, std::unordered_set<const Type*>* seen = nullp
     switch (t->kind()) {
         case Type::Kind::TypeVar: return false;
         case Type::Kind::List:
+        case Type::Kind::Deque:
             return typeIsConcrete(static_cast<const ListType&>(*t).elementType.get(), seen);
         case Type::Kind::Dict: {
             auto& d = static_cast<const DictType&>(*t);
@@ -64,6 +65,7 @@ int typeNestingDepth(const Type* t, int budget = 1024) {
     int d = 0;
     switch (t->kind()) {
         case Type::Kind::List:
+        case Type::Kind::Deque:
             d = typeNestingDepth(static_cast<const ListType&>(*t).elementType.get(),
                                  budget - 1);
             break;
@@ -199,6 +201,10 @@ std::shared_ptr<Type> TypeChecker::substituteType(
             auto& l = static_cast<const ListType&>(*t);
             return std::make_shared<ListType>(substituteType(l.elementType, bindings));
         }
+        case Type::Kind::Deque: {
+            auto& d = static_cast<const DequeType&>(*t);
+            return std::make_shared<DequeType>(substituteType(d.elementType, bindings));
+        }
         case Type::Kind::Dict: {
             auto& d = static_cast<const DictType&>(*t);
             return std::make_shared<DictType>(substituteType(d.keyType, bindings),
@@ -286,6 +292,8 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
         case Type::Kind::TypeVar: return named(static_cast<const TypeVarType&>(*t).name);
         case Type::Kind::List:
             return generic("list", {static_cast<const ListType&>(*t).elementType});
+        case Type::Kind::Deque:
+            return generic("deque", {static_cast<const DequeType&>(*t).elementType});
         case Type::Kind::Dict: {
             auto& d = static_cast<const DictType&>(*t);
             return generic("dict", {d.keyType, d.valueType});
@@ -346,7 +354,9 @@ bool TypeChecker::unifyTypeParam(
         if (armOf(*actual, *it->second)) return true;
         return false;
     }
-    if (declared->kind() == Type::Kind::List && actual->kind() == Type::Kind::List)
+    if (declared->kind() == actual->kind() &&
+        (declared->kind() == Type::Kind::List ||
+         declared->kind() == Type::Kind::Deque))
         return unifyTypeParam(static_cast<const ListType&>(*declared).elementType,
                               static_cast<const ListType&>(*actual).elementType, out);
     if (declared->kind() == Type::Kind::Dict && actual->kind() == Type::Kind::Dict) {

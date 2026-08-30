@@ -893,7 +893,9 @@ void CodeGen::visit(BinaryExpr& node) {
             }
         }
         {
-            bool rhsIsDeque = rhsKind == Impl::VarKind::Deque;
+            bool rhsIsDeque = rhsKind == Impl::VarKind::Deque ||
+                              (node.right && node.right->type &&
+                               node.right->type->kind() == Type::Kind::Deque);
             if (!rhsIsDeque) {
                 if (auto* rn = dynamic_cast<NameExpr*>(node.right.get())) {
                     auto dqIt = impl_->varClassNames.find(rn->name);
@@ -1285,7 +1287,29 @@ void CodeGen::visit(ChainedCompExpr& node) {
                 node.operands[i + 1]->type->kind() == Type::Kind::List) {
                 rhsIsList = true;
             }
-            if (isSet) {
+            bool rhsIsDeque = node.operands[i + 1] &&
+                              impl_->resolveExprVarKind(node.operands[i + 1].get()) ==
+                                  Impl::VarKind::Deque;
+            if (!rhsIsDeque && node.operands[i + 1] && node.operands[i + 1]->type &&
+                node.operands[i + 1]->type->kind() == Type::Kind::Deque) {
+                rhsIsDeque = true;
+            }
+            if (rhsIsDeque && curVal->getType()->isPointerTy()) {
+                llvm::Value* val = prevVal;
+                if (val->getType() == impl_->i1Type)
+                    val = impl_->builder->CreateZExt(val, impl_->i64Type);
+                else if (val->getType() == impl_->f64Type)
+                    val = impl_->builder->CreateBitCast(val, impl_->i64Type);
+                else if (val->getType()->isPointerTy())
+                    val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
+                else if (val->getType() != impl_->i64Type)
+                    val = impl_->builder->CreateZExtOrTrunc(val, impl_->i64Type);
+                auto* containsResult = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_deque_contains"], {curVal, val},
+                    "dequecontains");
+                cmpResult = impl_->builder->CreateICmpNE(
+                    containsResult, llvm::ConstantInt::get(impl_->i64Type, 0), "inbool");
+            } else if (isSet) {
                 llvm::Value* val = prevVal;
                 if (val->getType() == impl_->i1Type)
                     val = impl_->builder->CreateZExt(val, impl_->i64Type);

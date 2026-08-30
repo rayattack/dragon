@@ -808,7 +808,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    if (impl_->isDequeExpr(attr.object.get())) {
+    if (impl_->isDequeExpr(attr.object.get()) ||
+        (attr.object->type &&
+         attr.object->type->kind() == Type::Kind::Deque)) {
         llvm::Value* handle = nullptr;
         if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
             llvm::Value* handlePtr = impl_->lookupVar(objName->name);

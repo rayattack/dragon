@@ -111,6 +111,7 @@ struct OwnershipCheck::Impl {
             case Type::Kind::Str:
             case Type::Kind::Bytes:
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Dict:
             case Type::Kind::Set:
             case Type::Kind::Tuple:
@@ -153,6 +154,7 @@ struct OwnershipCheck::Impl {
         if (!t) return false;
         switch (t->kind()) {
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Dict:
             case Type::Kind::Set:
             case Type::Kind::Instance:

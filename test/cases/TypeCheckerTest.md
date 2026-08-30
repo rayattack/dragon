@@ -2274,3 +2274,201 @@ def main() {
 }
 main()
 ```
+
+#### :deque_assigned_to_list_rejected
+
+A `deque` is a `DragonDeque` at runtime, not a `DragonList`. Letting it flow into a
+`list[int]` slot means every later `len`/index/iterate reads a list header off a
+deque struct and prints whatever lands there.
+
+```dr
+from collections import deque
+
+def main() {
+    d: deque[int] = deque()
+    d.append(1)
+    xs: list[int] = d
+    print(len(xs))
+}
+main()
+```
+
+#### :list_assigned_to_deque_rejected
+
+```dr
+from collections import deque
+
+def main() {
+    xs: list[int] = [1, 2, 3]
+    d: deque[int] = xs
+    print(len(d))
+}
+main()
+```
+
+#### :deque_passed_to_list_param_rejected
+
+```dr
+from collections import deque
+
+def total(xs: list[int]) -> int {
+    return len(xs)
+}
+
+def main() {
+    d: deque[int] = deque([1, 2, 3])
+    print(total(d))
+}
+main()
+```
+
+#### :deque_returned_as_list_rejected
+
+```dr
+from collections import deque
+
+def build() -> list[int] {
+    d: deque[int] = deque([1, 2])
+    return d
+}
+
+def main() {
+    print(len(build()))
+}
+main()
+```
+
+#### :deque_element_type_mismatch_rejected
+
+```dr
+from collections import deque
+
+def main() {
+    d: deque[int] = deque()
+    d.append("nope")
+}
+main()
+```
+
+#### :deque_flows_as_deque_accepted
+
+```dr
+from collections import deque
+
+def drain(q: deque[str]) -> int {
+    n: int = 0
+    while len(q) > 0 {
+        q.popleft()
+        n = n + 1
+    }
+    return n
+}
+
+def build() -> deque[str] {
+    q: deque[str] = deque()
+    q.append("a")
+    q.append("b")
+    return q
+}
+
+def main() {
+    print(drain(build()))
+}
+main()
+```
+
+#### :deque_for_loop_rejected
+
+There is no deque iteration protocol in the runtime, so a `for` over one used to
+walk a `DragonList` header laid over a `DragonDeque` and yield garbage past the
+real end.
+
+```dr
+from collections import deque
+
+def main() {
+    d: deque[int] = deque([1, 2, 3])
+    for x in d {
+        print(x)
+    }
+}
+main()
+```
+
+#### :deque_comprehension_rejected
+
+```dr
+from collections import deque
+
+def main() {
+    d: deque[int] = deque([1, 2, 3])
+    xs: list[int] = [x for x in d]
+    print(len(xs))
+}
+main()
+```
+
+#### :deque_sorted_rejected
+
+```dr
+from collections import deque
+
+def main() {
+    d: deque[int] = deque([3, 1, 2])
+    xs: list[int] = sorted(d)
+    print(len(xs))
+}
+main()
+```
+
+#### :deque_index_rejected
+
+A `DragonDeque` is a circular buffer with a head offset, not a `DragonList`, so
+indexing one used to read the struct's own fields back as an element.
+
+```dr
+from collections import deque
+
+def main() {
+    d: deque[int] = deque([1, 2])
+    x: int = d[0]
+    print(x)
+}
+main()
+```
+
+#### :user_sorted_shadowing_builtin_accepted
+
+A user function may take a `deque` and be named after a sequence builtin. The
+deque-is-not-iterable gate must fire on the builtin, not on the bare name.
+
+```dr
+from collections import deque
+
+def sorted(q: deque[int]) -> int {
+    return len(q)
+}
+
+def main() {
+    d: deque[int] = deque()
+    d.append(1)
+    print(sorted(d))
+}
+main()
+```
+
+#### :user_min_shadowing_builtin_accepted
+
+```dr
+from collections import deque
+
+def min(q: deque[str]) -> str {
+    return q.popleft()
+}
+
+def main() {
+    d: deque[str] = deque(["a", "b"])
+    print(min(d))
+}
+main()
+```

@@ -788,6 +788,7 @@ struct CodeGen::Impl {
             case Type::Kind::Str:      return TAG_STR;
             case Type::Kind::Bytes:    return TAG_BYTES;
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Set:
             case Type::Kind::Tuple:    return TAG_LIST;
             case Type::Kind::Dict:     return TAG_DICT;
@@ -1324,6 +1325,7 @@ struct CodeGen::Impl {
                 return isOwnedStrResult(v) ? VarKind::Str : VarKind::Other;
             case Type::Kind::Bytes:
             case Type::Kind::List:
+            case Type::Kind::Deque:
             case Type::Kind::Dict:
             case Type::Kind::Set:
             case Type::Kind::Tuple:

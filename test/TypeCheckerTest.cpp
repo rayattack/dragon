@@ -1897,3 +1897,21 @@ TEST(TypeCheckerTest, IntcReturnInDragonFnRejected) {
 TEST(TypeCheckerTest, IntcInExternSignatureOk) {
     EXPECT_TRUE(checkOk(code("intc_in_extern_signature_ok")));
 }
+
+TEST(TypeCheckerTest, DequeIsNotAList) {
+    EXPECT_TRUE(checkHasErrors(code("deque_assigned_to_list_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("list_assigned_to_deque_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("deque_passed_to_list_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("deque_returned_as_list_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("deque_element_type_mismatch_rejected")));
+    EXPECT_TRUE(checkOk(code("deque_flows_as_deque_accepted")));
+}
+
+TEST(TypeCheckerTest, DequeIsNotIterable) {
+    EXPECT_TRUE(checkHasErrors(code("deque_for_loop_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("deque_comprehension_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("deque_sorted_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("deque_index_rejected")));
+    EXPECT_TRUE(checkOk(code("user_sorted_shadowing_builtin_accepted")));
+    EXPECT_TRUE(checkOk(code("user_min_shadowing_builtin_accepted")));
+}

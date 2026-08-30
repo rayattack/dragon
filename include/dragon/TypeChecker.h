@@ -19,7 +19,8 @@ public:
         Class, Instance, Boxed, Never, Union, Optional, TypeVar, Unknown,
         Contract,
         Ptr,
-        Module
+        Module,
+        Deque
     };
     virtual ~Type() = default;
     virtual Kind kind() const = 0;
@@ -45,6 +46,15 @@ public:
     std::shared_ptr<Type> elementType;
     explicit ListType(std::shared_ptr<Type> elem) : elementType(std::move(elem)) {}
     Kind kind() const override { return Kind::List; }
+    std::string toString() const override;
+    bool equals(const Type& other) const override;
+    bool isSubtypeOf(const Type& other) const override;
+};
+
+class DequeType : public ListType {
+public:
+    explicit DequeType(std::shared_ptr<Type> elem) : ListType(std::move(elem)) {}
+    Kind kind() const override { return Kind::Deque; }
     std::string toString() const override;
     bool equals(const Type& other) const override;
     bool isSubtypeOf(const Type& other) const override;
@@ -387,6 +397,8 @@ private:
     static std::string listReprMismatchHint(const Type& from, const Type& to);
     bool diagnoseHeterogeneousLiteral(Expr* value,
                                       const std::shared_ptr<Type>& annot);
+    bool nameIsUnshadowedBuiltin(const std::string& name) const;
+    void refuseDequeIteration(Expr* iterable);
     void bindCompLoopVars(const std::vector<std::string>& names,
                           const std::shared_ptr<Type>& iterType);
     void checkCompExtraClauses(std::vector<CompClause>& clauses);

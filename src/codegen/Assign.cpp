@@ -1269,6 +1269,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::inferAssignedVarKind(AssignStmt& node,
             switch (node.value->type->kind()) {
                 case Type::Kind::Bytes:
                 case Type::Kind::List:
+                case Type::Kind::Deque:
                 case Type::Kind::Dict:
                 case Type::Kind::Tuple:
                 case Type::Kind::Set:

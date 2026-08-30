@@ -342,6 +342,7 @@ void CodeGen::visit(ClassDecl& node) {
                                                                 break;
                                                             case Type::Kind::Str:   fieldKind = Impl::VarKind::Str;   break;
                                                             case Type::Kind::List:  fieldKind = Impl::VarKind::List;  break;
+                                                            case Type::Kind::Deque: fieldKind = Impl::VarKind::Deque; break;
                                                             case Type::Kind::Dict:  fieldKind = Impl::VarKind::Dict;  break;
                                                             case Type::Kind::Tuple: fieldKind = Impl::VarKind::Tuple; break;
                                                             case Type::Kind::Set:   fieldKind = Impl::VarKind::Set;   break;
@@ -373,6 +374,12 @@ void CodeGen::visit(ClassDecl& node) {
                                         case Type::Kind::List:
                                             fieldType = impl_->i8PtrType;
                                             fieldKind = Impl::VarKind::List;
+                                            break;
+                                        case Type::Kind::Deque:
+                                            fieldType = impl_->i8PtrType;
+                                            fieldKind = Impl::VarKind::Deque;
+                                            impl_->classFieldClassNameBySym
+                                                [clsSym][attrExpr->attribute] = "__Deque";
                                             break;
                                         case Type::Kind::Dict:
                                             fieldType = impl_->i8PtrType;
