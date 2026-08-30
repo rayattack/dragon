@@ -808,83 +808,88 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
-        auto dqIt = impl_->varClassNames.find(objName->name);
-        if (dqIt != impl_->varClassNames.end() && dqIt->second == "__Deque") {
+    if (impl_->isDequeExpr(attr.object.get())) {
+        llvm::Value* handle = nullptr;
+        if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
             llvm::Value* handlePtr = impl_->lookupVar(objName->name);
             if (!handlePtr) handlePtr = impl_->lookupModuleGlobal(objName->name);
-            if (handlePtr) {
-                auto* handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "deque.handle");
-                if ((method == "append" || method == "appendleft") &&
-                    node.args.size() == 1) {
-                    node.args[0]->accept(*this);
-                    llvm::Value* rawVal = impl_->lastValue;
-                    llvm::Value* val = rawVal;
-                    int64_t elemTag = 0;
-                    if (auto* lt = dynamic_cast<ListType*>(attr.object->type.get())) {
-                        if (lt->elementType) {
-                            int64_t t = impl_->typeKindToTag(lt->elementType->kind());
-                            if (t > 0) elemTag = t;
+            if (handlePtr)
+                handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr,
+                                                    "deque.handle");
+        } else {
+            attr.object->accept(*this);
+            handle = impl_->lastValue;
+        }
+        if (handle) {
+            if ((method == "append" || method == "appendleft") &&
+                node.args.size() == 1) {
+                node.args[0]->accept(*this);
+                llvm::Value* rawVal = impl_->lastValue;
+                llvm::Value* val = rawVal;
+                int64_t elemTag = 0;
+                if (auto* lt = dynamic_cast<ListType*>(attr.object->type.get())) {
+                    if (lt->elementType) {
+                        int64_t t = impl_->typeKindToTag(lt->elementType->kind());
+                        if (t > 0) elemTag = t;
+                    }
+                }
+                if (val->getType() == impl_->i1Type) {
+                    if (elemTag == TAG_INT) elemTag = TAG_BOOL;
+                    val = impl_->builder->CreateZExt(val, impl_->i64Type);
+                } else if (val->getType() == impl_->f64Type) {
+                    if (elemTag == TAG_INT) elemTag = TAG_FLOAT;
+                    val = impl_->builder->CreateBitCast(val, impl_->i64Type);
+                } else if (val->getType()->isPointerTy()) {
+                    if (elemTag == TAG_INT) elemTag = TAG_STR;
+                    val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
+                }
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs[method == "append"
+                                            ? "dragon_deque_append"
+                                            : "dragon_deque_appendleft"],
+                    {handle, val,
+                     llvm::ConstantInt::get(impl_->i64Type, elemTag)});
+                if (rawVal->getType()->isPointerTy()) {
+                    Impl::VarKind pk = elemTag == 1 ? Impl::VarKind::Str
+                                                    : Impl::VarKind::List;
+                    Impl::VarKind dk = impl_->argTempDecrefKind(
+                        node.args[0].get(), pk, rawVal);
+                    if (dk != Impl::VarKind::Other)
+                        impl_->emitDecrefByKind(rawVal, dk);
+                }
+                impl_->lastValue = llvm::ConstantPointerNull::get(
+                    llvm::PointerType::getUnqual(*impl_->context));
+                return true;
+            }
+            if ((method == "popleft" || method == "pop") &&
+                node.args.empty()) {
+                bool heapElem = false;
+                if (auto* lt = dynamic_cast<ListType*>(attr.object->type.get())) {
+                    if (lt->elementType) {
+                        switch (lt->elementType->kind()) {
+                            case Type::Kind::Str:
+                            case Type::Kind::List:
+                            case Type::Kind::Dict:
+                            case Type::Kind::Set:
+                            case Type::Kind::Tuple:
+                            case Type::Kind::Bytes:
+                            case Type::Kind::Instance:
+                                heapElem = true;
+                                break;
+                            default:
+                                break;
                         }
                     }
-                    if (val->getType() == impl_->i1Type) {
-                        if (elemTag == TAG_INT) elemTag = TAG_BOOL;
-                        val = impl_->builder->CreateZExt(val, impl_->i64Type);
-                    } else if (val->getType() == impl_->f64Type) {
-                        if (elemTag == TAG_INT) elemTag = TAG_FLOAT;
-                        val = impl_->builder->CreateBitCast(val, impl_->i64Type);
-                    } else if (val->getType()->isPointerTy()) {
-                        if (elemTag == TAG_INT) elemTag = TAG_STR;
-                        val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
-                    }
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs[method == "append"
-                                                ? "dragon_deque_append"
-                                                : "dragon_deque_appendleft"],
-                        {handle, val,
-                         llvm::ConstantInt::get(impl_->i64Type, elemTag)});
-                    if (rawVal->getType()->isPointerTy()) {
-                        Impl::VarKind pk = elemTag == 1 ? Impl::VarKind::Str
-                                                        : Impl::VarKind::List;
-                        Impl::VarKind dk = impl_->argTempDecrefKind(
-                            node.args[0].get(), pk, rawVal);
-                        if (dk != Impl::VarKind::Other)
-                            impl_->emitDecrefByKind(rawVal, dk);
-                    }
-                    impl_->lastValue = llvm::ConstantPointerNull::get(
-                        llvm::PointerType::getUnqual(*impl_->context));
-                    return true;
                 }
-                if ((method == "popleft" || method == "pop") &&
-                    node.args.empty()) {
-                    bool heapElem = false;
-                    if (auto* lt = dynamic_cast<ListType*>(attr.object->type.get())) {
-                        if (lt->elementType) {
-                            switch (lt->elementType->kind()) {
-                                case Type::Kind::Str:
-                                case Type::Kind::List:
-                                case Type::Kind::Dict:
-                                case Type::Kind::Set:
-                                case Type::Kind::Tuple:
-                                case Type::Kind::Bytes:
-                                case Type::Kind::Instance:
-                                    heapElem = true;
-                                    break;
-                                default:
-                                    break;
-                            }
-                        }
-                    }
-                    const char* fnName =
-                        method == "popleft"
-                            ? (heapElem ? "dragon_deque_popleft_ptr"
-                                        : "dragon_deque_popleft")
-                            : (heapElem ? "dragon_deque_pop_ptr"
-                                        : "dragon_deque_pop");
-                    impl_->lastValue = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs[fnName], {handle}, method);
-                    return true;
-                }
+                const char* fnName =
+                    method == "popleft"
+                        ? (heapElem ? "dragon_deque_popleft_ptr"
+                                    : "dragon_deque_popleft")
+                        : (heapElem ? "dragon_deque_pop_ptr"
+                                    : "dragon_deque_pop");
+                impl_->lastValue = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs[fnName], {handle}, method);
+                return true;
             }
         }
     }

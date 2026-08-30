@@ -206,6 +206,15 @@ class TupleAnyElemTests(TestCase) {
 }
 
 
+class DequeHolder {
+    q: deque[int]
+    names: deque[str]
+    def () {
+        self.q = deque()
+        self.names = deque()
+    }
+}
+
 class DequeRcTests(TestCase) {
     """deque refcount / teardown.
 
@@ -233,6 +242,28 @@ class DequeRcTests(TestCase) {
             i = i + 1
         }
         self.assertEqual(total, 19900)
+    }
+
+    def test_deque_class_field_dispatches_as_deque() {
+        h: DequeHolder = DequeHolder()
+        h.q.append(1)
+        h.q.append(2)
+        h.q.appendleft(0)
+        self.assertEqual(len(h.q), 3)
+        self.assertEqual(h.q.popleft(), 0)
+        self.assertEqual(h.q.pop(), 2)
+        self.assertEqual(len(h.q), 1)
+    }
+
+    def test_deque_str_field_survives_churn() {
+        h: DequeHolder = DequeHolder()
+        i: int = 0
+        while i < 50 {
+            h.names.append("n-" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(len(h.names), 50)
+        self.assertEqual(h.names.popleft(), "n-0")
     }
 
     def test_str_deque_heap_elements() {

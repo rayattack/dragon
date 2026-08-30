@@ -206,10 +206,12 @@ bool CodeGen::Impl::isExprDefinitelyNonNeg(Expr* e) const {
         return false;
     }
 
-bool CodeGen::Impl::isLockExpr(Expr* e) {
+bool CodeGen::Impl::exprHasBuiltinClass(Expr* e, const std::string& sentinel) {
     if (auto* nm = dynamic_cast<NameExpr*>(e)) {
         auto it = varClassNames.find(nm->name);
-        return it != varClassNames.end() && it->second == "__Lock";
+        if (it != varClassNames.end() && it->second == sentinel) return true;
+        const auto* gb = globalClassBindingFor(nm->name);
+        return gb && gb->className == sentinel;
     }
     if (auto* at = dynamic_cast<AttributeExpr*>(e)) {
         std::string owner;
@@ -222,9 +224,17 @@ bool CodeGen::Impl::isLockExpr(Expr* e) {
         auto cit = classFieldClassNameBySym.find(classSym(owner));
         if (cit == classFieldClassNameBySym.end()) return false;
         auto fit = cit->second.find(at->attribute);
-        return fit != cit->second.end() && fit->second == "__Lock";
+        return fit != cit->second.end() && fit->second == sentinel;
     }
     return false;
+}
+
+bool CodeGen::Impl::isLockExpr(Expr* e) {
+    return exprHasBuiltinClass(e, "__Lock");
+}
+
+bool CodeGen::Impl::isDequeExpr(Expr* e) {
+    return exprHasBuiltinClass(e, "__Deque");
 }
 
 std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {

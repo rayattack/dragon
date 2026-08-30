@@ -204,7 +204,8 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
     bool isPrintSet = dynamic_cast<SetExpr*>(argExpr) != nullptr ||
                       impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Set) ||
                       impl_->resolveExprVarKind(argExpr) == Impl::VarKind::Set;
-    bool isPrintDeque = impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Deque);
+    bool isPrintDeque = impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Deque) ||
+                        impl_->isDequeExpr(argExpr);
     if (!isPrintDeque && argNameExpr) {
         auto dqIt = impl_->varClassNames.find(argNameExpr->name);
         isPrintDeque = dqIt != impl_->varClassNames.end() &&
@@ -367,7 +368,8 @@ bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
             default: break;
         }
     }
-    bool isDeque = impl_->exprNameHasVarKind(a0, Impl::VarKind::Deque);
+    bool isDeque = impl_->exprNameHasVarKind(a0, Impl::VarKind::Deque) ||
+                   impl_->isDequeExpr(a0);
     bool isBytes = impl_->exprIsBytes(a0);
     std::string lenClassName = impl_->resolveExprClassName(a0);
     a0->accept(*this);

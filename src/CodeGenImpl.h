@@ -646,7 +646,9 @@ struct CodeGen::Impl {
         return false;
     }
 
+    bool exprHasBuiltinClass(Expr* e, const std::string& sentinel);
     bool isLockExpr(Expr* e);
+    bool isDequeExpr(Expr* e);
     llvm::Value* emitExternAwareCall(llvm::Function* func,
                                      const std::vector<llvm::Value*>& args,
                                      const std::string& name);

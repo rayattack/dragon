@@ -110,6 +110,8 @@ void CodeGen::visit(ClassDecl& node) {
         if (!ann || ann->isStatic) continue;
         auto* tgt = dynamic_cast<NameExpr*>(ann->target.get());
         if (!tgt) continue;
+        if (Impl::annAssignIsDeque(ann))
+            impl_->classFieldClassNameBySym[clsSym][tgt->name] = "__Deque";
         auto* generic = dynamic_cast<GenericTypeExpr*>(ann->annotation.get());
         if (!generic || generic->typeArgs.empty()) continue;
         auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get());
@@ -444,6 +446,12 @@ void CodeGen::visit(ClassDecl& node) {
                                         impl_->classFieldClassNameBySym
                                             [clsSym][attrExpr->attribute] = "__Lock";
                                     }
+                                }
+                                if (Impl::annAssignIsDeque(annAssign)) {
+                                    fieldType = impl_->i8PtrType;
+                                    fieldKind = Impl::VarKind::Deque;
+                                    impl_->classFieldClassNameBySym
+                                        [clsSym][attrExpr->attribute] = "__Deque";
                                 }
                                 if (auto* generic = dynamic_cast<GenericTypeExpr*>(annAssign->annotation.get())) {
                                     if (auto* baseN = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {

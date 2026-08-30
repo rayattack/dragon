@@ -488,6 +488,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
             if (named->name == "set") return VarKind::Set;
             if (named->name == "Any" || named->name == "object") return VarKind::Union;
             if (named->name == "Lock") return VarKind::Other;
+            if (named->name == "deque") return VarKind::Deque;
             if (typedDictClassesBySym.count(classSym(named->name)))
                 return VarKind::Dict;
             if (!resolveAnnotationClassName(named->name).empty())
@@ -498,6 +499,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
         }
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
             if (auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
+                if (base->name == "deque")
+                    return VarKind::Deque;
                 if (base->name == "list")
                     return VarKind::List;
                 if (base->name == "dict")
@@ -895,6 +898,7 @@ llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
             if (named->name == "set") return i8PtrType;
             if (named->name == "ptr") return i8PtrType;
             if (named->name == "Task") return i8PtrType;
+            if (named->name == "deque") return i8PtrType;
             if (named->name == "Lock") return i8PtrType;
             if (typedDictClassesBySym.count(classSym(named->name))) return i8PtrType;
             if (classStructTypesBySym.count(classSym(named->name)) || classNames.count(named->name)) return i8PtrType;
