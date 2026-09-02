@@ -331,6 +331,12 @@ void CodeGen::visit(AttributeExpr& node) {
                 }
             }
         }
+        if (staticTypedDictClass.empty() && node.object->type &&
+            node.object->type->kind() == Type::Kind::Instance) {
+            auto* inst = dynamic_cast<InstanceType*>(node.object->type.get());
+            if (inst && inst->classType && inst->classType->isTypedDict)
+                staticTypedDictClass = inst->classType->name;
+        }
         if (isDictObj) {
             node.object->accept(*this);
             llvm::Value* dict = impl_->lastValue;
@@ -755,19 +761,27 @@ void CodeGen::visit(SubscriptExpr& node) {
         if (checkTag < 0 && node.narrowTo)
             checkTag = Impl::typeKindToTag(node.narrowTo->kind());
         if (checkTag < 0) {
+            std::string tdClass;
             if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
                 auto tdIt = impl_->varTypedDictClass.find(objName->name);
-                if (tdIt != impl_->varTypedDictClass.end()) {
-                    if (auto* strKey = dynamic_cast<StringLiteral*>(node.index.get())) {
-                        std::string fieldName = strKey->value;
-                        if (fieldName.size() >= 2 && (fieldName.front() == '"' || fieldName.front() == '\''))
-                            fieldName = fieldName.substr(1, fieldName.size() - 2);
-                        auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(tdIt->second));
-                        if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
-                            auto fIt = schemaIt->second.find(fieldName);
-                            if (fIt != schemaIt->second.end())
-                                checkTag = Impl::typeKindToTag(fIt->second);
-                        }
+                if (tdIt != impl_->varTypedDictClass.end()) tdClass = tdIt->second;
+            }
+            if (tdClass.empty() && node.object->type &&
+                node.object->type->kind() == Type::Kind::Instance) {
+                auto* inst = dynamic_cast<InstanceType*>(node.object->type.get());
+                if (inst && inst->classType && inst->classType->isTypedDict)
+                    tdClass = inst->classType->name;
+            }
+            if (!tdClass.empty()) {
+                if (auto* strKey = dynamic_cast<StringLiteral*>(node.index.get())) {
+                    std::string fieldName = strKey->value;
+                    if (fieldName.size() >= 2 && (fieldName.front() == '"' || fieldName.front() == '\''))
+                        fieldName = fieldName.substr(1, fieldName.size() - 2);
+                    auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(tdClass));
+                    if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
+                        auto fIt = schemaIt->second.find(fieldName);
+                        if (fIt != schemaIt->second.end())
+                            checkTag = Impl::typeKindToTag(fIt->second);
                     }
                 }
             }

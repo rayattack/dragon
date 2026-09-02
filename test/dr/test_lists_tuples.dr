@@ -28,6 +28,38 @@ class Point(TypedDict) {
 }
 
 
+class Bag(TypedDict) {
+    label: str
+    items: list[int]
+}
+
+
+def _point_payload(p: Point) -> dict[str, Boxed] {
+    return {"name": p.name, "id": p.id}
+}
+
+
+def _point_name_dot(p: Point) -> str {
+    return p.name
+}
+
+
+def _point_name_index(p: Point) -> dict[str, Boxed] {
+    return {"name": p["name"]}
+}
+
+
+def _bag_size(b: Bag) -> int {
+    return len(b.items)
+}
+
+
+def _maybe_bag(flag: bool) -> Bag | None {
+    if flag { return Bag({label: "b", items: [1, 2, 3]}) }
+    return none
+}
+
+
 class ListComparisonTests(TestCase) {
     def test_basic_ordering() {
         a: list[int] = [1, 2]
@@ -398,6 +430,36 @@ class CollectionAccessTests(TestCase) {
         ds: list[dict[str, int]] = [{"x": 10}, {"x": 20}]
         self.assertEqual(ds[0].x, 10)
         self.assertEqual(ds[1].x, 20)
+    }
+
+    def test_typeddict_param_field_into_boxed_dict() {
+        p: Point = Point({id: 1, name: "a", score: 2.5})
+        payload: dict[str, Boxed] = _point_payload(p)
+        self.assertEqual(str(payload["name"]), "a")
+        self.assertEqual(str(payload["id"]), "1")
+    }
+
+    def test_typeddict_param_field_dot_and_index() {
+        p: Point = Point({id: 1, name: "a", score: 2.5})
+        self.assertEqual(_point_name_dot(p), "a")
+        self.assertEqual(str(_point_name_index(p)["name"]), "a")
+    }
+
+    def test_typeddict_param_container_field_len() {
+        b: Bag = Bag({label: "b", items: [1, 2, 3]})
+        self.assertEqual(_bag_size(b), 3)
+    }
+
+    def test_narrowed_typeddict_container_field_len() {
+        mb: Bag | None = _maybe_bag(true)
+        size: int = 0
+        label: str = ""
+        if mb is not none {
+            size = len(mb.items)
+            label = mb.label
+        }
+        self.assertEqual(size, 3)
+        self.assertEqual(label, "b")
     }
 }
 
