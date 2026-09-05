@@ -60,6 +60,44 @@ static std::vector<std::string> namedKwArgs(const CallExpr& node) {
     return names;
 }
 
+void CodeGen::emitSuperCtorCall(CallExpr& node) {
+    impl_->lastValue = llvm::ConstantPointerNull::get(
+        llvm::PointerType::getUnqual(*impl_->context));
+    if (impl_->currentClassName.empty()) {
+        impl_->addError("super(...) is only valid inside a method of a "
+            "class with a parent", node.location());
+        return;
+    }
+    auto parentIt = impl_->classParentNamesBySym.find(
+        impl_->classSym(impl_->currentClassName));
+    if (parentIt == impl_->classParentNamesBySym.end()) {
+        impl_->addError("super(...): class '" + impl_->currentClassName +
+            "' has no parent class to delegate to", node.location());
+        return;
+    }
+    const std::string& parentName = parentIt->second;
+    const std::string parentSymPrefix = impl_->classSymPrefix(parentName);
+    auto* initFunc = impl_->module->getFunction(parentSymPrefix + "___init__");
+    if (!initFunc && impl_->isBuiltinExcName(parentName)) {
+        for (size_t i = 0; i < node.args.size(); ++i) node.args[i]->accept(*this);
+        impl_->lastValue = llvm::ConstantPointerNull::get(
+            llvm::PointerType::getUnqual(*impl_->context));
+        return;
+    }
+    if (!initFunc) {
+        impl_->addError("super(...): no constructor found for parent class '" +
+            parentName + "'", node.location());
+        return;
+    }
+    llvm::Value* selfVal = &*impl_->currentFunction->arg_begin();
+    std::vector<llvm::Value*> args;
+    if (impl_->emitParentCtorArgs(node, parentName, parentSymPrefix,
+                                  initFunc, selfVal, args, *this))
+        impl_->builder->CreateCall(initFunc, args);
+    impl_->lastValue = llvm::ConstantPointerNull::get(
+        llvm::PointerType::getUnqual(*impl_->context));
+}
+
 void CodeGen::visit(CallExpr& node) {
     if (callHasSpread(node)) {
         bool isTypedDict = false;
@@ -112,53 +150,7 @@ void CodeGen::visit(CallExpr& node) {
         const std::string& name = callee->name;
 
         if (name == "super" && impl_->isDragonFile) {
-            if (impl_->currentClassName.empty()) {
-                impl_->addError("super(...) is only valid inside a method of a "
-                    "class with a parent", node.location());
-                impl_->lastValue = llvm::ConstantPointerNull::get(
-                    llvm::PointerType::getUnqual(*impl_->context));
-                return;
-            }
-            auto parentIt = impl_->classParentNamesBySym.find(
-                impl_->classSym(impl_->currentClassName));
-            if (parentIt == impl_->classParentNamesBySym.end()) {
-                impl_->addError("super(...): class '" + impl_->currentClassName +
-                    "' has no parent class to delegate to", node.location());
-                impl_->lastValue = llvm::ConstantPointerNull::get(
-                    llvm::PointerType::getUnqual(*impl_->context));
-                return;
-            }
-            const std::string& parentName = parentIt->second;
-            std::string initName = impl_->classSymPrefix(parentName) + "___init__";
-            auto* initFunc = impl_->module->getFunction(initName);
-            if (!initFunc) {
-                if (impl_->isBuiltinExcName(parentName)) {
-                    for (size_t i = 0; i < node.args.size(); ++i) {
-                        node.args[i]->accept(*this);
-                    }
-                    impl_->lastValue = llvm::ConstantPointerNull::get(
-                        llvm::PointerType::getUnqual(*impl_->context));
-                    return;
-                }
-                impl_->addError("super(...): no constructor found for parent class '" +
-                    parentName + "'", node.location());
-                impl_->lastValue = llvm::ConstantPointerNull::get(
-                    llvm::PointerType::getUnqual(*impl_->context));
-                return;
-            }
-            llvm::Value* selfVal = &*impl_->currentFunction->arg_begin();
-            std::vector<llvm::Value*> args = {selfVal};
-            auto initFuncType = initFunc->getFunctionType();
-            for (size_t i = 0; i < node.args.size(); ++i) {
-                node.args[i]->accept(*this);
-                llvm::Value* arg = impl_->lastValue;
-                if (i + 1 < initFuncType->getNumParams())
-                    arg = impl_->coerceArg(arg, initFuncType->getParamType(i + 1));
-                args.push_back(arg);
-            }
-            impl_->builder->CreateCall(initFunc, args);
-            impl_->lastValue = llvm::ConstantPointerNull::get(
-                llvm::PointerType::getUnqual(*impl_->context));
+            emitSuperCtorCall(node);
             return;
         }
 

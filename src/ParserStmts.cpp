@@ -476,35 +476,52 @@ std::unique_ptr<Stmt> Parser::tryStatement() {
     auto stmt = std::make_unique<TryStmt>();
     stmt->tryBody = parseBlock();
 
+    auto qualifiedName = [&]() {
+        SourceLocation loc = peek().location();
+        std::string name = std::string(advance().lexeme());
+        while (check(TokenType::DOT) && peekNext().type() == TokenType::IDENTIFIER) {
+            advance();
+            advance();
+            name += ".";
+            name += std::string(previous().lexeme());
+        }
+        return std::make_pair(name, loc);
+    };
+    auto namedType = [](const std::pair<std::string, SourceLocation>& n) {
+        auto t = std::make_unique<NamedTypeExpr>();
+        t->name = n.first;
+        t->setLocation(n.second);
+        return t;
+    };
+
     while (match(TokenType::EXCEPT) || match(TokenType::CATCH)) {
         TryStmt::ExceptHandler handler;
         if (match(TokenType::STAR)) {
             handler.isStar = true;
         }
-        if (match(TokenType::LEFT_PAREN)) {
-            if (check(TokenType::IDENTIFIER)) {
-                std::string first = std::string(advance().lexeme());
-                if (match(TokenType::COLON)) {
-                    handler.name = first;
-                    handler.type = parseType();
-                } else {
-                    auto t = std::make_unique<NamedTypeExpr>();
-                    t->name = first;
-                    handler.type = std::move(t);
-                    while (match(TokenType::COMMA)) {
-                        if (check(TokenType::IDENTIFIER))
-                            handler.altTypeNames.push_back(std::string(advance().lexeme()));
-                    }
-                }
+        auto parseGroupedTypes = [&]() {
+            auto first = qualifiedName();
+            if (first.first.find('.') == std::string::npos &&
+                match(TokenType::COLON)) {
+                handler.name = first.first;
+                handler.type = parseType();
+                return;
             }
+            handler.type = namedType(first);
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::IDENTIFIER))
+                    handler.altTypeNames.push_back(qualifiedName().first);
+            }
+        };
+
+        if (match(TokenType::LEFT_PAREN)) {
+            if (check(TokenType::IDENTIFIER)) parseGroupedTypes();
             consume(TokenType::RIGHT_PAREN, "Expect ')'");
             if (match(TokenType::AS)) {
                 handler.name = std::string(consume(TokenType::IDENTIFIER, "Expect name").lexeme());
             }
         } else if (check(TokenType::IDENTIFIER)) {
-            auto t = std::make_unique<NamedTypeExpr>();
-            t->name = std::string(advance().lexeme());
-            handler.type = std::move(t);
+            handler.type = namedType(qualifiedName());
             if (match(TokenType::AS)) {
                 handler.name = std::string(consume(TokenType::IDENTIFIER, "Expect name").lexeme());
             }

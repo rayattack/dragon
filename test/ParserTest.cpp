@@ -1816,6 +1816,44 @@ TEST(ParserTest, ExceptStarParsed) {
     EXPECT_TRUE(tryStmt->handlers[0].isStar);
 }
 
+TEST(ParserTest, DottedExceptType) {
+    auto module = parse(code("dotted_except_type"));
+    ASSERT_NE(module, nullptr);
+    auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
+    ASSERT_NE(tryStmt, nullptr);
+    ASSERT_EQ(tryStmt->handlers.size(), 1u);
+    auto* named = dynamic_cast<NamedTypeExpr*>(tryStmt->handlers[0].type.get());
+    ASSERT_NE(named, nullptr);
+    EXPECT_EQ(named->name, "mod.MyErr");
+    EXPECT_EQ(tryStmt->handlers[0].name, "e");
+}
+
+TEST(ParserTest, DottedExceptTypeGroup) {
+    auto module = parse(code("dotted_except_type_group"));
+    ASSERT_NE(module, nullptr);
+    auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
+    ASSERT_NE(tryStmt, nullptr);
+    ASSERT_EQ(tryStmt->handlers.size(), 1u);
+    auto* named = dynamic_cast<NamedTypeExpr*>(tryStmt->handlers[0].type.get());
+    ASSERT_NE(named, nullptr);
+    EXPECT_EQ(named->name, "KeyError");
+    ASSERT_EQ(tryStmt->handlers[0].altTypeNames.size(), 1u);
+    EXPECT_EQ(tryStmt->handlers[0].altTypeNames[0], "pkg.mod.MyErr");
+    EXPECT_EQ(tryStmt->handlers[0].name, "e");
+}
+
+TEST(ParserTest, PyDottedExceptType) {
+    auto module = parse(code("py_dotted_except_type"), false);
+    ASSERT_NE(module, nullptr);
+    auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
+    ASSERT_NE(tryStmt, nullptr);
+    ASSERT_EQ(tryStmt->handlers.size(), 1u);
+    auto* named = dynamic_cast<NamedTypeExpr*>(tryStmt->handlers[0].type.get());
+    ASSERT_NE(named, nullptr);
+    EXPECT_EQ(named->name, "mod.MyErr");
+    EXPECT_EQ(tryStmt->handlers[0].name, "e");
+}
+
 TEST(ParserTest, ExceptNormalNotStar) {
     auto module = parse("try {\n  pass\n} except ValueError {\n  pass\n}");
     ASSERT_NE(module, nullptr);

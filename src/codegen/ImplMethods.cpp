@@ -510,6 +510,22 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
         return VarKind::Other;
     }
 
+int CodeGen::Impl::dunderVtableIndex(const std::string& className,
+                        const std::string& dunder) const {
+        if (!methodIsOverridden(className, dunder)) return -1;
+        const std::string sym = classSym(className);
+        auto kindIt = classMethodKindsBySym.find(sym);
+        if (kindIt != classMethodKindsBySym.end()) {
+            auto mk = kindIt->second.find(dunder);
+            if (mk != kindIt->second.end() && mk->second != 0) return -1;
+        }
+        auto idxIt = classMethodVtableIndicesBySym.find(sym);
+        if (idxIt == classMethodVtableIndicesBySym.end()) return -1;
+        auto mIt = idxIt->second.find(dunder);
+        if (mIt == idxIt->second.end()) return -1;
+        return (int)mIt->second;
+    }
+
 llvm::Value* CodeGen::Impl::callDunder(const std::string& className, const std::string& dunder,
                         llvm::Value* self, const std::vector<llvm::Value*>& extraArgs) {
         std::string defClass = findDunderClass(className, dunder);
@@ -517,20 +533,34 @@ llvm::Value* CodeGen::Impl::callDunder(const std::string& className, const std::
         std::string funcName = defClass + "_" + dunder;
         auto* func = module->getFunction(funcName);
         if (!func) return nullptr;
-        return emitDunderCall(func, dunder, self, extraArgs);
+        return emitDunderCall(func, dunder, self, extraArgs,
+                              dunderVtableIndex(className, dunder));
     }
 
 llvm::Value* CodeGen::Impl::emitDunderCall(llvm::Function* func, const std::string& dunder,
-                        llvm::Value* self, const std::vector<llvm::Value*>& extraArgs) {
+                        llvm::Value* self, const std::vector<llvm::Value*>& extraArgs,
+                        int vtableIndex) {
         std::vector<llvm::Value*> args = {self};
         args.insert(args.end(), extraArgs.begin(), extraArgs.end());
         auto* fty = func->getFunctionType();
         for (unsigned p = static_cast<unsigned>(args.size());
              p < fty->getNumParams(); ++p)
             args.push_back(llvm::Constant::getNullValue(fty->getParamType(p)));
-        if (func->getReturnType()->isVoidTy())
-            return builder->CreateCall(func, args);
-        return builder->CreateCall(func, args, dunder);
+        llvm::Value* callee = func;
+        if (vtableIndex >= 0 && self && self->getType()->isPointerTy()) {
+            auto* headerTy = llvm::StructType::get(*context,
+                {i64Type, i64Type, i8PtrType});
+            auto* vtSlot = builder->CreateStructGEP(headerTy, self, 2, "vt_slot");
+            auto* vtPtr = builder->CreateLoad(i8PtrType, vtSlot, "vtable");
+            auto* vtArrTy = llvm::ArrayType::get(i8PtrType, 0);
+            auto* mSlot = builder->CreateGEP(vtArrTy, vtPtr,
+                {builder->getInt64(0), builder->getInt64((int64_t)vtableIndex)},
+                "dunder_slot");
+            callee = builder->CreateLoad(i8PtrType, mSlot, "dunder_ptr");
+        }
+        if (fty->getReturnType()->isVoidTy())
+            return builder->CreateCall(fty, callee, args);
+        return builder->CreateCall(fty, callee, args, dunder);
     }
 
 llvm::Value* CodeGen::Impl::toBool(llvm::Value* val, Expr* exprNode) {
@@ -1048,8 +1078,10 @@ CodeGen::Impl::RenderedStr CodeGen::Impl::emitRenderToStr(
                 return out;
             }
             if (userExcCodesBySym.count(classSym(cls)) > 0) {
-                auto* msg = builder->CreateCall(
-                    runtimeFuncs["dragon_exc_get_msg"], {}, "exc.msg");
+                llvm::Value* field = emitExcMessageField(cls, val, false);
+                llvm::Value* msg = field ? field
+                    : builder->CreateCall(runtimeFuncs["dragon_exc_get_msg"],
+                                          {}, "exc.msg");
                 out.value = builder->CreateCall(
                     runtimeFuncs["dragon_string_dup"], {msg}, "exc.msg.dup");
                 out.owned = true;

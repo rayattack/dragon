@@ -278,7 +278,8 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_print_str_raw"], {reprResult});
         } else if (impl_->userExcCodesBySym.count(impl_->classSym(printClassName)) > 0) {
-            auto* msg = impl_->builder->CreateCall(
+            auto* field = impl_->emitExcMessageField(printClassName, arg, false);
+            auto* msg = field ? field : impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_get_msg"], {}, "exc.msg");
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_print_str_raw"], {msg});

@@ -4,10 +4,12 @@ class Animal {
     def(n: str) { self.nm = n }
     def speak() -> str { return "..." }
     def name() -> str { return self.nm }
+    def __str__() -> str { return "Animal(" + self.nm + ")" }
 }
 class Dog(Animal) {
     def(n: str) { self.nm = n }
     def speak() -> str { return "woof" }
+    def __str__() -> str { return "Dog(" + self.nm + ")" }
 }
 class Puppy(Dog) {
     def(n: str) { self.nm = n }
@@ -254,6 +256,26 @@ class VirtualDispatchTests(TestCase) {
         self.assertEqual(out[0], "woof")
         self.assertEqual(out[1], "yip")
         self.assertEqual(out[2], "...")
+    }
+
+    def test_str_of_base_typed_var_dispatches_to_subclass() {
+        a: Animal = make("dog")
+        self.assertEqual(str(a), "Dog(rex)")
+    }
+
+    def test_fstring_of_base_typed_var_dispatches_to_subclass() {
+        a: Animal = make("puppy")
+        self.assertEqual(f"{a}", "Dog(bit)")
+    }
+
+    def test_str_of_leaf_exact_type_devirtualized() {
+        d: Dog = Dog("fido")
+        self.assertEqual(str(d), "Dog(fido)")
+    }
+
+    def test_str_of_base_instance_uses_base_str() {
+        a: Animal = make("other")
+        self.assertEqual(str(a), "Animal(a)")
     }
 }
 

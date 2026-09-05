@@ -1765,6 +1765,21 @@ TEST(TypeCheckerTest, ExceptionSubclassMessageConstructionOk) {
     EXPECT_TRUE(checkOk(code("exception_subclass_message_construction_ok")));
 }
 
+TEST(TypeCheckerTest, ExceptionSubclassRejectsNonMessageArg) {
+    EXPECT_TRUE(checkHasErrors(code("exception_subclass_rejects_non_message_arg")));
+}
+
+TEST(TypeCheckerTest, ExceptionSubclassRejectsExtraArgs) {
+    EXPECT_TRUE(checkHasErrors(code("exception_subclass_rejects_extra_args")));
+}
+
+TEST(TypeCheckerTest, ExceptionMessageFieldMustBeStr) {
+    EXPECT_TRUE(checkHasErrors(code("exception_message_field_must_be_str")));
+    EXPECT_TRUE(checkHasErrors(
+        code("exception_message_field_must_be_str_when_inferred")));
+    EXPECT_TRUE(checkOk(code("exception_message_field_str_is_ok")));
+}
+
 TEST(TypeCheckerTest, NoConstructorSubclassZeroArgsOk) {
     EXPECT_TRUE(checkOk(code("no_ctor_subclass_zero_args_ok")));
 }

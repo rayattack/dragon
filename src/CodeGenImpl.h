@@ -720,7 +720,11 @@ struct CodeGen::Impl {
 
     llvm::Value* emitDunderCall(llvm::Function* func, const std::string& dunder,
                                 llvm::Value* self,
-                                const std::vector<llvm::Value*>& extraArgs = {});
+                                const std::vector<llvm::Value*>& extraArgs = {},
+                                int vtableIndex = -1);
+
+    int dunderVtableIndex(const std::string& className,
+                          const std::string& dunder) const;
 
     llvm::Value* toBool(llvm::Value* val, Expr* exprNode = nullptr);
 
@@ -2217,6 +2221,27 @@ struct CodeGen::Impl {
     void synthesizeDataclassMethods(ClassDecl& node);
 
     void synthesizeEnumMethods(ClassDecl& node);
+
+    static constexpr const char* kExcMessageField = "message";
+    static constexpr int kClassChainGuard = 256;
+
+    std::unordered_set<std::string> excMessageCtorBySym;
+
+    void synthesizeExceptionCtor(ClassDecl& node, const std::string& csym,
+                                 const std::string& parentSym);
+
+    bool excMessageFieldCoversSubclasses(const std::string& sym) const;
+
+    bool emitParentCtorArgs(CallExpr& node, const std::string& parentName,
+                            const std::string& parentSymPrefix,
+                            llvm::Function* initFunc, llvm::Value* selfVal,
+                            std::vector<llvm::Value*>& args, CodeGen& cg);
+
+    llvm::Value* emitExcMessageField(const std::string& className,
+                                     llvm::Value* inst, bool exactType);
+
+    llvm::Value* emitExcMessage(const std::string& className,
+                                llvm::Value* inst, bool& owned);
 };
 
 }

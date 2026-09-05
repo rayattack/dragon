@@ -985,34 +985,43 @@ void TypeChecker::visit(ForStmt& node) {
 }
 
 void TypeChecker::visit(TryStmt& node) {
+    auto handlerBinding = [&](NamedTypeExpr* named) -> std::shared_ptr<Type> {
+        if (named->name.find('.') != std::string::npos) {
+            auto qualified = resolveType(named);
+            if (qualified && qualified->kind() == Type::Kind::Instance)
+                return qualified;
+            return nullptr;
+        }
+        auto it = impl_->typeNames.find(named->name);
+        if (it != impl_->typeNames.end() &&
+            it->second->kind() == Type::Kind::Instance)
+            return it->second;
+        auto looked = impl_->lookup(named->name);
+        if (looked && looked->kind() == Type::Kind::Class)
+            return std::make_shared<InstanceType>(
+                std::static_pointer_cast<ClassType>(looked));
+        return nullptr;
+    };
+    auto opaqueExcBinding = [](const std::string& name) {
+        static std::unordered_map<std::string,
+                                  std::shared_ptr<ClassType>> cache;
+        auto& cls = cache[name];
+        if (!cls) cls = std::make_shared<ClassType>(name);
+        return std::make_shared<InstanceType>(cls);
+    };
+
     impl_->pushScope();
     for (auto& s : node.tryBody) s->accept(*this);
     impl_->popScope();
     for (auto& handler : node.handlers) {
         impl_->pushScope();
-        if (!handler.name.empty() && handler.type) {
-            if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
-                std::shared_ptr<Type> bind;
-                auto it = impl_->typeNames.find(named->name);
-                if (it != impl_->typeNames.end() &&
-                    it->second->kind() == Type::Kind::Instance) {
-                    bind = it->second;
-                } else {
-                    auto looked = impl_->lookup(named->name);
-                    if (looked && looked->kind() == Type::Kind::Class) {
-                        bind = std::make_shared<InstanceType>(
-                            std::static_pointer_cast<ClassType>(looked));
-                    }
-                }
-                if (!bind) {
-                    static std::unordered_map<std::string,
-                                              std::shared_ptr<ClassType>> cache;
-                    auto& cls = cache[named->name];
-                    if (!cls) cls = std::make_shared<ClassType>(named->name);
-                    bind = std::make_shared<InstanceType>(cls);
-                }
-                impl_->define(handler.name, bind);
-            }
+        auto* named = handler.name.empty() || !handler.type
+                          ? nullptr
+                          : dynamic_cast<NamedTypeExpr*>(handler.type.get());
+        if (named) {
+            auto bind = handlerBinding(named);
+            if (!bind) bind = opaqueExcBinding(named->name);
+            impl_->define(handler.name, bind);
         }
         for (auto& s : handler.body) s->accept(*this);
         impl_->popScope();
@@ -1871,6 +1880,19 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 node.conformedContracts.push_back(a);
         }
     }
+
+    static const std::string kExcMessageField = "message";
+    auto messageField = classType->fields.find(kExcMessageField);
+    const bool messageIsText =
+        messageField == classType->fields.end() || !messageField->second ||
+        messageField->second->kind() == Type::Kind::Str ||
+        messageField->second->kind() == Type::Kind::Unknown;
+    if (!messageIsText && derivesFromBuiltinException(classType.get()))
+        error(node.location(),
+              "field '" + kExcMessageField + "' on exception class '" +
+              node.name + "' must be 'str': it holds the message every "
+              "exception subclass is constructed and rendered with. Give this "
+              "field another name");
 
     impl_->currentClass = prevClass;
     impl_->popScope();

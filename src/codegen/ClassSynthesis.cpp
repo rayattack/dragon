@@ -463,4 +463,192 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     enumMemberNamesBySym[enSym] = std::move(names);
 }
 
+static bool targetsSelfField(Expr* target, const std::string& field) {
+    auto* attr = dynamic_cast<AttributeExpr*>(target);
+    if (!attr || attr->attribute != field) return false;
+    auto* obj = dynamic_cast<NameExpr*>(attr->object.get());
+    return obj && obj->name == "self";
+}
+
+static bool ctorAssignsExcMessage(FunctionDecl* init, const std::string& field) {
+    for (auto& stmt : init->body) {
+        if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get()))
+            if (ann->value && targetsSelfField(ann->target.get(), field))
+                return true;
+        auto* assign = dynamic_cast<AssignStmt*>(stmt.get());
+        if (!assign) continue;
+        for (auto& t : assign->targets)
+            if (targetsSelfField(t.get(), field)) return true;
+    }
+    return false;
+}
+
+static bool callIsSuperCtor(Expr* expr) {
+    auto* call = dynamic_cast<CallExpr*>(expr);
+    if (!call) return false;
+    if (auto* bare = dynamic_cast<NameExpr*>(call->callee.get()))
+        return bare->name == "super";
+    auto* attr = dynamic_cast<AttributeExpr*>(call->callee.get());
+    if (!attr || attr->attribute != "__init__") return false;
+    auto* proxy = dynamic_cast<CallExpr*>(attr->object.get());
+    if (!proxy) return false;
+    auto* callee = dynamic_cast<NameExpr*>(proxy->callee.get());
+    return callee && callee->name == "super";
+}
+
+static bool ctorDelegatesToParent(FunctionDecl* init) {
+    for (auto& stmt : init->body) {
+        auto* es = dynamic_cast<ExprStmt*>(stmt.get());
+        if (es && callIsSuperCtor(es->expr.get())) return true;
+    }
+    return false;
+}
+
+bool CodeGen::Impl::excMessageFieldCoversSubclasses(const std::string& sym) const {
+    for (const auto& [cls, parent] : classParentNamesBySym) {
+        if (excMessageCtorBySym.count(cls)) continue;
+        std::string cur = cls;
+        for (int guard = 0; guard < kClassChainGuard; ++guard) {
+            auto pit = classParentNamesBySym.find(cur);
+            if (pit == classParentNamesBySym.end()) break;
+            cur = pit->second;
+            if (cur == sym) return false;
+        }
+    }
+    return true;
+}
+
+void CodeGen::Impl::synthesizeExceptionCtor(ClassDecl& node,
+                                            const std::string& csym,
+                                            const std::string& parentSym) {
+    bool hasField = false;
+    std::vector<FunctionDecl*> inits;
+    for (auto& stmt : node.body) {
+        if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get()))
+            if (fd->name == "__init__") inits.push_back(fd);
+        auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get());
+        if (!ann || ann->isStatic) continue;
+        auto* tgt = dynamic_cast<NameExpr*>(ann->target.get());
+        if (tgt && tgt->name == kExcMessageField) hasField = true;
+    }
+
+    if (!inits.empty()) {
+        const bool parentSets = excMessageCtorBySym.count(parentSym) > 0;
+        bool everyCtorSets = true;
+        for (auto* init : inits) {
+            bool sets = ctorAssignsExcMessage(init, kExcMessageField) ||
+                        (parentSets && ctorDelegatesToParent(init));
+            if (!sets) everyCtorSets = false;
+        }
+        if (everyCtorSets) excMessageCtorBySym.insert(csym);
+        return;
+    }
+
+    excMessageCtorBySym.insert(csym);
+    SourceLocation loc = node.location();
+    if (!hasField) {
+        auto field = std::make_unique<AnnAssignStmt>();
+        auto target = std::make_unique<NameExpr>();
+        target->name = kExcMessageField;
+        target->setLocation(loc);
+        field->target = std::move(target);
+        field->annotation = makeNamedType("str", loc);
+        field->value = makeStrLiteral(node.name, loc);
+        field->setLocation(loc);
+        node.body.push_back(std::move(field));
+    }
+
+    auto init = std::make_unique<FunctionDecl>();
+    init->name = "__init__";
+    init->isMethod = true;
+    init->isConstructor = true;
+    init->hasImplicitSelf = true;
+    init->setLocation(loc);
+    Parameter p;
+    p.name = kExcMessageField;
+    p.type = makeNamedType("str", loc);
+    p.defaultValue = makeStrLiteral(node.name, loc);
+    init->params.push_back(std::move(p));
+    init->body.push_back(makeSelfAssign(kExcMessageField, loc));
+    node.body.push_back(std::move(init));
+}
+
+bool CodeGen::Impl::emitParentCtorArgs(CallExpr& node,
+                                       const std::string& parentName,
+                                       const std::string& parentSymPrefix,
+                                       llvm::Function* initFunc,
+                                       llvm::Value* selfVal,
+                                       std::vector<llvm::Value*>& args,
+                                       CodeGen& cg) {
+    auto* initType = initFunc->getFunctionType();
+    const size_t arity = initType->getNumParams() - 1;
+    auto arityError = [&]() {
+        const size_t passed = node.args.size();
+        addError("super(...): the constructor of parent class '" + parentName +
+                 "' takes " + std::to_string(arity) + " argument" +
+                 (arity == 1 ? "" : "s") + ", but " + std::to_string(passed) +
+                 (passed == 1 ? " was" : " were") + " passed",
+                 node.location());
+        return false;
+    };
+
+    args.assign(1, selfVal);
+    if (node.args.size() > arity) return arityError();
+    for (size_t i = 0; i < node.args.size(); ++i) {
+        node.args[i]->accept(cg);
+        args.push_back(coerceArgFromExpr(node.args[i].get(), lastValue,
+                                         initType->getParamType((unsigned)(i + 1))));
+    }
+
+    auto defIt = funcParamDefaults.find(parentSymPrefix + "_new");
+    for (size_t i = node.args.size(); i < arity; ++i) {
+        Expr* fallback = nullptr;
+        if (defIt != funcParamDefaults.end() && i < defIt->second.size())
+            fallback = defIt->second[i];
+        if (!fallback) return arityError();
+        fallback->accept(cg);
+        args.push_back(coerceArg(lastValue,
+                                 initType->getParamType((unsigned)(i + 1))));
+    }
+    return true;
+}
+
+llvm::Value* CodeGen::Impl::emitExcMessageField(const std::string& className,
+                                                llvm::Value* inst,
+                                                bool exactType) {
+    if (!inst || !inst->getType()->isPointerTy()) return nullptr;
+    const std::string sym = classSym(className);
+    if (!excMessageCtorBySym.count(sym)) return nullptr;
+    if (!exactType && !excMessageFieldCoversSubclasses(sym)) return nullptr;
+    auto structIt = classStructTypesBySym.find(sym);
+    auto fieldsIt = classFieldIndicesBySym.find(sym);
+    if (structIt == classStructTypesBySym.end() ||
+        fieldsIt == classFieldIndicesBySym.end())
+        return nullptr;
+    auto slotIt = fieldsIt->second.find(kExcMessageField);
+    if (slotIt == fieldsIt->second.end()) return nullptr;
+    auto kindIt = classFieldKindsBySym.find(sym);
+    if (kindIt == classFieldKindsBySym.end()) return nullptr;
+    auto fieldKind = kindIt->second.find(kExcMessageField);
+    if (fieldKind == kindIt->second.end() || fieldKind->second != VarKind::Str)
+        return nullptr;
+    auto* slot = builder->CreateStructGEP(structIt->second, inst,
+                                          slotIt->second, "exc.msg.slot");
+    return builder->CreateLoad(i8PtrType, slot, "exc.msg.field");
+}
+
+llvm::Value* CodeGen::Impl::emitExcMessage(const std::string& className,
+                                           llvm::Value* inst, bool& owned) {
+    const char* dunder = hasDunder(className, "__str__")    ? "__str__"
+                       : hasDunder(className, "__repr__")   ? "__repr__"
+                                                            : nullptr;
+    llvm::Value* text = dunder ? callDunder(className, dunder, inst) : nullptr;
+    if (text && text->getType()->isPointerTy()) {
+        owned = true;
+        return text;
+    }
+    owned = false;
+    return emitExcMessageField(className, inst, true);
+}
+
 }

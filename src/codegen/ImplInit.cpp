@@ -1188,24 +1188,24 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
             if (!classDecl->genericHomeModule.empty())
                 currentModuleName = classDecl->genericHomeModule;
 
-            if (!classDecl->bases.empty()) {
+            auto registerBaseClass = [&]() {
+                if (classDecl->bases.empty()) return;
                 std::string baseBareName;
-                if (auto* baseName = dynamic_cast<NameExpr*>(classDecl->bases[0].get())) {
+                if (auto* baseName = dynamic_cast<NameExpr*>(classDecl->bases[0].get()))
                     baseBareName = baseName->name;
-                } else if (auto* baseAttr =
-                               dynamic_cast<AttributeExpr*>(classDecl->bases[0].get())) {
+                else if (auto* baseAttr =
+                             dynamic_cast<AttributeExpr*>(classDecl->bases[0].get()))
                     baseBareName = baseAttr->attribute;
-                }
-                if (!baseBareName.empty()) {
-                    classParentNamesBySym[csym] = classSymPrefix(baseBareName);
-
-                    if (isExcType(baseBareName)) {
-                        int64_t code = userExcNextCode++;
-                        userExcCodesBySym[csym] = code;
-                        userExcParentCodes[code] = excTypeCode(baseBareName);
-                    }
-                }
-            }
+                if (baseBareName.empty()) return;
+                const std::string parentSym = classSymPrefix(baseBareName);
+                classParentNamesBySym[csym] = parentSym;
+                if (!isExcType(baseBareName)) return;
+                int64_t code = userExcNextCode++;
+                userExcCodesBySym[csym] = code;
+                userExcParentCodes[code] = excTypeCode(baseBareName);
+                synthesizeExceptionCtor(*classDecl, csym, parentSym);
+            };
+            registerBaseClass();
 
             std::vector<FunctionDecl*> initDecls;
             for (auto& classStmt : classDecl->body) {

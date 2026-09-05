@@ -832,122 +832,151 @@ void CodeGen::visit(RaiseStmt& node) {
         impl_->builder->SetInsertPoint(deadBB);
     };
 
+    auto adoptedRaiseArg = [&](CallExpr* call) -> llvm::Value* {
+        if (call->args.empty()) return nullptr;
+        Expr* a0 = call->args[0].get();
+        bool pure = false;
+        if (auto* sl = dynamic_cast<StringLiteral*>(a0))
+            pure = !sl->isBytes && !sl->isFString;
+        else if (dynamic_cast<NameExpr*>(a0))
+            pure = true;
+        // Adopt a0 as msg only when it is actually a `str`; a ptr-shaped
+        // non-string first arg (list/dict/bytes) raised as a string UAFs.
+        if (!pure || !a0->type || a0->type->kind() != Type::Kind::Str)
+            return nullptr;
+        a0->accept(*this);
+        llvm::Value* v = impl_->lastValue;
+        return (v && v->getType()->isPointerTy()) ? v : nullptr;
+    };
+
+    auto ctorArityMatches = [&](CallExpr* call, const std::string& className,
+                                llvm::Function* initFn) {
+        unsigned expected = initFn->getFunctionType()->getNumParams();
+        if (expected < 1) return false;
+        const size_t userArgs = (size_t)expected - 1;
+        if (call->args.size() == userArgs) return true;
+        if (call->args.size() > userArgs) return false;
+        auto defIt = impl_->funcParamDefaults.find(
+            impl_->classSymPrefix(className) + "_new");
+        if (defIt == impl_->funcParamDefaults.end()) return false;
+        for (size_t i = call->args.size(); i < userArgs; ++i) {
+            if (i >= defIt->second.size() || defIt->second[i] == nullptr)
+                return false;
+        }
+        return true;
+    };
+
+    auto emitUserExcRaise = [&](CallExpr* call, const std::string& className,
+                                llvm::Value* typeVal) {
+        node.exception->accept(*this);
+        llvm::Value* inst = impl_->lastValue;
+        if (!inst->getType()->isPointerTy())
+            inst = impl_->builder->CreateIntToPtr(inst, impl_->i8PtrType);
+        else if (inst->getType() != impl_->i8PtrType)
+            inst = impl_->builder->CreateBitCast(inst, impl_->i8PtrType);
+
+        bool msgOwned = false;
+        llvm::Value* msgVal = impl_->emitExcMessage(className, inst, msgOwned);
+        if (!msgVal) msgVal = adoptedRaiseArg(call);
+        if (!msgVal) msgVal = impl_->builder->CreateGlobalString(className);
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs[msgOwned ? "dragon_raise_exc_obj_consume"
+                                         : "dragon_raise_exc_obj"],
+            {typeVal, inst, msgVal});
+        impl_->builder->CreateUnreachable();
+        auto* deadBB = llvm::BasicBlock::Create(
+            *impl_->context, "raise.dead", func);
+        impl_->builder->SetInsertPoint(deadBB);
+    };
+
+    auto raiseFromCtorCall = [&](CallExpr* call, const std::string& className) {
+        auto* typeVal = llvm::ConstantInt::get(impl_->i64Type,
+                                               impl_->excTypeCode(className));
+        bool isUserExc =
+            impl_->userExcCodesBySym.count(impl_->classSym(className)) > 0;
+        auto* initFn = isUserExc
+            ? impl_->module->getFunction(
+                  impl_->classSymPrefix(className) + "___init__")
+            : nullptr;
+        if (initFn && ctorArityMatches(call, className, initFn)) {
+            emitUserExcRaise(call, className, typeVal);
+            return;
+        }
+        llvm::Value* msgVal = nullptr;
+        if (call->args.empty()) {
+            msgVal = impl_->builder->CreateGlobalString(className);
+        } else {
+            call->args[0]->accept(*this);
+            msgVal = impl_->lastValue;
+        }
+        emitRaise(typeVal, msgVal);
+    };
+
+    auto raisedClassName = [&](CallExpr* call) -> std::string {
+        if (auto* bare = dynamic_cast<NameExpr*>(call->callee.get()))
+            return bare->name;
+        auto* attr = dynamic_cast<AttributeExpr*>(call->callee.get());
+        if (!attr || !attr->object || !attr->object->type) return "";
+        if (attr->object->type->kind() != Type::Kind::Module) return "";
+        if (!impl_->classNames.count(attr->attribute)) return "";
+        return attr->attribute;
+    };
+
     if (node.exception) {
-        if (auto* call = dynamic_cast<CallExpr*>(node.exception.get())) {
-            if (auto* name = dynamic_cast<NameExpr*>(call->callee.get())) {
-                int64_t typeCode = impl_->excTypeCode(name->name);
-                auto* typeVal = llvm::ConstantInt::get(impl_->i64Type, typeCode);
-
-                bool isUserExc = impl_->userExcCodesBySym.count(impl_->classSym(name->name)) > 0;
-                auto* initFn = isUserExc
-                    ? impl_->module->getFunction(
-                          impl_->classSymPrefix(name->name) + "___init__")
-                    : nullptr;
-                bool arityMatches = false;
-                if (isUserExc && initFn) {
-                    unsigned expected = initFn->getFunctionType()->getNumParams();
-                    if (expected >= 1 && call->args.size() == expected - 1) {
-                        arityMatches = true;
-                    } else if (expected >= 1 && call->args.size() < expected - 1) {
-                        std::string newSym =
-                            impl_->classSymPrefix(name->name) + "_new";
-                        auto defIt = impl_->funcParamDefaults.find(newSym);
-                        if (defIt != impl_->funcParamDefaults.end()) {
-                            bool allHaveDefaults = true;
-                            size_t userArgs = (size_t)expected - 1;
-                            for (size_t i = call->args.size(); i < userArgs; ++i) {
-                                if (i >= defIt->second.size() ||
-                                    defIt->second[i] == nullptr) {
-                                    allHaveDefaults = false;
-                                    break;
-                                }
-                            }
-                            if (allHaveDefaults) arityMatches = true;
-                        }
-                    }
-                }
-                if (isUserExc && initFn && arityMatches) {
-                    llvm::Value* msgVal = nullptr;
-                    if (!call->args.empty()) {
-                        Expr* a0 = call->args[0].get();
-                        bool pure = false;
-                        if (auto* sl = dynamic_cast<StringLiteral*>(a0))
-                            pure = !sl->isBytes && !sl->isFString;
-                        else if (dynamic_cast<NameExpr*>(a0))
-                            pure = true;
-                        // Adopt a0 as msg only when it is actually a `str`; a ptr-shaped
-                        // non-string first arg (list/dict/bytes) raised as a string UAFs.
-                        const bool isStr = a0->type && a0->type->kind() == Type::Kind::Str;
-                        if (pure && isStr) {
-                            a0->accept(*this);
-                            llvm::Value* v = impl_->lastValue;
-                            if (v && v->getType()->isPointerTy())
-                                msgVal = v;
-                        }
-                    }
-                    if (!msgVal)
-                        msgVal = impl_->builder->CreateGlobalString(name->name);
-                    node.exception->accept(*this);
-                    llvm::Value* inst = impl_->lastValue;
-                    if (!inst->getType()->isPointerTy())
-                        inst = impl_->builder->CreateIntToPtr(inst, impl_->i8PtrType);
-                    else if (inst->getType() != impl_->i8PtrType)
-                        inst = impl_->builder->CreateBitCast(inst, impl_->i8PtrType);
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_raise_exc_obj"],
-                        {typeVal, inst, msgVal});
-                    impl_->builder->CreateUnreachable();
-                    auto* deadBB = llvm::BasicBlock::Create(
-                        *impl_->context, "raise.dead", func);
-                    impl_->builder->SetInsertPoint(deadBB);
-                    return;
-                }
-
-                llvm::Value* msgVal = nullptr;
-                if (!call->args.empty()) {
-                    call->args[0]->accept(*this);
-                    msgVal = impl_->lastValue;
-                } else {
-                    msgVal = impl_->builder->CreateGlobalString(name->name);
-                }
-
-                emitRaise(typeVal, msgVal);
-                return;
-            }
+        auto* ctorCall = dynamic_cast<CallExpr*>(node.exception.get());
+        const std::string ctorClass = ctorCall ? raisedClassName(ctorCall) : "";
+        if (!ctorClass.empty()) {
+            raiseFromCtorCall(ctorCall, ctorClass);
+            return;
         }
 
-        if (auto* nameRef = dynamic_cast<NameExpr*>(node.exception.get())) {
-            for (auto& v : impl_->handlerExcVars) {
-                if (v == nameRef->name) {
-                    emitReraiseCurrent();
-                    return;
-                }
+        auto raiseBoundInstance = [&](const std::string& className) {
+            auto* typeVal = llvm::ConstantInt::get(impl_->i64Type,
+                                                   impl_->excTypeCode(className));
+            node.exception->accept(*this);
+            llvm::Value* inst = impl_->lastValue;
+            if (!inst->getType()->isPointerTy())
+                inst = impl_->builder->CreateIntToPtr(inst, impl_->i8PtrType);
+            else if (inst->getType() != impl_->i8PtrType)
+                inst = impl_->builder->CreateBitCast(inst, impl_->i8PtrType);
+            bool msgOwned = false;
+            llvm::Value* msgVal =
+                impl_->emitExcMessage(className, inst, msgOwned);
+            if (!msgVal)
+                msgVal = impl_->builder->CreateGlobalString(className);
+            inst = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_exc_retain_obj"], {inst},
+                "raise.obj.retained");
+            impl_->builder->CreateCall(
+                impl_->runtimeFuncs[msgOwned ? "dragon_raise_exc_obj_consume"
+                                             : "dragon_raise_exc_obj"],
+                {typeVal, inst, msgVal});
+            impl_->builder->CreateUnreachable();
+            auto* deadBB = llvm::BasicBlock::Create(
+                *impl_->context, "raise.dead", func);
+            impl_->builder->SetInsertPoint(deadBB);
+        };
+
+        auto raiseNameRef = [&](NameExpr* nameRef) {
+            bool isHandlerVar = std::find(impl_->handlerExcVars.begin(),
+                                          impl_->handlerExcVars.end(),
+                                          nameRef->name) !=
+                                impl_->handlerExcVars.end();
+            if (isHandlerVar) {
+                emitReraiseCurrent();
+                return true;
             }
             auto cnIt = impl_->varClassNames.find(nameRef->name);
-            if (cnIt != impl_->varClassNames.end() &&
-                impl_->userExcCodesBySym.count(impl_->classSym(cnIt->second)) > 0) {
-                int64_t typeCode = impl_->excTypeCode(cnIt->second);
-                auto* typeVal = llvm::ConstantInt::get(impl_->i64Type, typeCode);
-                node.exception->accept(*this);
-                llvm::Value* inst = impl_->lastValue;
-                if (!inst->getType()->isPointerTy())
-                    inst = impl_->builder->CreateIntToPtr(inst, impl_->i8PtrType);
-                else if (inst->getType() != impl_->i8PtrType)
-                    inst = impl_->builder->CreateBitCast(inst, impl_->i8PtrType);
-                auto* msgVal = impl_->builder->CreateGlobalString(cnIt->second);
-                inst = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_exc_retain_obj"], {inst},
-                    "raise.obj.retained");
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_raise_exc_obj"],
-                    {typeVal, inst, msgVal});
-                impl_->builder->CreateUnreachable();
-                auto* deadBB = llvm::BasicBlock::Create(
-                    *impl_->context, "raise.dead", func);
-                impl_->builder->SetInsertPoint(deadBB);
-                return;
-            }
-        }
+            bool isUserExcVar =
+                cnIt != impl_->varClassNames.end() &&
+                impl_->userExcCodesBySym.count(impl_->classSym(cnIt->second)) > 0;
+            if (!isUserExcVar) return false;
+            raiseBoundInstance(cnIt->second);
+            return true;
+        };
+
+        auto* nameRef = dynamic_cast<NameExpr*>(node.exception.get());
+        if (nameRef && raiseNameRef(nameRef)) return;
 
         node.exception->accept(*this);
         llvm::Value* excVal = impl_->lastValue;

@@ -2090,41 +2090,54 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 return fail("in .py mode, call a parent method as `super()." + method +
                     "(...)` - bare `super." + method + "` is .dr-mode syntax");
 
-            auto parentIt = impl_->classParentNamesBySym.find(
-                impl_->classSym(impl_->currentClassName));
-            if (parentIt != impl_->classParentNamesBySym.end()) {
-                std::string parentMethodName = parentIt->second + "_" + method;
-                auto* parentMethod = impl_->module->getFunction(parentMethodName);
-                if (parentMethod) {
-                    auto* selfAlloca = impl_->lookupVar("self");
-                    llvm::Value* selfVal = impl_->builder->CreateLoad(
-                        impl_->i8PtrType, selfAlloca, "self");
-                    std::vector<llvm::Value*> args = {selfVal};
-                    auto parentMethodType = parentMethod->getFunctionType();
+            auto emitSuperMethodCall = [&](const std::string& parentSym,
+                                           llvm::Function* parentMethod) {
+                auto* selfAlloca = impl_->lookupVar("self");
+                llvm::Value* selfVal = impl_->builder->CreateLoad(
+                    impl_->i8PtrType, selfAlloca, "self");
+                std::vector<llvm::Value*> args = {selfVal};
+                auto parentMethodType = parentMethod->getFunctionType();
+                if (method == "__init__") {
+                    if (!impl_->emitParentCtorArgs(node, parentSym, parentSym,
+                                                   parentMethod, selfVal,
+                                                   args, *this))
+                        return true;
+                } else if (node.args.size() + 1 > parentMethodType->getNumParams()) {
+                    return fail("super()." + method + "(...): parent class '" +
+                        parentSym + "' method '" + method + "' takes " +
+                        std::to_string(parentMethodType->getNumParams() - 1) +
+                        " arguments, but " + std::to_string(node.args.size()) +
+                        " were passed");
+                } else {
                     for (size_t i = 0; i < node.args.size(); ++i) {
                         node.args[i]->accept(*this);
-                        llvm::Value* arg = impl_->lastValue;
-                        unsigned paramIdx = (unsigned)(i + 1);
-                        if (paramIdx < parentMethodType->getNumParams())
-                            arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, parentMethodType->getParamType(paramIdx));
-                        args.push_back(arg);
+                        args.push_back(impl_->coerceArgFromExpr(
+                            node.args[i].get(), impl_->lastValue,
+                            parentMethodType->getParamType((unsigned)(i + 1))));
                     }
-                    if (parentMethod->getReturnType()->isVoidTy()) {
-                        impl_->builder->CreateCall(parentMethod, args);
-                        impl_->lastValue = llvm::ConstantPointerNull::get(
-                            llvm::PointerType::getUnqual(*impl_->context));
-                    } else {
-                        impl_->lastValue = impl_->normalizeIntC(
-                            impl_->builder->CreateCall(
-                                parentMethod, args, "super_call"));
-                    }
+                }
+                if (parentMethod->getReturnType()->isVoidTy()) {
+                    impl_->builder->CreateCall(parentMethod, args);
+                    impl_->lastValue = llvm::ConstantPointerNull::get(
+                        llvm::PointerType::getUnqual(*impl_->context));
                     return true;
                 }
+                impl_->lastValue = impl_->normalizeIntC(
+                    impl_->builder->CreateCall(parentMethod, args, "super_call"));
+                return true;
+            };
+
+            auto parentIt = impl_->classParentNamesBySym.find(
+                impl_->classSym(impl_->currentClassName));
+            if (parentIt == impl_->classParentNamesBySym.end())
+                return fail("super." + method + "(...): class '" +
+                    impl_->currentClassName + "' has no parent class");
+            auto* parentMethod =
+                impl_->module->getFunction(parentIt->second + "_" + method);
+            if (!parentMethod)
                 return fail("super." + method + "(...): parent class '" +
                     parentIt->second + "' has no method '" + method + "'");
-            }
-            return fail("super." + method + "(...): class '" +
-                impl_->currentClassName + "' has no parent class");
+            return emitSuperMethodCall(parentIt->second, parentMethod);
         }
     }
 

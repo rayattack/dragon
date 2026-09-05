@@ -1739,6 +1739,63 @@ def boom() {
 }
 ```
 
+#### :exception_subclass_rejects_non_message_arg
+
+A subclass of a builtin exception that declares no constructor is the
+synthesized message family: it takes an optional `str`. An `int` there has no
+constructor to bind to, so it is refused instead of reaching codegen.
+
+```dr
+class NumErr(Exception) {}
+def boom() {
+    raise NumErr(42)
+}
+```
+
+#### :exception_subclass_rejects_extra_args
+
+```dr
+class TwoErr(Exception) {}
+def boom() {
+    raise TwoErr("a", "b")
+}
+```
+
+#### :exception_message_field_must_be_str
+
+`message` is the field the synthesized exception constructor writes and the
+field an exception renders from, so an exception subclass may not redeclare it
+at another type. Before this was refused, the declaration silently shared the
+inherited `str` slot and reading it back returned the message text.
+
+```dr
+class A(Exception) {}
+class C(A) {
+    message: int = 3
+}
+c: C = C()
+```
+
+#### :exception_message_field_must_be_str_when_inferred
+
+```dr
+class A(Exception) {}
+class E(A) {
+    def(m: int) { self.message = m }
+}
+e: E = E(5)
+```
+
+#### :exception_message_field_str_is_ok
+
+```dr
+class A(Exception) {}
+class C(A) {
+    message: str = "z"
+}
+c: C = C()
+```
+
 #### :builtin_attr_unknown_on_int
 
 A builtin receiver has a closed member set, so an attribute that is not one of

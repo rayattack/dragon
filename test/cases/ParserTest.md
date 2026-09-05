@@ -583,3 +583,35 @@ print(y
 case: int = 2
 print(case)
 ```
+
+#### :dotted_except_type
+
+A module-qualified exception class is a type name like any other, so the except
+clause must read it whole instead of stopping at the dot.
+
+```dr
+try {
+  pass
+} except mod.MyErr as e {
+  pass
+}
+```
+
+#### :dotted_except_type_group
+
+```dr
+try {
+  pass
+} except (KeyError, pkg.mod.MyErr) as e {
+  pass
+}
+```
+
+#### :py_dotted_except_type
+
+```py
+try:
+    pass
+except mod.MyErr as e:
+    pass
+```

@@ -55,6 +55,27 @@ bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
     return false;
 }
 
+void TypeChecker::reportNoConstructorCall(CallExpr& node, const ClassType& ct) {
+    if (!derivesFromBuiltinException(&ct)) {
+        error(node.location(),
+              "class '" + ct.name + "' declares no constructor, so it is "
+              "constructed with no arguments; a base class constructor is "
+              "not inherited. Define 'def (...)' on '" + ct.name +
+              "' and delegate with 'super(...)'");
+        return;
+    }
+    const Type* first = node.args.empty() ? nullptr : node.args[0]->type.get();
+    bool messageShaped = node.kwArgs.empty() && node.args.size() == 1 &&
+                         (!first || first->kind() == Type::Kind::Unknown ||
+                          first->kind() == Type::Kind::Str);
+    if (messageShaped) return;
+    error(node.location(),
+          "exception class '" + ct.name + "' declares no constructor, so it is "
+          "constructed with an optional message: '" + ct.name + "()' or '" +
+          ct.name + "(str)'. Define 'def (...)' on '" + ct.name +
+          "' to take other arguments");
+}
+
 bool hasDataclassDecorator(const ClassType& ct) {
     if (!ct.decl) return false;
     for (auto& d : ct.decl->decorators) {
@@ -829,13 +850,8 @@ void TypeChecker::visit(CallExpr& node) {
             } else if (!ct.isEnum && !ct.isTypedDict && ct.constructorCount == 0 &&
                        !hasDataclassDecorator(ct) &&
                        !hasDeclaredBase(ct, "NamedTuple") &&
-                       !derivesFromBuiltinException(&ct) &&
                        (!node.args.empty() || !node.kwArgs.empty())) {
-                error(node.location(),
-                      "class '" + ct.name + "' declares no constructor, so it is "
-                      "constructed with no arguments; a base class constructor is "
-                      "not inherited. Define 'def (...)' on '" + ct.name +
-                      "' and delegate with 'super(...)'");
+                reportNoConstructorCall(node, ct);
             }
         } else if (!ct.constructorOverloads.empty() &&
                    std::none_of(node.kwArgs.begin(), node.kwArgs.end(),

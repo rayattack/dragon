@@ -2,6 +2,11 @@
 
 namespace dragon {
 
+static std::string handlerTypeLeaf(const std::string& spelled) {
+    auto dot = spelled.rfind('.');
+    return dot == std::string::npos ? spelled : spelled.substr(dot + 1);
+}
+
 void CodeGen::visit(AssertStmt& node) {
     node.test->accept(*this);
     llvm::Value* cond = impl_->toBool(impl_->lastValue, node.test.get());
@@ -48,12 +53,12 @@ void CodeGen::visit(TryStmt& node) {
 
         auto& handler = node.handlers[i];
         if (handler.type) {
-            hi.typeCode = 10;
+            hi.typeCode = impl_->excTypeCode("Exception");
             if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
-                hi.typeCode = impl_->excTypeCode(named->name);
+                hi.typeCode = impl_->excTypeCode(handlerTypeLeaf(named->name));
             }
             for (const auto& alt : handler.altTypeNames)
-                hi.altCodes.push_back(impl_->excTypeCode(alt));
+                hi.altCodes.push_back(impl_->excTypeCode(handlerTypeLeaf(alt)));
             hi.checkBB = llvm::BasicBlock::Create(*impl_->context,
                 prefix + ".handler.check." + std::to_string(i), func);
         } else {
@@ -199,19 +204,20 @@ void CodeGen::visit(TryStmt& node) {
 
         if (!handler.name.empty()) {
             bool boundInstance = false;
-            if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
-                if (impl_->userExcCodesBySym.count(impl_->classSym(named->name)) > 0 &&
-                    impl_->classNames.count(named->name)) {
-                    auto* obj = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_exc_bind_obj"], {}, "exc.obj");
-                    auto* alloca = impl_->createEntryAlloca(
-                        func, handler.name, impl_->i8PtrType);
-                    impl_->builder->CreateStore(obj, alloca);
-                    impl_->setVar(handler.name, alloca, Impl::VarKind::ClassInstance);
-                    impl_->varClassNames[handler.name] = named->name;
-                    impl_->emitCleanupPush(handler.name, obj, Impl::DCLEAN_OBJ);
-                    boundInstance = true;
-                }
+            std::string handlerClass;
+            if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get()))
+                handlerClass = handlerTypeLeaf(named->name);
+            if (impl_->userExcCodesBySym.count(impl_->classSym(handlerClass)) > 0 &&
+                impl_->classNames.count(handlerClass)) {
+                auto* obj = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_exc_bind_obj"], {}, "exc.obj");
+                auto* alloca = impl_->createEntryAlloca(
+                    func, handler.name, impl_->i8PtrType);
+                impl_->builder->CreateStore(obj, alloca);
+                impl_->setVar(handler.name, alloca, Impl::VarKind::ClassInstance);
+                impl_->varClassNames[handler.name] = handlerClass;
+                impl_->emitCleanupPush(handler.name, obj, Impl::DCLEAN_OBJ);
+                boundInstance = true;
             }
             if (!boundInstance) {
                 auto* msg = impl_->builder->CreateCall(

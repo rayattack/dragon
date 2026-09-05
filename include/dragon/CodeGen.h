@@ -177,6 +177,7 @@ public:
 
     bool emitBuiltinCall(CallExpr& node, const std::string& name);
     bool emitMethodCall(CallExpr& node, AttributeExpr& attr);
+    void emitSuperCtorCall(CallExpr& node);
     void emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
                          const std::string& siteName, bool hasSelf,
                          const std::string& selfClass, size_t userParamStart);

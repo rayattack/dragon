@@ -1,5 +1,6 @@
 from unittest import TestCase, main
 from threading import Lock
+import collide_classes_one
 
 exit_order: list[str] = []
 
@@ -85,6 +86,65 @@ class ListErr(Exception) {
         self.code = code
     }
 }
+
+
+class DetailErr(Exception) {
+    detail: str
+    def(d: str) { self.detail = d }
+    def __str__() -> str { return "DetailErr: " + self.detail }
+}
+
+
+class QuietErr(Exception) {
+    def __str__() -> str { return "quiet text" }
+}
+
+
+class RootErr(Exception) {
+}
+
+
+class LeafErr(RootErr) {
+    def(m: str) { super(m) }
+}
+
+
+class ChainErr(RootErr) {
+}
+
+
+class CodeErr(RootErr) {
+    def(code: int) { super("code-" + str(code)) }
+}
+
+
+class MsgErr(Exception) {
+    def(m: str) { self.message = m }
+}
+
+
+class FieldStrErr(Exception) {
+    def(m: str) { self.message = m }
+    def __str__() -> str { return self.message }
+}
+
+
+def _detail_boom() -> None { raise DetailErr("why") }
+
+
+def _quiet_boom() -> None { raise QuietErr() }
+
+
+def _leaf_boom(tag: str) -> None { raise LeafErr("leaf-" + tag) }
+
+
+def _msg_boom(tag: str) -> None { raise MsgErr("computed-" + tag) }
+
+
+def _chain_boom(tag: str) -> None { raise ChainErr("chain-" + tag) }
+
+
+def _code_boom(code: int) -> None { raise CodeErr(code) }
 
 
 def _remove_missing() {
@@ -259,6 +319,155 @@ class ExceptBindingTests(TestCase) {
 }
 
 
+class UserExceptionTextTests(TestCase) {
+    def test_user_str_wins_in_base_typed_catch() {
+        got: str = ""
+        try { _detail_boom() } except Exception as e { got = str(e) }
+        self.assertEqual(got, "DetailErr: why")
+    }
+
+    def test_user_str_wins_in_exact_catch() {
+        got: str = ""
+        try { _detail_boom() } except DetailErr as e { got = str(e) }
+        self.assertEqual(got, "DetailErr: why")
+    }
+
+    def test_str_only_exception_with_no_ctor_args() {
+        got: str = ""
+        try { _quiet_boom() } except Exception as e { got = str(e) }
+        self.assertEqual(got, "quiet text")
+    }
+
+    def test_computed_message_survives_the_raise() {
+        got: str = ""
+        try { _msg_boom("x") } except Exception as e { got = str(e) }
+        self.assertEqual(got, "computed-x")
+    }
+
+    def test_computed_message_in_exact_catch() {
+        got: str = ""
+        try { _msg_boom("y") } except MsgErr as e { got = str(e) }
+        self.assertEqual(got, "computed-y")
+    }
+
+    def test_super_message_to_ctorless_exception_parent() {
+        got: str = ""
+        try { _leaf_boom("a") } except Exception as e { got = str(e) }
+        self.assertEqual(got, "leaf-a")
+    }
+
+    def test_ctorless_exception_takes_a_message() {
+        got: str = ""
+        try { raise RootErr("built") } except RootErr as e { got = str(e) }
+        self.assertEqual(got, "built")
+    }
+
+    def test_ctorless_exception_without_a_message_is_its_name() {
+        got: str = ""
+        try { raise RootErr() } except RootErr as e { got = str(e) }
+        self.assertEqual(got, "RootErr")
+    }
+
+    def test_ctorless_exception_chain_shares_one_message_slot() {
+        as_root: str = ""
+        as_leaf: str = ""
+        as_base: str = ""
+        try { _chain_boom("a") } except RootErr as e { as_root = str(e) }
+        try { _chain_boom("b") } except ChainErr as e { as_leaf = str(e) }
+        try { _chain_boom("c") } except Exception as e { as_base = str(e) }
+        self.assertEqual(as_root, "chain-a")
+        self.assertEqual(as_leaf, "chain-b")
+        self.assertEqual(as_base, "chain-c")
+    }
+
+    def test_super_message_from_a_non_message_ctor() {
+        as_root: str = ""
+        as_base: str = ""
+        as_exact: str = ""
+        try { _code_boom(7) } except RootErr as e { as_root = str(e) }
+        try { _code_boom(8) } except Exception as e { as_base = str(e) }
+        try { _code_boom(9) } except CodeErr as e { as_exact = str(e) }
+        self.assertEqual(as_root, "code-7")
+        self.assertEqual(as_base, "code-8")
+        self.assertEqual(as_exact, "code-9")
+    }
+
+    def test_ctorless_exception_constructs_outside_a_raise() {
+        e: RootErr = RootErr("standalone")
+        self.assertEqual(str(e), "standalone")
+    }
+
+    def test_repeated_raise_of_field_returning_str_no_uaf() {
+        i: int = 0
+        while i < 2000 {
+            const tag: str = "t-" + str(i)
+            try {
+                raise FieldStrErr(tag)
+            } except FieldStrErr as e {
+                self.assertEqual(str(e), tag)
+            }
+            i = i + 1
+        }
+    }
+
+    def test_repeated_raise_of_message_field_no_uaf() {
+        i: int = 0
+        while i < 2000 {
+            const tag: str = "m-" + str(i)
+            try {
+                raise MsgErr(tag)
+            } except Exception as e {
+                self.assertEqual(str(e), tag)
+            }
+            i = i + 1
+        }
+    }
+
+    def test_repeated_raise_of_synthesized_ctor_no_uaf() {
+        i: int = 0
+        while i < 2000 {
+            const tag: str = "s-" + str(i)
+            try {
+                raise RootErr(tag)
+            } except RootErr as e {
+                self.assertEqual(str(e), tag)
+            }
+            i = i + 1
+        }
+    }
+
+    def test_dotted_exception_type_in_except_clause() {
+        got: str = ""
+        try {
+            collide_classes_one.throw_one()
+        } except collide_classes_one.Boom as e {
+            got = e.msg
+        }
+        self.assertEqual(got, "from-one")
+    }
+
+    def test_dotted_exception_class_can_be_raised() {
+        got: str = ""
+        try {
+            raise collide_classes_one.Boom("qualified")
+        } except collide_classes_one.Boom as e {
+            got = e.msg
+        }
+        self.assertEqual(got, "qualified")
+    }
+
+    def test_dotted_exception_type_in_a_group() {
+        got: str = ""
+        try {
+            collide_classes_one.throw_one()
+        } except (KeyError, collide_classes_one.Boom) as e {
+            got = "grouped"
+        }
+        self.assertEqual(got, "grouped")
+    }
+}
+
+
 class RaiseNonStrTests(TestCase) {
     """Only a str first ctor arg becomes the exception message (else str(e) is the class
     name): a list/dict/bytes pointer read as a DragonString is a use-after-free."""
@@ -381,5 +590,6 @@ class CatchableBuiltinErrors(TestCase) {
 }
 
 
-main([WithEarlyExitTests(), ExceptBindingTests(), RaiseNonStrTests(),
+main([WithEarlyExitTests(), ExceptBindingTests(), UserExceptionTextTests(),
+      RaiseNonStrTests(),
       CatchableContainerErrors(), CatchableBuiltinErrors()])
