@@ -3480,3 +3480,65 @@ def main() -> None {
 }
 main()
 ```
+
+#### :mono_list_into_union_field_rejected
+
+A domain slot holds boxed elements. A container built with native ones cannot be
+stored into one, whatever the position: reading it back through an argument, a
+field or a return emits no layout guard, so the pointer is pasted through and
+the program prints a number. These four cases are the proof that no such store
+survives to reach those reads.
+
+```dr
+type Payload = str | int | list[Payload]
+class H {
+    f: Payload = 0
+    def() {}
+}
+v: list[str] = ["a", "b"]
+h: H = H()
+h.f = v
+```
+
+#### :mono_list_into_union_field_literal_ok
+
+```dr
+type Payload = str | int | list[Payload]
+class H {
+    f: Payload = 0
+    def() {}
+}
+h: H = H()
+h.f = ["a", "b"]
+```
+
+#### :boxed_list_into_union_argument_ok
+
+A domain parameter is read by the callee, not stored by it, so a native list may
+still be passed to one: `json.dumps(xs)` over a `list[int]` is exactly that.
+
+```dr
+type Payload = str | int | list[Payload]
+def take(d: Payload) -> None { }
+v: list[Payload] = ["a", "b"]
+take(v)
+take(["c", "d"])
+w: list[str] = ["e", "f"]
+take(w)
+```
+
+#### :instance_into_union_slot_still_ok
+
+```dr
+type Payload = str | int | list[Payload] | Thing
+class Thing {
+    n: int = 0
+    def(n: int) { self.n = n }
+}
+class H {
+    f: Payload = 0
+    def() {}
+}
+h: H = H()
+h.f = Thing(3)
+```

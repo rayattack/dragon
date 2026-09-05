@@ -78,24 +78,30 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
     return false;
 }
 
-void TypeChecker::checkSubscriptSlotStore(AssignStmt& node,
-                                          const std::shared_ptr<Type>& slot) {
-    if (!node.value || !slot) return;
+void TypeChecker::checkUnionSlotStore(Expr* value,
+                                     const std::shared_ptr<Type>& slot,
+                                     const SourceLocation& loc,
+                                     const std::string& what) {
+    if (!value || !slot) return;
     if (slot->kind() == Type::Kind::Boxed) {
-        boxNestedContainerLiteralForAny(node.value.get());
+        boxNestedContainerLiteralForAny(value);
         return;
     }
     if (slot->kind() != Type::Kind::Union) return;
-    propagateAnnotationToEmptyLiteral(node.value.get(), slot);
-    auto valueType = inferType(node.value.get());
-    if (tryExpectedTypeLiteral(node.value.get(), slot)) return;
+    propagateAnnotationToEmptyLiteral(value, slot);
+    auto valueType = inferType(value);
+    if (tryExpectedTypeLiteral(value, slot)) return;
     if (!valueType || valueType->kind() == Type::Kind::Unknown) return;
     if (valueType->isAssignableTo(*slot)) return;
     const std::string hint = listReprMismatchHint(*valueType, *slot);
     if (hint.empty()) return;
-    error(node.location(),
-          "cannot store '" + valueType->toString() + "' into a slot of type '" +
-          slot->toString() + "'" + hint);
+    error(loc, "cannot store '" + valueType->toString() + "' into " + what +
+          " of type '" + slot->toString() + "'" + hint);
+}
+
+void TypeChecker::checkSubscriptSlotStore(AssignStmt& node,
+                                          const std::shared_ptr<Type>& slot) {
+    checkUnionSlotStore(node.value.get(), slot, node.location(), "a slot");
 }
 
 void TypeChecker::markNarrowTarget(Expr& value,
@@ -477,6 +483,9 @@ void TypeChecker::visit(AssignStmt& node) {
                     if (fieldType && fieldType->kind() != Type::Kind::Unknown) {
                         propagateAnnotationToEmptyLiteral(node.value.get(), fieldType);
                         valueType = inferType(node.value.get());
+                        checkUnionSlotStore(node.value.get(), fieldType,
+                                            node.location(),
+                                            "field '" + attr->attribute + "'");
                     }
                 }
             } else if (auto* tup = dynamic_cast<TupleExpr*>(target.get())) {

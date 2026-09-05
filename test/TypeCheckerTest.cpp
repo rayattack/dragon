@@ -1808,6 +1808,16 @@ TEST(TypeCheckerTest, ExceptionSubclassRejectsExtraArgs) {
     EXPECT_TRUE(checkHasErrors(code("exception_subclass_rejects_extra_args")));
 }
 
+TEST(TypeCheckerTest, MonoListIntoUnionFieldStoreRejected) {
+    EXPECT_TRUE(checkHasErrors(code("mono_list_into_union_field_rejected")));
+}
+
+TEST(TypeCheckerTest, UnionSlotStoresThatStayLegal) {
+    EXPECT_TRUE(checkOk(code("mono_list_into_union_field_literal_ok")));
+    EXPECT_TRUE(checkOk(code("boxed_list_into_union_argument_ok")));
+    EXPECT_TRUE(checkOk(code("instance_into_union_slot_still_ok")));
+}
+
 TEST(TypeCheckerTest, ExitWithParametersRejected) {
     EXPECT_TRUE(checkHasErrors(code("exit_with_parameters_rejected")));
     EXPECT_TRUE(checkOk(code("exit_without_parameters_ok")));
