@@ -12,6 +12,67 @@ class A {
 a: A = A(5)
 ```
 
+#### :super_ctor_too_many_args_rejected
+
+The parent constructor takes one argument. Passing two through `super(...)` used to pass `dragon check` and fail only at build time.
+
+```dr
+class Base {
+    n: int
+    def (n: int) {
+        self.n = n
+    }
+}
+class Child(Base) {
+    m: int
+    def (n: int, m: int) {
+        super(n, m)
+        self.m = m
+    }
+}
+c: Child = Child(1, 2)
+```
+
+#### :super_ctor_missing_args_rejected
+
+```dr
+class Base {
+    n: int
+    m: int
+    def (n: int, m: int) {
+        self.n = n
+        self.m = m
+    }
+}
+class Child(Base) {
+    def (n: int) {
+        super(n)
+    }
+}
+c: Child = Child(1)
+```
+
+#### :super_ctor_defaults_ok
+
+A parent parameter with a default may be left out of the `super(...)` call.
+
+```dr
+class Base {
+    n: int
+    tag: str
+    def (n: int, tag: str = "base") {
+        self.n = n
+        self.tag = tag
+    }
+}
+class Child(Base) {
+    def (n: int) {
+        super(n)
+    }
+}
+c: Child = Child(1)
+```
+
 #### :no_ctor_class_zero_args_ok
 
 ```dr

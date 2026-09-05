@@ -93,6 +93,7 @@ struct TypeChecker::Impl {
     std::string currentModuleName;
     std::string currentPackage;
     const ClassType* currentClass = nullptr;
+    bool isDragonFile = true;
     std::unordered_map<std::string, std::string> packageKeyCache;
 
     const std::string& packageKey(const std::string& file);

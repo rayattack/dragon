@@ -285,6 +285,30 @@ bool derivesFromBuiltinException(const ClassType* c) {
     return false;
 }
 
+static std::string superCtorArityMismatch(const ClassType* cls, size_t passed) {
+    if (!cls || !cls->parentClass ||
+        cls->parentClass->kind() != Type::Kind::Class)
+        return "";
+    const auto& parent = static_cast<const ClassType&>(*cls->parentClass);
+    if (parent.constructorCount != 1) return "";
+    auto it = parent.methods.find("__init__");
+    if (it == parent.methods.end() || !it->second ||
+        it->second->kind() != Type::Kind::Function)
+        return "";
+    const auto& ft = static_cast<const FunctionType&>(*it->second);
+    if (!ft.hasArgMeta || ft.hasVarArg) return "";
+    const size_t most = ft.paramNames.size();
+    const size_t least = ft.requiredParams;
+    if (passed >= least && passed <= most) return "";
+    const std::string takes =
+        least == most ? std::to_string(most)
+                      : std::to_string(least) + " to " + std::to_string(most);
+    return "super(...): the constructor of parent class '" + parent.name +
+           "' takes " + takes + " argument" + (most == 1 ? "" : "s") +
+           ", but " + std::to_string(passed) + (passed == 1 ? " was" : " were") +
+           " passed";
+}
+
 void TypeChecker::visit(CallExpr& node) {
     auto expectedType = impl_->currentExpectedType;
     impl_->currentExpectedType = nullptr;
@@ -339,6 +363,12 @@ void TypeChecker::visit(CallExpr& node) {
             !hasStarredArg(node)) {
             checkBuiltinArity(bn, node.args.size(), node.location());
             checkBuiltinArgTypes(bn, node);
+        }
+        if (bn == "super" && impl_->isDragonFile && node.kwArgs.empty() &&
+            !hasStarredArg(node) && builtinCallIsUnshadowed(bn)) {
+            const std::string mismatch =
+                superCtorArityMismatch(impl_->currentClass, node.args.size());
+            if (!mismatch.empty()) error(node.location(), mismatch);
         }
     }
 

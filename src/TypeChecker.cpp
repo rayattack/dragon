@@ -461,6 +461,7 @@ bool TypeChecker::check(Module& module) {
     impl_->templateScopeModule = module.moduleName;
     impl_->currentPackage = impl_->packageKey(module.filename);
     impl_->currentClass = nullptr;
+    impl_->isDragonFile = module.isDragonFile;
     impl_->pushScope();
     impl_->define("print", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->boxedType},

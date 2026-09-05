@@ -1811,6 +1811,18 @@ TEST(TypeCheckerTest, NoConstructorSubclassRejectsParentArgs) {
     EXPECT_TRUE(checkHasErrors(code("no_ctor_subclass_rejects_parent_args")));
 }
 
+TEST(TypeCheckerTest, SuperCtorTooManyArgsRejected) {
+    EXPECT_TRUE(checkHasErrors(code("super_ctor_too_many_args_rejected")));
+}
+
+TEST(TypeCheckerTest, SuperCtorMissingArgsRejected) {
+    EXPECT_TRUE(checkHasErrors(code("super_ctor_missing_args_rejected")));
+}
+
+TEST(TypeCheckerTest, SuperCtorDefaultsOk) {
+    EXPECT_TRUE(checkOk(code("super_ctor_defaults_ok")));
+}
+
 TEST(TypeCheckerTest, NoConstructorClassZeroArgsOk) {
     EXPECT_TRUE(checkOk(code("no_ctor_class_zero_args_ok")));
 }
