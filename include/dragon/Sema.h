@@ -161,6 +161,7 @@ private:
                             std::vector<CompClause>& extraClauses,
                             std::initializer_list<Expr*> results);
 
+    void checkBareDictKey(StringLiteral& key);
     void defineBuiltins();
     void resolveImport(const std::string& moduleName);
     bool isValidAssignmentTarget(Expr* expr);

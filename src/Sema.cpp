@@ -255,9 +255,25 @@ void Sema::visit(TupleExpr& node) {
     for (auto& e : node.elements) e->accept(*this);
 }
 
+void Sema::checkBareDictKey(StringLiteral& key) {
+    NameResolution binding = resolveAcross(impl_->currentScope, key.value);
+    if (!binding.sym || binding.sym->isBuiltin) return;
+    if (binding.owner->kind() == Scope::Kind::Class &&
+        binding.owner != impl_->currentScope) return;
+    error(key.location(),
+          "dict key '" + key.value + "' is ambiguous: '" + key.value +
+          "' is also a name in scope. Write \"" + key.value +
+          "\" for the text key, or (" + key.value + ") for its value");
+}
+
 void Sema::visit(DictExpr& node) {
     for (auto& [key, val] : node.entries) {
-        if (key) key->accept(*this);
+        if (key) {
+            if (auto* lit = dynamic_cast<StringLiteral*>(key.get())) {
+                if (lit->isBareDictKey) checkBareDictKey(*lit);
+            }
+            key->accept(*this);
+        }
         if (val) val->accept(*this);
     }
 }

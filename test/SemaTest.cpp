@@ -245,3 +245,66 @@ TEST(SemaTest, TemplateInterpolationResolvesNames) {
     EXPECT_TRUE(analyzeHasErrors(code("template_block_undefined_iterable")));
     EXPECT_TRUE(analyzeOk(code("template_block_binds_loop_variable")));
 }
+
+TEST(SemaTest, BareDictKeyShadowedByConstIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_by_const")));
+}
+
+TEST(SemaTest, BareDictKeyAmbiguityNamesBothSpellings) {
+    auto module = parse(code("bare_dict_key_shadowed_by_const"));
+    ASSERT_NE(module, nullptr);
+    Sema sema;
+    sema.analyze(*module);
+    ASSERT_EQ(sema.diagnostics().size(), 1u);
+    const std::string& msg = sema.diagnostics()[0].message;
+    EXPECT_NE(msg.find("\"K_A\" for the text key"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("(K_A) for its value"), std::string::npos) << msg;
+}
+
+TEST(SemaTest, BareDictKeyWithNoBindingStaysSilent) {
+    EXPECT_TRUE(analyzeOk(code("bare_dict_key_with_no_binding_is_text")));
+}
+
+TEST(SemaTest, ParenthesisedDictKeyIsNeverAmbiguous) {
+    EXPECT_TRUE(analyzeOk(code("bare_dict_key_parenthesised_is_the_value")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedByFunctionIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_by_function")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedByClassIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_by_class")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedByParameterIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_by_parameter")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedInNestedDictIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_in_nested_dict")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedInDefaultArgumentIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_in_default_argument")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedByImportedNameIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_by_imported_name")));
+}
+
+TEST(SemaTest, BareDictKeyShadowedInTypedDictLiteralIsAmbiguous) {
+    EXPECT_TRUE(analyzeHasErrors(code("bare_dict_key_shadowed_in_typeddict_literal")));
+}
+
+TEST(SemaTest, TypedDictLiteralFieldNamesStaySilent) {
+    EXPECT_TRUE(analyzeOk(code("bare_dict_key_in_typeddict_literal_with_no_binding")));
+}
+
+TEST(SemaTest, DictKeyNamedLikeAClassFieldStaysSilent) {
+    EXPECT_TRUE(analyzeOk(code("bare_dict_key_named_like_a_class_field_is_text")));
+}
+
+TEST(SemaTest, BareDictKeyNamedLikeABuiltinStaysSilent) {
+    EXPECT_TRUE(analyzeOk("payload: dict[str, int] = { id: 1, type: 2 }\nprint(len(payload))\n"));
+}

@@ -516,3 +516,70 @@ def mk() -> str {
 b: str = mk()
 x: str = own b
 ```
+
+#### :reserved_word_as_declaration_name
+
+`from` starts an import, so the parser used to read this line as a broken import
+and reported the construct the programmer never wrote.
+
+```dr
+from: str = "a"
+print("unused")
+```
+
+#### :reserved_word_as_assignment_target
+
+```dr
+x: int = 1
+del = 2
+print(x)
+```
+
+#### :reserved_word_as_parameter_name
+
+```dr
+def f(from: str) -> int {
+    return 1
+}
+print(f("a"))
+```
+
+#### :reserved_word_as_attribute_name
+
+```dr
+class Box {
+    v: int
+    def () {
+        self.v = 1
+    }
+}
+b: Box = Box()
+print(b.from)
+```
+
+#### :reserved_word_as_class_declaration_name
+
+```dr
+class: str = "a"
+print("unused")
+```
+
+#### :reserved_word_as_name_then_a_real_error
+
+The reserved word must not swallow the rest of the file: the missing ')' on the
+last line is a separate, real parse error and has to survive.
+
+```dr
+from: str = "a"
+y: int = 2
+print(y
+```
+
+#### :soft_keywords_remain_ordinary_names
+
+`case` is not a reserved word, so it keeps working as an ordinary name.
+
+```dr
+case: int = 2
+print(case)
+```

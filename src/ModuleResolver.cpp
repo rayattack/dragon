@@ -120,7 +120,11 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         return isDirectory(base + rel) && relPathCaseExact(base, rel);
     };
 
+    std::vector<std::string> searchedBases;
+    std::vector<std::string> rootlessPackages;
+
     auto resolveInDir = [&](const std::string& base) -> std::string {
+        searchedBases.push_back(base);
         bool hasFlatDr = tryFile(base, topLevel + ".dr");
         bool hasFlatPy = tryFile(base, topLevel + ".py");
         bool hasFlat = hasFlatDr || hasFlatPy;
@@ -154,10 +158,7 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
                 }
                 if (hasRootDr) return base + topLevel + "/" + topLevel + ".dr";
                 if (hasInitPy) return base + topLevel + "/__init__.py";
-                errors_.push_back(
-                    "package '" + base + topLevel
-                    + "/' has no root module (expected '" + topLevel + "/" + topLevel
-                    + ".dr' or '" + topLevel + "/__init__.py')");
+                rootlessPackages.push_back(base + topLevel + "/");
                 return "";
             } else {
                 if (tryFile(base, pathName + ".dr")) return base + pathName + ".dr";
@@ -232,8 +233,20 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
     if (options_.enableSitePackages && !options_.sitePackagesPath.empty()) {
         std::string base = options_.sitePackagesPath;
         if (!base.empty() && base.back() != '/') base += '/';
+        searchedBases.push_back(base);
         if (tryFile(base, pathName + ".py")) return base + pathName + ".py";
         if (tryFile(base, pathName + "/__init__.py")) return base + pathName + "/__init__.py";
+    }
+
+    if (!rootlessPackages.empty()) {
+        std::string msg = "cannot find module '" + moduleName + "'";
+        for (const auto& dir : rootlessPackages) {
+            msg += "\n  package '" + dir + "' has no root module (expected '"
+                 + topLevel + "/" + topLevel + ".dr' or '" + topLevel + "/__init__.py')";
+        }
+        msg += "\n  searched:";
+        for (const auto& base : searchedBases) msg += " " + base;
+        errors_.push_back(msg);
     }
 
     return "";

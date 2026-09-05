@@ -22,6 +22,48 @@ struct Parser::Impl {
     static constexpr int kMaxRecursionDepth = 500;
 };
 
+inline std::string reservedWordAsNameMessage(std::string_view word) {
+    return "'" + std::string(word) +
+           "' is a reserved word and cannot be used as a name; choose a different name";
+}
+
+inline bool keywordMayBeFollowedByColon(TokenType type) {
+    switch (type) {
+        case TokenType::TRY:
+        case TokenType::ELSE:
+        case TokenType::ELIF:
+        case TokenType::EXCEPT:
+        case TokenType::FINALLY:
+        case TokenType::CATCH:
+        case TokenType::LAMBDA:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool isAssignmentOperator(TokenType type) {
+    switch (type) {
+        case TokenType::EQUAL:
+        case TokenType::PLUS_EQUAL:
+        case TokenType::MINUS_EQUAL:
+        case TokenType::STAR_EQUAL:
+        case TokenType::SLASH_EQUAL:
+        case TokenType::DOUBLE_SLASH_EQUAL:
+        case TokenType::PERCENT_EQUAL:
+        case TokenType::POWER_EQUAL:
+        case TokenType::AT_EQUAL:
+        case TokenType::AMPERSAND_EQUAL:
+        case TokenType::PIPE_EQUAL:
+        case TokenType::CARET_EQUAL:
+        case TokenType::LEFT_SHIFT_EQUAL:
+        case TokenType::RIGHT_SHIFT_EQUAL:
+            return true;
+        default:
+            return false;
+    }
+}
+
 inline bool parseIntLiteralChecked(const std::string& s, int base, int64_t& out) {
     try {
         size_t pos = 0;

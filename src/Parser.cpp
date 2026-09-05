@@ -306,6 +306,24 @@ Token Parser::consume(TokenType type, const std::string& message) {
     return Token();
 }
 
+Token Parser::consumeName(const std::string& message) {
+    if (check(TokenType::IDENTIFIER)) return advance();
+    if (isKeyword(peek().lexeme())) {
+        error(peek(), reservedWordAsNameMessage(peek().lexeme()));
+        return advance();
+    }
+    error(message);
+    return Token();
+}
+
+bool Parser::reservedWordUsedAsName() const {
+    if (check(TokenType::IDENTIFIER)) return false;
+    if (!isKeyword(peek().lexeme())) return false;
+    if (keywordMayBeFollowedByColon(peek().type())) return false;
+    return peekNext().type() == TokenType::COLON ||
+           isAssignmentOperator(peekNext().type());
+}
+
 bool Parser::isAtEnd() const {
     return peek().type() == TokenType::END_OF_FILE;
 }
@@ -628,7 +646,7 @@ std::unique_ptr<Expr> Parser::call() {
             auto attr = std::make_unique<AttributeExpr>();
             attr->setLocation(loc);
             attr->object = std::move(expr);
-            attr->attribute = std::string(consume(TokenType::IDENTIFIER, "Expect attribute name after '.'").lexeme());
+            attr->attribute = std::string(consumeName("Expect attribute name after '.'").lexeme());
             expr = std::move(attr);
         } else if (match(TokenType::LEFT_BRACKET)) {
             SourceLocation subLoc = expr->location();
@@ -1141,6 +1159,12 @@ std::unique_ptr<Expr> Parser::primary() {
         return parseYield();
     }
 
+    if (isKeyword(peek().lexeme())) {
+        error(peek(), reservedWordAsNameMessage(peek().lexeme()));
+        advance();
+        return nullptr;
+    }
+
     error("Expected expression");
     return nullptr;
 }
@@ -1251,9 +1275,11 @@ std::unique_ptr<Expr> Parser::parseDict() {
         return std::make_unique<DictExpr>();
     }
 
-    auto makeBareKey = [](const std::string& name) -> std::unique_ptr<Expr> {
+    auto makeBareKey = [](const Token& nameToken) -> std::unique_ptr<Expr> {
         auto lit = std::make_unique<StringLiteral>();
-        lit->value = name;
+        lit->value = std::string(nameToken.lexeme());
+        lit->isBareDictKey = true;
+        lit->setLocation(nameToken.location());
         return lit;
     };
 
@@ -1261,9 +1287,9 @@ std::unique_ptr<Expr> Parser::parseDict() {
         skipNewlines();
         if (impl_->options.isDragonFile) {
             if (check(TokenType::IDENTIFIER) && peekNext().type() == TokenType::COLON) {
-                std::string name = std::string(peek().lexeme());
+                Token nameToken = peek();
                 advance();
-                return makeBareKey(name);
+                return makeBareKey(nameToken);
             }
             if (match(TokenType::LEFT_PAREN)) {
                 auto key = expression();
@@ -1302,11 +1328,11 @@ std::unique_ptr<Expr> Parser::parseDict() {
     std::string firstBareName;
     if (impl_->options.isDragonFile &&
         check(TokenType::IDENTIFIER) && peekNext().type() == TokenType::COLON) {
-        std::string name = std::string(peek().lexeme());
+        Token nameToken = peek();
         advance();
-        first = makeBareKey(name);
+        firstBareName = std::string(nameToken.lexeme());
+        first = makeBareKey(nameToken);
         firstWasBareKey = true;
-        firstBareName = name;
     } else if (impl_->options.isDragonFile && check(TokenType::LEFT_PAREN)) {
         size_t savePos = impl_->current;
         advance();

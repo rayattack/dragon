@@ -52,6 +52,8 @@ private:
     template<typename... Types>
     bool match(Types... types) { return (match(types) || ...); }
     Token consume(TokenType type, const std::string& message);
+    Token consumeName(const std::string& message);
+    bool reservedWordUsedAsName() const;
     bool isAtEnd() const;
 
     void skipNewlines();

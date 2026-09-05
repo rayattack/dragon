@@ -2655,3 +2655,52 @@ TEST(ParserTest, OwnAndDubOnBareNameInAssignmentStillParse) {
     EXPECT_TRUE(parseErrors(code("own_and_dub_on_bare_name_in_assignment_still_parse")).empty());
     EXPECT_TRUE(parseErrors(code("own_and_dub_on_bare_name_in_assignment_still_parse_2")).empty());
 }
+
+TEST(ParserTest, ReservedWordAsDeclarationNameIsOneDiagnostic) {
+    auto errs = parseErrors(code("reserved_word_as_declaration_name"));
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("'from' is a reserved word"), std::string::npos)
+        << errs[0].message;
+    EXPECT_EQ(errs[0].location.line, 1u);
+}
+
+TEST(ParserTest, ReservedWordAsAssignmentTargetIsOneDiagnostic) {
+    auto errs = parseErrors(code("reserved_word_as_assignment_target"));
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("'del' is a reserved word"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, ReservedWordAsParameterNameIsOneDiagnostic) {
+    auto errs = parseErrors(code("reserved_word_as_parameter_name"));
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("'from' is a reserved word"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, ReservedWordAsAttributeNameIsOneDiagnostic) {
+    auto errs = parseErrors(code("reserved_word_as_attribute_name"));
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("'from' is a reserved word"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, ReservedWordAsClassDeclarationNameIsOneDiagnostic) {
+    auto errs = parseErrors(code("reserved_word_as_class_declaration_name"));
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("'class' is a reserved word"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, ReservedWordAsNameRecoversForLaterErrors) {
+    auto errs = parseErrors(code("reserved_word_as_name_then_a_real_error"));
+    ASSERT_EQ(errs.size(), 2u);
+    EXPECT_NE(errs[0].message.find("'from' is a reserved word"), std::string::npos)
+        << errs[0].message;
+    EXPECT_NE(errs[1].message.find("Expect ')' after arguments"), std::string::npos)
+        << errs[1].message;
+}
+
+TEST(ParserTest, SoftKeywordsRemainOrdinaryNames) {
+    EXPECT_TRUE(parseErrors(code("soft_keywords_remain_ordinary_names")).empty());
+}

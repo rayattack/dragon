@@ -55,7 +55,7 @@ def lookup(payload: str) -> str {
     if city not in temps {
         raise ValueError(f"no reading for {city}")
     }
-    return json.dumps({city: city, celsius: temps[city]})
+    return json.dumps({"city": city, "celsius": temps[city]})
 }
 
 rpc("weather.lookup", lookup)

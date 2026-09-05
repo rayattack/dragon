@@ -528,6 +528,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
             impl_->options.dumpTokens = true;
         } else if (arg == "-I" && i + 1 < argc) {
             impl_->options.searchPaths.push_back(argv[++i]);
+        } else if (arg.size() > 2 && arg.substr(0, 2) == "-I") {
+            impl_->options.searchPaths.push_back(arg.substr(2));
         } else if (arg == "--site-packages") {
             impl_->options.enableSitePackages = true;
         } else if (arg == "-l" && i + 1 < argc) {
@@ -546,8 +548,14 @@ bool Driver::parseArgs(int argc, char* argv[]) {
             impl_->options.gcMode = arg.substr(5);
         } else if (arg == "--check-overflow") {
             impl_->options.checkOverflow = true;
-        } else if (arg[0] != '-') {
+        } else if (arg.empty() || arg[0] != '-') {
             impl_->options.inputFiles.push_back(arg);
+        } else {
+            std::cerr << "Unknown option: " << arg << "\n";
+            if (impl_->options.action == DriverOptions::Action::Run) {
+                std::cerr << "To pass it to the program, put it after '--'\n";
+            }
+            return false;
         }
     }
 

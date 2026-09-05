@@ -209,6 +209,7 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         r->isRaw = n->isRaw;
         r->isFString = n->isFString;
         r->isBytes = n->isBytes;
+        r->isBareDictKey = n->isBareDictKey;
         for (auto& part : n->fstringParts) {
             FStringPart fp;
             fp.kind = part.kind;

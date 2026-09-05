@@ -287,3 +287,129 @@ def render(items: list[str], title: str) -> str {
 }
 print(render(["a"], "T"))
 ```
+
+#### :bare_dict_key_shadowed_by_const
+
+`{ K_A: 1 }` keys the dict on the text "K_A", not on the value of the constant
+`K_A`. Both readings are plausible while a binding of that name is visible, so
+the program must say which one it means.
+
+```dr
+const K_A: str = "view.load"
+literal: dict[str, int] = { K_A: 1 }
+print(len(literal))
+```
+
+#### :bare_dict_key_with_no_binding_is_text
+
+```dr
+literal: dict[str, int] = { view_load: 1, other: 2 }
+print(len(literal))
+```
+
+#### :bare_dict_key_parenthesised_is_the_value
+
+```dr
+const K_A: str = "view.load"
+computed: dict[str, int] = { (K_A): 1 }
+print(len(computed))
+```
+
+#### :bare_dict_key_shadowed_by_function
+
+```dr
+def handler() -> int {
+    return 1
+}
+routes: dict[str, int] = { handler: 1 }
+print(len(routes))
+```
+
+#### :bare_dict_key_shadowed_by_class
+
+```dr
+class Widget {
+    size: int
+}
+kinds: dict[str, int] = { Widget: 1 }
+print(len(kinds))
+```
+
+#### :bare_dict_key_shadowed_by_parameter
+
+```dr
+def index(label: str) -> int {
+    counts: dict[str, int] = { label: 1 }
+    return len(counts)
+}
+print(index("a"))
+```
+
+#### :bare_dict_key_shadowed_in_nested_dict
+
+```dr
+const K_A: str = "view.load"
+nested: dict[str, dict[str, int]] = { outer: { K_A: 1 } }
+print(len(nested))
+```
+
+#### :bare_dict_key_shadowed_in_default_argument
+
+```dr
+const K_A: str = "view.load"
+def index(counts: dict[str, int] = { K_A: 1 }) -> int {
+    return len(counts)
+}
+print(index())
+```
+
+#### :bare_dict_key_shadowed_by_imported_name
+
+```dr
+from json import dumps
+payload: dict[str, int] = { dumps: 1 }
+print(len(payload))
+```
+
+#### :bare_dict_key_named_like_a_class_field_is_text
+
+A class field is not in scope as a bare name inside a method, so a key spelled
+like one is unambiguously text.
+
+```dr
+class Row {
+    label: str
+    def () {
+        self.label = "a"
+    }
+    def counts() -> int {
+        seen: dict[str, int] = { label: 1 }
+        return len(seen)
+    }
+}
+r: Row = Row()
+print(r.counts())
+```
+
+#### :bare_dict_key_shadowed_in_typeddict_literal
+
+```dr
+class Point(TypedDict) {
+    id: int
+    score: float
+}
+const score: str = "s"
+p: Point = Point({id: 1, score: 2.5})
+print(p.id)
+```
+
+#### :bare_dict_key_in_typeddict_literal_with_no_binding
+
+```dr
+class Point(TypedDict) {
+    id: int
+    score: float
+}
+p: Point = Point({id: 1, score: 2.5})
+print(p.id)
+```

@@ -110,6 +110,7 @@ public:
     bool isRaw = false;
     bool isFString = false;
     bool isBytes = false;
+    bool isBareDictKey = false;
     std::vector<FStringPart> fstringParts;
     void accept(ASTVisitor& visitor) override;
 };

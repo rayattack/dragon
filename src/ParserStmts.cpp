@@ -19,6 +19,14 @@ std::unique_ptr<Stmt> Parser::statement() {
     }
     while (match(TokenType::NEWLINE)) {}
 
+    if (reservedWordUsedAsName()) {
+        auto stub = std::make_unique<PassStmt>();
+        stub->setLocation(peek().location());
+        error(peek(), reservedWordAsNameMessage(peek().lexeme()));
+        synchronize();
+        return stub;
+    }
+
     if (check(TokenType::AT)) {
         auto decorators = parseDecorators();
         if (check(TokenType::DEF) || check(TokenType::ASYNC)) {
@@ -1687,14 +1695,14 @@ std::vector<Parameter> Parser::parseParameters() {
             }
         } else if (match(TokenType::POWER)) {
             param.isKwArg = true;
-            param.name = std::string(consume(TokenType::IDENTIFIER, "Expect parameter name").lexeme());
+            param.name = std::string(consumeName("Expect parameter name").lexeme());
         } else {
             if (check(TokenType::IDENTIFIER) && current().lexeme() == "own" &&
                 peekNext().type() == TokenType::IDENTIFIER) {
                 advance();
                 param.isOwn = true;
             }
-            param.name = std::string(consume(TokenType::IDENTIFIER, "Expect parameter name").lexeme());
+            param.name = std::string(consumeName("Expect parameter name").lexeme());
         }
         if (match(TokenType::COLON)) param.type = parseType();
         if (match(TokenType::EQUAL)) param.defaultValue = expression();

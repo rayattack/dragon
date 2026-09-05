@@ -266,3 +266,51 @@ TEST(ModuleResolver, MissingModuleInDependency) {
     std::remove((dir + "/modA.dr").c_str());
     rmdir(dir.c_str());
 }
+
+TEST(ModuleResolver, RootlessDirectoryDoesNotShadowALaterSearchPath) {
+    auto shadowDir = makeTempDir("shadow_pkg");
+    auto libDir = makeTempDir("shadow_lib");
+    ASSERT_FALSE(shadowDir.empty());
+    ASSERT_FALSE(libDir.empty());
+    ASSERT_EQ(mkdir((shadowDir + "/sysx").c_str(), 0755), 0);
+    writeFile(shadowDir + "/sysx/types.h", "struct s { int x; };\n");
+    writeFile(libDir + "/sysx.dr", "def pid() -> int { return 1 }");
+
+    ModuleResolverOptions opts;
+    opts.searchPaths = {shadowDir, libDir};
+    ModuleResolver resolver(opts);
+
+    EXPECT_EQ(resolver.findModuleFile("sysx"), libDir + "/sysx.dr");
+    EXPECT_FALSE(resolver.hasErrors());
+
+    std::remove((shadowDir + "/sysx/types.h").c_str());
+    rmdir((shadowDir + "/sysx").c_str());
+    std::remove((libDir + "/sysx.dr").c_str());
+    rmdir(shadowDir.c_str());
+    rmdir(libDir.c_str());
+}
+
+TEST(ModuleResolver, RootlessDirectoryReportsEveryLocationWhenNothingResolves) {
+    auto shadowDir = makeTempDir("rootless_only");
+    auto libDir = makeTempDir("rootless_lib");
+    ASSERT_FALSE(shadowDir.empty());
+    ASSERT_FALSE(libDir.empty());
+    ASSERT_EQ(mkdir((shadowDir + "/sysx").c_str(), 0755), 0);
+    writeFile(shadowDir + "/sysx/types.h", "struct s { int x; };\n");
+
+    ModuleResolverOptions opts;
+    opts.searchPaths = {shadowDir, libDir};
+    ModuleResolver resolver(opts);
+
+    EXPECT_TRUE(resolver.findModuleFile("sysx").empty());
+    ASSERT_TRUE(resolver.hasErrors());
+    const std::string& msg = resolver.errors()[0];
+    EXPECT_NE(msg.find("has no root module"), std::string::npos) << msg;
+    EXPECT_NE(msg.find(shadowDir), std::string::npos) << msg;
+    EXPECT_NE(msg.find(libDir), std::string::npos) << msg;
+
+    std::remove((shadowDir + "/sysx/types.h").c_str());
+    rmdir((shadowDir + "/sysx").c_str());
+    rmdir(shadowDir.c_str());
+    rmdir(libDir.c_str());
+}

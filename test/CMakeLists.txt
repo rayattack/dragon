@@ -240,6 +240,31 @@ add_test(NAME dr_ui_binders
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/ui_binders/app.dr
         --cc-source ${CMAKE_CURRENT_SOURCE_DIR}/dr/ui_binders/webview_probe.cpp)
 
+set(DRAGON_INCLUDE_PROBE_DIR ${CMAKE_CURRENT_BINARY_DIR}/include_probe)
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/inc/helper.dr
+    CONTENT "def helped() -> int { return 41 }\n")
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/attached_include.dr
+    CONTENT "from helper import helped\nprint(helped())\n")
+add_test(NAME dr_attached_include_guard
+    COMMAND $<TARGET_FILE:dragon> check
+        ${DRAGON_INCLUDE_PROBE_DIR}/attached_include.dr
+        -I${DRAGON_INCLUDE_PROBE_DIR}/inc)
+
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/shadow/sys/types.h
+    CONTENT "struct dragon_probe { int x; };\n")
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr
+    CONTENT "import sys\nprint(\"stdlib module still resolves\")\n")
+add_test(NAME dr_shadowed_stdlib_package_guard
+    COMMAND $<TARGET_FILE:dragon> check
+        ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr
+        -I ${DRAGON_INCLUDE_PROBE_DIR}/shadow)
+
+add_test(NAME dr_unknown_option_guard
+    COMMAND $<TARGET_FILE:dragon> check
+        ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr --no-such-option)
+set_tests_properties(dr_unknown_option_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "Unknown option: --no-such-option")
+
 file(GLOB DRAGON_EXAMPLE_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/examples/*.dr
     ${CMAKE_SOURCE_DIR}/examples/docs_site/*.dr)
