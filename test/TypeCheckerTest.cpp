@@ -2050,3 +2050,40 @@ TEST(TypeCheckerTest, GenericMethodOverloadBesideConcrete) {
     EXPECT_TRUE(checkHasErrors(code("two_generic_methods_same_name_rejected")));
     EXPECT_TRUE(checkOk(code("generic_method_beside_concrete_overload_accepted")));
 }
+
+TEST(TypeCheckerTest, BuiltinArityRefusedWhereCodegenCannotLower) {
+    EXPECT_TRUE(checkHasErrors(code("round_with_digits_rejected")));
+    EXPECT_TRUE(checkOk(code("round_one_argument_accepted")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_with_encoding_rejected")));
+    EXPECT_TRUE(checkOk(code("bytes_arities_accepted")));
+}
+
+TEST(TypeCheckerTest, BuiltinArityMessageNamesTheCallAndTheFix) {
+    auto module = parse(code("round_with_digits_rejected"));
+    ASSERT_NE(module, nullptr);
+    Sema sema;
+    sema.analyze(*module);
+    TypeChecker tc;
+    tc.check(*module);
+    bool found = false;
+    for (const auto& d : tc.diagnostics()) {
+        if (d.message.find("round() takes 1 argument, but 2 were given") ==
+            std::string::npos) continue;
+        found = true;
+        EXPECT_NE(d.message.find("f\"{x:.2f}\""), std::string::npos) << d.message;
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(TypeCheckerTest, DictMethodArityRefusedWhereCodegenCannotLower) {
+    EXPECT_TRUE(checkHasErrors(code("setdefault_without_default_rejected")));
+    EXPECT_TRUE(checkOk(code("dict_method_arities_accepted")));
+}
+
+TEST(TypeCheckerTest, DeferRefusalsAreTypeErrorsNotCodegenErrors) {
+    EXPECT_TRUE(checkHasErrors(code("defer_on_a_callable_variable_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("defer_on_a_nested_def_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("defer_with_keyword_argument_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("defer_with_union_argument_rejected")));
+    EXPECT_TRUE(checkOk(code("defer_direct_callees_accepted")));
+}

@@ -65,6 +65,10 @@ inline bool isAssignmentOperator(TokenType type) {
     }
 }
 
+inline bool nameFollows(TokenType next) {
+    return next == TokenType::COLON || isAssignmentOperator(next);
+}
+
 inline bool parseIntLiteralChecked(const std::string& s, int base, int64_t& out) {
     try {
         size_t pos = 0;

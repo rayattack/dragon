@@ -427,8 +427,7 @@ bool Parser::reservedWordUsedAsName() const {
     if (check(TokenType::IDENTIFIER)) return false;
     if (!isKeyword(peek().lexeme())) return false;
     if (keywordMayBeFollowedByColon(peek().type())) return false;
-    return peekNext().type() == TokenType::COLON ||
-           isAssignmentOperator(peekNext().type());
+    return nameFollows(peekNext().type());
 }
 
 bool Parser::isAtEnd() const {

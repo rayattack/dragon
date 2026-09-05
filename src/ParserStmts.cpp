@@ -98,7 +98,9 @@ std::unique_ptr<Stmt> Parser::statement() {
 
     if (impl_->options.isDragonFile &&
         check(TokenType::IDENTIFIER) && current().lexeme() == "defer" &&
-        peekNext().type() == TokenType::IDENTIFIER) {
+        (peekNext().type() == TokenType::IDENTIFIER ||
+         peekNext().type() == TokenType::FIRE ||
+         peekNext().type() == TokenType::AWAIT)) {
         return deferStatement();
     }
 
@@ -112,11 +114,13 @@ std::unique_ptr<Stmt> Parser::statement() {
         return staticDeclaration();
     }
 
-    if (check(TokenType::IDENTIFIER) && peek().lexeme() == "match") {
+    if (check(TokenType::IDENTIFIER) && peek().lexeme() == "match" &&
+        !nameFollows(peekNext().type())) {
         return matchStatement();
     }
 
-    if (check(TokenType::IDENTIFIER) && peek().lexeme() == "type") {
+    if (check(TokenType::IDENTIFIER) && peek().lexeme() == "type" &&
+        !nameFollows(peekNext().type())) {
         advance();
         auto typeLoc = previous().location();
         std::string typeName = std::string(

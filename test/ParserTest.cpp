@@ -2821,3 +2821,20 @@ TEST(ParserTest, ReservedWordAsNameRecoversForLaterErrors) {
 TEST(ParserTest, SoftKeywordsRemainOrdinaryNames) {
     EXPECT_TRUE(parseErrors(code("soft_keywords_remain_ordinary_names")).empty());
 }
+
+TEST(ParserTest, DeferFireReachesTheDeferStatement) {
+    auto errs = parseErrors(code("defer_fire_is_not_a_name_cascade"));
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("'defer' requires a direct call"),
+              std::string::npos) << errs[0].message;
+}
+
+TEST(ParserTest, SoftKeywordsMatchAndTypeAreOrdinaryNames) {
+    EXPECT_TRUE(parseErrors(code("match_is_an_ordinary_name")).empty());
+    EXPECT_TRUE(parseErrors(code("type_is_an_ordinary_name")).empty());
+}
+
+TEST(ParserTest, MatchStatementAndTypeAliasStillParse) {
+    EXPECT_TRUE(parseErrors(code("match_statement_still_parses")).empty());
+    EXPECT_TRUE(parseErrors(code("type_alias_still_parses")).empty());
+}

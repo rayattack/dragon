@@ -1080,7 +1080,38 @@ void TypeChecker::visit(ThreadStmt& node) {
 }
 
 void TypeChecker::visit(DeferStmt& node) {
-    if (node.call) inferType(node.call.get());
+    if (!node.call) return;
+    inferType(node.call.get());
+
+    auto* call = dynamic_cast<CallExpr*>(node.call.get());
+    if (!call) return;
+
+    if (!call->kwArgs.empty()) {
+        error(node.location(),
+              "defer does not take keyword arguments; pass them positionally");
+        return;
+    }
+
+    if (auto* calleeName = dynamic_cast<NameExpr*>(call->callee.get())) {
+        if (!impl_->plainFunctionSymbols.count(calleeName->name)) {
+            error(node.location(),
+                  "defer cannot bind '" + calleeName->name +
+                  "': a deferred call must name a top-level function or a "
+                  "method on a value. A builtin, a class, a nested def and a "
+                  "variable holding a callable are all out of reach; wrap the "
+                  "work in a top-level function and defer that");
+            return;
+        }
+    }
+
+    for (const auto& arg : call->args) {
+        if (arg && arg->type && arg->type->kind() == Type::Kind::Union) {
+            error(arg->location(),
+                  "defer cannot store an argument of union type; narrow it to "
+                  "a concrete type before deferring the call");
+            return;
+        }
+    }
 }
 
 void TypeChecker::visit(MatchStmt& node) {

@@ -615,3 +615,57 @@ try:
 except mod.MyErr as e:
     pass
 ```
+
+#### :defer_fire_is_not_a_name_cascade
+
+`defer fire f(1)` used to slip past the defer guard because `fire` is a keyword
+token, so `defer` was parsed as an ordinary name and the file collapsed into
+"undefined name 'defer'". It must reach the defer statement and say what is
+actually wrong.
+
+```dr
+def f(x: int) -> int { return x }
+
+def main() -> None {
+    defer fire f(1)
+    print("body")
+}
+main()
+```
+
+#### :match_is_an_ordinary_name
+
+```dr
+match: int = 1
+match = match + 1
+print(match)
+```
+
+#### :type_is_an_ordinary_name
+
+```dr
+type: int = 2
+type = type + 1
+print(type)
+```
+
+#### :match_statement_still_parses
+
+```dr
+def classify(n: int) -> str {
+    match n {
+        case 0 { return "zero" }
+        case _ { return "other" }
+    }
+}
+print(classify(0))
+```
+
+#### :type_alias_still_parses
+
+```dr
+type Shape = int | str
+
+s: Shape = 1
+print(s)
+```

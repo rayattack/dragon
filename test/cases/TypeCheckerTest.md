@@ -3358,3 +3358,125 @@ class W {
     def sgen() { yield 2 }
 }
 ```
+
+#### :round_with_digits_rejected
+
+`round(x, n)` is a Python habit Dragon cannot lower: its `round` returns a whole
+int. The refusal used to arrive from codegen, so `dragon check` passed and
+`dragon build` failed.
+
+```dr
+x: int = round(1.234, 2)
+print(x)
+```
+
+#### :round_one_argument_accepted
+
+```dr
+x: int = round(1.6)
+print(x)
+```
+
+#### :bytes_with_encoding_rejected
+
+```dr
+b: bytes = bytes("text", "utf-8")
+print(len(b))
+```
+
+#### :bytes_arities_accepted
+
+```dr
+empty: bytes = bytes()
+one: bytes = bytes("text")
+encoded: bytes = "text".encode("utf-8")
+print(len(empty) + len(one) + len(encoded))
+```
+
+#### :setdefault_without_default_rejected
+
+```dr
+d: dict[str, int] = {"a": 1}
+v: int = d.setdefault("k")
+print(v)
+```
+
+#### :dict_method_arities_accepted
+
+```dr
+d: dict[str, int] = {"a": 1}
+print(d.setdefault("k", 0))
+print(d.get("a", 0))
+print(len(d.keys()))
+d.clear()
+print(len(d))
+```
+
+#### :defer_on_a_callable_variable_rejected
+
+```dr
+def work() -> None { print("work") }
+
+def main() -> None {
+    f: Callable[[], None] = work
+    defer f()
+    print("body")
+}
+main()
+```
+
+#### :defer_on_a_nested_def_rejected
+
+```dr
+def outer() -> None {
+    def inner() -> None { print("inner") }
+    defer inner()
+    print("body")
+}
+outer()
+```
+
+#### :defer_with_keyword_argument_rejected
+
+```dr
+def log(msg: str = "m", n: int = 1) -> None { print(msg + str(n)) }
+
+def main() -> None {
+    defer log(n=2)
+    print("body")
+}
+main()
+```
+
+#### :defer_with_union_argument_rejected
+
+```dr
+def log(v: int | str) -> None { print(str(v)) }
+
+def main() -> None {
+    a: int | str = 5
+    defer log(a)
+    print("body")
+}
+main()
+```
+
+#### :defer_direct_callees_accepted
+
+```dr
+class R {
+    n: int
+    def() { self.n = 1 }
+    def close() -> None { print("closed") }
+}
+
+def cleanup() -> None { print("cleanup") }
+
+def main() -> None {
+    r: R = R()
+    defer cleanup()
+    defer r.close()
+    print("body")
+}
+main()
+```

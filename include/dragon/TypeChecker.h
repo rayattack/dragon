@@ -399,6 +399,12 @@ private:
     bool diagnoseHeterogeneousLiteral(Expr* value,
                                       const std::shared_ptr<Type>& annot);
     bool nameIsUnshadowedBuiltin(const std::string& name) const;
+    bool hasStarredArg(const CallExpr& node) const;
+    bool builtinCallIsUnshadowed(const std::string& name) const;
+    void checkBuiltinArity(const std::string& name, size_t given,
+                           const SourceLocation& loc);
+    void checkDictMethodArity(const std::string& method, size_t given,
+                              const SourceLocation& loc);
     void refuseDequeIteration(Expr* iterable);
     void bindCompLoopVars(const std::vector<std::string>& names,
                           const std::shared_ptr<Type>& iterType);

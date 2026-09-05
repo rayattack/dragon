@@ -8,6 +8,7 @@
 #include <cassert>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <set>
 #include <system_error>
 
@@ -300,6 +301,10 @@ void TypeChecker::visit(CallExpr& node) {
             for (auto& arg : node.args) checkRenderable(arg.get(), "print()");
         else if (sequenceBuiltins.count(bn) && nameIsUnshadowedBuiltin(bn))
             for (auto& arg : node.args) refuseDequeIteration(arg.get());
+        if (builtinCallIsUnshadowed(bn) && node.kwArgs.empty() &&
+            !hasStarredArg(node)) {
+            checkBuiltinArity(bn, node.args.size(), node.location());
+        }
     }
 
     {
@@ -325,6 +330,15 @@ void TypeChecker::visit(CallExpr& node) {
     impl_->methodRefOkExpr = node.callee.get();
     auto calleeType = inferType(node.callee.get());
     impl_->methodRefOkExpr = savedMethodOk;
+
+    if (auto* methodAttr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
+        if (node.kwArgs.empty() && !hasStarredArg(node) && methodAttr->object &&
+            methodAttr->object->type &&
+            methodAttr->object->type->kind() == Type::Kind::Dict) {
+            checkDictMethodArity(methodAttr->attribute, node.args.size(),
+                                 node.location());
+        }
+    }
 
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
         std::shared_ptr<Type> objType = attr->object ? attr->object->type : nullptr;
@@ -2144,6 +2158,105 @@ static std::shared_ptr<Type> iterableElementType(
         return static_cast<DictType&>(*iter).keyType;
     }
     return unknown;
+}
+
+namespace {
+
+std::string arityList(const std::set<size_t>& accepted) {
+    std::string out;
+    size_t i = 0;
+    for (size_t n : accepted) {
+        if (i > 0) out += i + 1 == accepted.size() ? " or " : ", ";
+        out += std::to_string(n);
+        ++i;
+    }
+    return out;
+}
+
+std::string arityMessage(const std::string& callee,
+                         const std::set<size_t>& accepted, size_t given) {
+    std::string out = callee + " takes " + arityList(accepted) + " argument";
+    if (accepted.size() > 1 || *accepted.rbegin() != 1) out += "s";
+    out += ", but " + std::to_string(given) + " ";
+    out += given == 1 ? "was" : "were";
+    out += " given";
+    return out;
+}
+
+const std::map<std::string, std::set<size_t>>& builtinArities() {
+    static const std::map<std::string, std::set<size_t>> table = {
+        {"abs", {1}},      {"all", {1}},      {"any", {1}},
+        {"bin", {1}},      {"bool", {1}},     {"bytes", {0, 1}},
+        {"chr", {1}},      {"dir", {1}},      {"divmod", {2}},
+        {"filter", {2}},   {"float", {1}},    {"getattr", {2, 3}},
+        {"hasattr", {2}},  {"hash", {1}},     {"hex", {1}},
+        {"id", {1}},       {"int", {1}},      {"isinstance", {2}},
+        {"issubclass", {2}}, {"len", {1}},    {"map", {2}},
+        {"oct", {1}},      {"ord", {1}},      {"pow", {2}},
+        {"repr", {1}},     {"reversed", {1}}, {"round", {1}},
+        {"sorted", {1}},   {"str", {1}},      {"sum", {1}},
+        {"type", {1}},     {"zip", {2}},
+    };
+    return table;
+}
+
+const std::map<std::string, std::set<size_t>>& dictMethodArities() {
+    static const std::map<std::string, std::set<size_t>> table = {
+        {"get", {1, 2}},   {"pop", {1, 2}},   {"setdefault", {2}},
+        {"keys", {0}},     {"values", {0}},   {"items", {0}},
+        {"clear", {0}},    {"copy", {0}},     {"popitem", {0}},
+        {"update", {1}},   {"has_key", {1}},
+    };
+    return table;
+}
+
+std::string arityHint(const std::string& callee, size_t given) {
+    if (callee == "round" && given == 2) {
+        return ". round(x) rounds to a whole int; for fixed decimals format the "
+               "value instead: f\"{x:.2f}\"";
+    }
+    if (callee == "bytes" && given == 2) {
+        return ". To encode text, call encode on the string: "
+               "\"text\".encode(\"utf-8\")";
+    }
+    if (callee == "setdefault" && given == 1) {
+        return ". setdefault(key, default) needs the value to insert when the "
+               "key is absent; use get(key) to read without inserting";
+    }
+    return "";
+}
+
+}
+
+void TypeChecker::checkBuiltinArity(const std::string& name, size_t given,
+                                    const SourceLocation& loc) {
+    auto it = builtinArities().find(name);
+    if (it == builtinArities().end()) return;
+    if (it->second.count(given)) return;
+    error(loc, arityMessage(name + "()", it->second, given) +
+               arityHint(name, given));
+}
+
+void TypeChecker::checkDictMethodArity(const std::string& method, size_t given,
+                                       const SourceLocation& loc) {
+    auto it = dictMethodArities().find(method);
+    if (it == dictMethodArities().end()) return;
+    if (it->second.count(given)) return;
+    error(loc, arityMessage("dict." + method + "()", it->second, given) +
+               arityHint(method, given));
+}
+
+bool TypeChecker::builtinCallIsUnshadowed(const std::string& name) const {
+    if (impl_->builtinIdentity.count(name)) return nameIsUnshadowedBuiltin(name);
+    return impl_->lookup(name) == nullptr &&
+           impl_->plainFunctionSymbols.count(name) == 0 &&
+           impl_->typeNames.count(name) == 0;
+}
+
+bool TypeChecker::hasStarredArg(const CallExpr& node) const {
+    for (const auto& a : node.args)
+        if (dynamic_cast<StarredExpr*>(a.get())) return true;
+    return false;
 }
 
 bool TypeChecker::nameIsUnshadowedBuiltin(const std::string& name) const {
