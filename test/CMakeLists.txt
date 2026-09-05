@@ -265,6 +265,28 @@ add_test(NAME dr_unknown_option_guard
 set_tests_properties(dr_unknown_option_guard PROPERTIES
     PASS_REGULAR_EXPRESSION "Unknown option: --no-such-option")
 
+add_test(NAME dr_dump_tokens_on_run_guard
+    COMMAND $<TARGET_FILE:dragon> run
+        ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr --dump-tokens)
+set_tests_properties(dr_dump_tokens_on_run_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "=== Tokens ===")
+
+add_test(NAME dr_unimplemented_egg_verb_guard
+    COMMAND $<TARGET_FILE:dragon> bump)
+set_tests_properties(dr_unimplemented_egg_verb_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "Unknown command: bump")
+
+add_test(NAME dr_unknown_gc_mode_guard
+    COMMAND $<TARGET_FILE:dragon> check
+        ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr --gc=bogus)
+set_tests_properties(dr_unknown_gc_mode_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "Unknown --gc mode: 'bogus'")
+
+add_test(NAME dr_help_lists_release_and_gc_none
+    COMMAND $<TARGET_FILE:dragon> --help)
+set_tests_properties(dr_help_lists_release_and_gc_none PROPERTIES
+    PASS_REGULAR_EXPRESSION "--release")
+
 file(GLOB DRAGON_EXAMPLE_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/examples/*.dr
     ${CMAKE_SOURCE_DIR}/examples/docs_site/*.dr)

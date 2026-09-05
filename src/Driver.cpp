@@ -266,8 +266,7 @@ int execEggCapture(const std::vector<std::string>& subArgs, std::string& out) {
 
 bool isEggVerb(const std::string& cmd) {
     static const char* verbs[] = {
-        "init", "grab", "drop", "sync", "bump", "list", "info",
-        "hash", "find", "push", "yank", "wipe", "scan"
+        "init", "grab", "drop", "sync", "push", "keygen", "find", "scan"
     };
     for (const char* v : verbs) if (cmd == v) return true;
     return false;
@@ -558,7 +557,15 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         } else if (arg == "--backend" && i + 1 < argc) {
             ++i;
         } else if (arg.substr(0, 5) == "--gc=") {
-            impl_->options.gcMode = arg.substr(5);
+            std::string mode = arg.substr(5);
+            if (mode != "rc" && mode != "none") {
+                std::cerr << "Unknown --gc mode: '" << mode
+                          << "'. The modes are 'rc' (refcounting plus the "
+                             "cycle collector, the default) and 'none' (no "
+                             "refcount traffic; the OS reclaims at exit)\n";
+                return false;
+            }
+            impl_->options.gcMode = mode;
         } else if (arg == "--check-overflow") {
             impl_->options.checkOverflow = true;
         } else if (arg.empty() || arg[0] != '-') {
@@ -659,17 +666,24 @@ Commands:
 
 Package (eggs, D022):
   init              Scaffold a dragon.drs manifest in the current directory
-  grab <name>       Fetch + add an egg dependency        (in progress)
-  sync              Fetch + verify all eggs into .drx/    (in progress)
-  drop <name>       Remove an egg dependency              (in progress)
+  grab <name>       Add an egg dependency (<name>[@version], --path, --git)
+  sync              Fetch + verify all eggs into .drx/
+  drop <name>       Remove an egg dependency
+  push              Publish this package (needs DRAGON_REGISTRY_TOKEN)
+  keygen            Create a signing key
+  find <text>       Search the registry
+  scan              Report advisories for the installed eggs
 
 Options:
   -o <file>         Output file name
   -O0/-O1/-O2/-O3   Optimization level (default: 0)
+  --release         Optimize aggressively (same as -O3)
   -g                Generate debug information
   -f                Force Python mode (for .py files)
-  -I <dir>          Add module search path
+  -I <dir>          Add module search path (-I<dir> also works)
   --site-packages   Search Python site-packages for modules
+  --gc=rc           Refcounting plus the cycle collector (the default)
+  --gc=none         Emit no refcount traffic; the OS reclaims at exit
   --backend <llvm>   Accepted for compatibility and ignored (LLVM is the only backend)
   -v, --verbose     Verbose output
   --dump-ast        Print AST after parsing
@@ -757,6 +771,14 @@ int Driver::buildFile(const std::string& filename) {
 
     Lexer lexer(source, lexOpts);
     auto tokens = lexer.tokenize();
+
+    if (impl_->options.dumpTokens) {
+        std::cout << "=== Tokens ===\n";
+        for (const auto& tok : tokens) {
+            std::cout << tok.toString() << "\n";
+        }
+        std::cout << "==============\n";
+    }
 
     if (lexer.hasErrors()) {
         for (const auto& diag : lexer.diagnostics()) {
