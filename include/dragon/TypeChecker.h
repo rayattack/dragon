@@ -379,6 +379,7 @@ private:
         std::vector<NarrowBinding> whenFalse;
     };
     NarrowFacts checkGuardCondition(Expr* cond);
+    static const std::string* narrowSubjectName(Expr* e);
     NarrowFacts guardFactsForLeaf(Expr* cond);
     std::shared_ptr<Type> narrowTargetTypeFromExpr(Expr* e);
     void defineNarrowBindings(const std::vector<NarrowBinding>& bindings);

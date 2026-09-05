@@ -802,6 +802,12 @@ void TypeChecker::defineNarrowBindings(const std::vector<NarrowBinding>& binding
     }
 }
 
+const std::string* TypeChecker::narrowSubjectName(Expr* e) {
+    if (auto* nm = dynamic_cast<NameExpr*>(e)) return &nm->name;
+    if (auto* w = dynamic_cast<WalrusExpr*>(e)) return &w->name;
+    return nullptr;
+}
+
 TypeChecker::NarrowFacts TypeChecker::guardFactsForLeaf(Expr* cond) {
     NarrowFacts facts;
     if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
@@ -809,20 +815,20 @@ TypeChecker::NarrowFacts TypeChecker::guardFactsForLeaf(Expr* cond) {
         bool isEq = (op == TokenType::IS || op == TokenType::EQUAL_EQUAL);
         bool isNe = (op == TokenType::IS_NOT || op == TokenType::NOT_EQUAL);
         if (!isEq && !isNe) return facts;
-        auto* nm = dynamic_cast<NameExpr*>(bin->left.get());
+        const std::string* subject = narrowSubjectName(bin->left.get());
         bool noneOther = dynamic_cast<NoneLiteral*>(bin->right.get()) != nullptr;
-        if (!nm || !noneOther) {
-            nm = dynamic_cast<NameExpr*>(bin->right.get());
+        if (!subject || !noneOther) {
+            subject = narrowSubjectName(bin->right.get());
             noneOther = dynamic_cast<NoneLiteral*>(bin->left.get()) != nullptr;
         }
-        if (!nm || !noneOther) return facts;
-        auto curType = impl_->lookup(nm->name);
+        if (!subject || !noneOther) return facts;
+        auto curType = impl_->lookup(*subject);
         if (!curType || curType->kind() != Type::Kind::Union) return facts;
         auto nonNone = subtractUnionMember(curType, impl_->noneType);
         auto& whenNone    = isEq ? facts.whenTrue : facts.whenFalse;
         auto& whenPresent = isEq ? facts.whenFalse : facts.whenTrue;
-        whenNone.push_back({nm->name, impl_->noneType});
-        if (nonNone) whenPresent.push_back({nm->name, nonNone});
+        whenNone.push_back({*subject, impl_->noneType});
+        if (nonNone) whenPresent.push_back({*subject, nonNone});
         return facts;
     }
     auto* call = dynamic_cast<CallExpr*>(cond);
@@ -830,9 +836,9 @@ TypeChecker::NarrowFacts TypeChecker::guardFactsForLeaf(Expr* cond) {
     auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
     if (!callee || callee->name != "isinstance" || call->args.size() != 2)
         return facts;
-    auto* argName = dynamic_cast<NameExpr*>(call->args[0].get());
-    if (!argName) return facts;
-    auto curType = impl_->lookup(argName->name);
+    const std::string* argSubject = narrowSubjectName(call->args[0].get());
+    if (!argSubject) return facts;
+    auto curType = impl_->lookup(*argSubject);
     auto matchType = narrowTargetTypeFromExpr(call->args[1].get());
     if (!curType || !matchType) return facts;
     if (curType->kind() == Type::Kind::Union) {
@@ -847,13 +853,13 @@ TypeChecker::NarrowFacts TypeChecker::guardFactsForLeaf(Expr* cond) {
                 break;
             }
         }
-        facts.whenTrue.push_back({argName->name, matchType});
+        facts.whenTrue.push_back({*argSubject, matchType});
         auto rest = subtractUnionMember(curType, matchType);
-        if (rest) facts.whenFalse.push_back({argName->name, rest});
+        if (rest) facts.whenFalse.push_back({*argSubject, rest});
         return facts;
     }
     if (curType->kind() == Type::Kind::Boxed)
-        facts.whenTrue.push_back({argName->name, matchType});
+        facts.whenTrue.push_back({*argSubject, matchType});
     return facts;
 }
 

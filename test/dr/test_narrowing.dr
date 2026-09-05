@@ -254,6 +254,18 @@ class NarrowDispatchTests(TestCase) {
 }
 
 
+def maybe_word(n: int) -> str | None {
+    if n > 0 { return "word" + str(n) }
+    return None
+}
+
+
+def maybe_thing(n: int) -> Thing | None {
+    if n > 0 { return Thing() }
+    return None
+}
+
+
 class IsinstanceNoneTest(TestCase) {
     def test_none_is_not_instance() -> None {
         h: Holder = Holder()
@@ -293,6 +305,53 @@ class IsinstanceNoneTest(TestCase) {
         h2: Holder = Holder()
         v2: Optional[Thing] = h2.t
         self.assertFalse(isinstance(v2, SubThing))
+    }
+
+    def test_walrus_narrows_in_the_condition_it_binds() -> None {
+        got: str = "none"
+        if (v := maybe_word(1)) is not None {
+            got = v.upper()
+        }
+        self.assertEqual(got, "WORD1")
+    }
+
+    def test_walrus_narrow_matches_the_two_line_form() -> None {
+        w: str | None = maybe_word(2)
+        two_line: str = "none"
+        if w is not None { two_line = w.upper() }
+        walrus: str = "none"
+        if (v := maybe_word(2)) is not None { walrus = v.upper() }
+        self.assertEqual(walrus, two_line)
+    }
+
+    def test_walrus_none_branch_is_not_narrowed() -> None {
+        taken: int = 0
+        if (v := maybe_word(0)) is not None { taken = 1 }
+        self.assertEqual(taken, 0)
+    }
+
+    def test_walrus_narrow_ends_after_the_block() -> None {
+        seen: int = 0
+        if (v := maybe_word(3)) is not None { seen = len(v) }
+        self.assertEqual(seen, 5)
+        after: str | None = v
+        self.assertTrue(after is not None)
+    }
+
+    def test_walrus_narrows_under_isinstance() -> None {
+        bumped: int = 0
+        if isinstance(t := maybe_thing(1), Thing) {
+            bumped = t.bump()
+        }
+        self.assertEqual(bumped, 42)
+    }
+
+    def test_walrus_narrows_in_an_and_chain() -> None {
+        got: str = "none"
+        if (v := maybe_word(4)) is not None and len(v) > 0 {
+            got = v.upper()
+        }
+        self.assertEqual(got, "WORD4")
     }
 }
 
