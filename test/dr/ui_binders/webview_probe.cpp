@@ -15,6 +15,7 @@
 
 extern "C" const char* dragon_string_alloc(const char* src, int64_t len);
 extern "C" const char* dragon_string_dup(const char* s);
+extern "C" void dragon_decref_str(const char* s);
 extern "C" char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
 namespace {
@@ -60,7 +61,9 @@ void probe_js_reset(void) { g_evaluated_js.clear(); }
 void probe_dispatch(const char* msg) {
     if (!g_handler) return;
     std::string m = utf8_of(msg);
-    g_handler(dragon_string_dup(m.c_str()));
+    const char* dispatched = dragon_string_dup(m.c_str());
+    g_handler(dispatched);
+    dragon_decref_str(dispatched);
 }
 
 }

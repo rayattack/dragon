@@ -9,6 +9,8 @@
 
 extern "C" const char* dragon_string_dup(const char* s);
 
+extern "C" void dragon_decref_str(const char* s);
+
 extern "C" char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
 static const char* dragon__utf8_view(const char* s, char** owned, int64_t* len_out) {
@@ -134,6 +136,7 @@ static void dragon__on_script_message(WebKitUserContentManager* ucm,
     if (wv->handler && s) {
         const char* dstr = dragon_string_dup(s);
         wv->handler(dstr);
+        dragon_decref_str(dstr);
     }
     if (s) g_free(s);
 }
