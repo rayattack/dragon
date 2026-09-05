@@ -31,6 +31,20 @@ static bool aggregateElemSupported(const std::string& fn,
     return false;
 }
 
+static std::shared_ptr<Type> declaredAttrType(const ClassType* cls,
+                                              const std::string& attr) {
+    for (int guard = 0; cls && guard < 256; ++guard) {
+        auto fit = cls->fields.find(attr);
+        if (fit != cls->fields.end()) return fit->second;
+        auto mit = cls->methods.find(attr);
+        if (mit != cls->methods.end()) return mit->second;
+        cls = (cls->parentClass && cls->parentClass->kind() == Type::Kind::Class)
+                  ? static_cast<const ClassType*>(cls->parentClass.get())
+                  : nullptr;
+    }
+    return nullptr;
+}
+
 static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
                                               const char* dunder) {
     for (int guard = 0; cls && guard < 64; ++guard) {
@@ -1151,6 +1165,33 @@ void TypeChecker::visit(CallExpr& node) {
             return;
         default:
             break;
+        }
+    }
+
+    if (auto* attrBuiltin = dynamic_cast<NameExpr*>(node.callee.get())) {
+        if (attrBuiltin->name == "getattr" && node.args.size() >= 2) {
+            auto* nameLit = dynamic_cast<StringLiteral*>(node.args[1].get());
+            const ClassType* recvCls = nullptr;
+            if (node.args[0]->type &&
+                node.args[0]->type->kind() == Type::Kind::Instance)
+                recvCls = static_cast<InstanceType&>(*node.args[0]->type)
+                              .classType.get();
+            if (nameLit && !nameLit->isBytes && !nameLit->isFString && recvCls) {
+                if (auto declared = declaredAttrType(recvCls, nameLit->value)) {
+                    node.type = declared;
+                    return;
+                }
+                if (node.args.size() == 2) {
+                    error(node.args[1]->location(), "type '" + recvCls->name +
+                          "' has no attribute '" + nameLit->value + "'");
+                    node.type = impl_->unknownType;
+                    return;
+                }
+                if (node.args[2]->type) {
+                    node.type = node.args[2]->type;
+                    return;
+                }
+            }
         }
     }
 

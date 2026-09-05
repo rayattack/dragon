@@ -139,7 +139,8 @@ def _dumps_cyclic_list() {
 
 def _getattr_missing() {
     p: Point = Point(1)
-    getattr(p, "nope")
+    name: str = "no" + "pe"
+    getattr(p, name)
 }
 
 

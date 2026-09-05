@@ -1599,6 +1599,20 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_getattr"], {obj, attrName}, "getattr");
         }
+        if (node.type) {
+            llvm::Type* want = impl_->typeKindToLLVM(node.type->kind());
+            if (want != impl_->lastValue->getType()) {
+                if (want->isPointerTy())
+                    impl_->lastValue = impl_->builder->CreateIntToPtr(
+                        impl_->lastValue, want, "getattr.ptr");
+                else if (want == impl_->f64Type)
+                    impl_->lastValue = impl_->builder->CreateBitCast(
+                        impl_->lastValue, want, "getattr.f64");
+                else if (want == impl_->i1Type)
+                    impl_->lastValue = impl_->builder->CreateTrunc(
+                        impl_->lastValue, want, "getattr.bool");
+            }
+        }
         return true;
     }
 

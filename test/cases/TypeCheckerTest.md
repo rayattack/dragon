@@ -3815,3 +3815,84 @@ class Tag {
 t: Tag = Tag(label=["x"])
 print(t.label)
 ```
+
+#### :getattr_undeclared_attribute_rejected
+
+A literal attribute name is resolved against the receiver's class, so a name the
+class does not declare is the same compile error the dot form gives.
+
+```dr
+class A {
+    x: int
+    def (x: int) {
+        self.x = x
+    }
+}
+a: A = A(5)
+print(str(getattr(a, "nope")))
+```
+
+#### :getattr_field_type_is_declared_type
+
+```dr
+class A {
+    x: int
+    def (x: int) {
+        self.x = x
+    }
+}
+a: A = A(5)
+s: str = getattr(a, "x")
+print(s)
+```
+
+#### :getattr_method_is_not_text
+
+```dr
+class A {
+    x: int
+    def (x: int) {
+        self.x = x
+    }
+    def m() -> int {
+        return self.x
+    }
+}
+a: A = A(5)
+print(str(getattr(a, "m")))
+```
+
+#### :getattr_declared_attributes_accepted
+
+```dr
+class Base {
+    tag: str
+    def (tag: str) {
+        self.tag = tag
+    }
+    def describe() -> str {
+        return self.tag
+    }
+}
+class Child(Base) {
+    n: int
+    def (tag: str, n: int) {
+        super(tag)
+        self.n = n
+    }
+}
+def takes_int(v: int) -> int {
+    return v + 1
+}
+c: Child = Child("t", 5)
+print(str(getattr(c, "n")))
+print(getattr(c, "tag"))
+print(str(takes_int(getattr(c, "n"))))
+print(getattr(c, "describe")())
+m: Callable[[], str] = getattr(c, "describe")
+print(m())
+print(str(getattr(c, "nope", 42)))
+print(str(hasattr(c, "nope")))
+missing: str = "no" + "pe"
+print(str(hasattr(c, missing)))
+```

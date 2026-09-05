@@ -2196,3 +2196,10 @@ TEST(TypeCheckerTest, ContainerLiteralArgumentReportsItsOwnLocation) {
     }
     EXPECT_TRUE(located);
 }
+
+TEST(TypeCheckerTest, GetattrResolvesDeclaredAttributes) {
+    EXPECT_TRUE(checkHasErrors(code("getattr_undeclared_attribute_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("getattr_field_type_is_declared_type")));
+    EXPECT_TRUE(checkHasErrors(code("getattr_method_is_not_text")));
+    EXPECT_TRUE(checkOk(code("getattr_declared_attributes_accepted")));
+}
