@@ -15,6 +15,24 @@ class Puppy(Dog) {
     def(n: str) { self.nm = n }
     def speak() -> str { return "yip" }
 }
+class Shape {
+    tag: str = ""
+    def(t: str) { self.tag = t }
+    def __str__() -> str { return "Shape(" + self.tag + ")" }
+}
+class Rounded(Shape) {
+    def(t: str) { super(t) }
+}
+class Circle(Rounded) {
+    def(t: str) { super(t) }
+    def __str__() -> str { return "Circle(" + self.tag + ")" }
+}
+def make_shape(k: str) -> Shape {
+    if k == "circle" { return Circle("c") }
+    if k == "rounded" { return Rounded("r") }
+    return Shape("s")
+}
+
 def make(k: str) -> Animal {
     if k == "dog" { return Dog("rex") }
     if k == "puppy" { return Puppy("bit") }
@@ -271,6 +289,24 @@ class VirtualDispatchTests(TestCase) {
     def test_str_of_leaf_exact_type_devirtualized() {
         d: Dog = Dog("fido")
         self.assertEqual(str(d), "Dog(fido)")
+    }
+
+    def test_str_of_mid_typed_var_dispatches_to_leaf_override() {
+        m: Rounded = Circle("c")
+        self.assertEqual(str(m), "Circle(c)")
+        self.assertEqual(f"{m}", "Circle(c)")
+    }
+
+    def test_str_of_top_typed_var_dispatches_to_leaf_override() {
+        t: Shape = make_shape("circle")
+        self.assertEqual(str(t), "Circle(c)")
+    }
+
+    def test_str_of_mid_without_override_uses_inherited_str() {
+        t: Shape = make_shape("rounded")
+        self.assertEqual(str(t), "Shape(r)")
+        m: Rounded = Rounded("r")
+        self.assertEqual(str(m), "Shape(r)")
     }
 
     def test_str_of_base_instance_uses_base_str() {

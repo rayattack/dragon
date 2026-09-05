@@ -1798,6 +1798,16 @@ TEST(TypeCheckerTest, ExceptionSubclassRejectsExtraArgs) {
     EXPECT_TRUE(checkHasErrors(code("exception_subclass_rejects_extra_args")));
 }
 
+TEST(TypeCheckerTest, ExitWithParametersRejected) {
+    EXPECT_TRUE(checkHasErrors(code("exit_with_parameters_rejected")));
+    EXPECT_TRUE(checkOk(code("exit_without_parameters_ok")));
+}
+
+TEST(TypeCheckerTest, ClassMethodGeneratorRejected) {
+    EXPECT_TRUE(checkHasErrors(code("classmethod_generator_rejected")));
+    EXPECT_TRUE(checkOk(code("instance_generator_method_ok")));
+}
+
 TEST(TypeCheckerTest, NamedMonoListIntoUnionSlotRejected) {
     EXPECT_TRUE(checkHasErrors(code("named_mono_list_into_union_slot_rejected")));
     EXPECT_TRUE(checkHasErrors(

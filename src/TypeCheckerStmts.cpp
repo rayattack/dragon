@@ -1524,6 +1524,24 @@ void TypeChecker::visit(FunctionDecl& node) {
               "an async @classmethod is not supported; make it an async "
               "instance method or a module-level async function");
     }
+    if (node.isClassMethod && bodyContainsYield(node.body)) {
+        error(node.location(),
+              "a @classmethod cannot be a generator: '" + node.name +
+              "' contains 'yield'. Make it an instance method or a "
+              "module-level generator function");
+    }
+    if (node.isMethod && node.name == "__exit__") {
+        size_t userParams = node.params.size();
+        if (!node.hasImplicitSelf && !node.params.empty() &&
+            node.params[0].name == "self")
+            userParams -= 1;
+        if (userParams != 0)
+            error(node.location(),
+                  "__exit__ takes no parameters: it is a guaranteed cleanup "
+                  "hook and cannot see or suppress the in-flight exception. "
+                  "Drop the parameter list and handle errors with try/except "
+                  "around the 'with'");
+    }
     if (node.isAsync && retType &&
         (retType->kind() == Type::Kind::Boxed ||
          retType->kind() == Type::Kind::Union)) {

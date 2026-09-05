@@ -146,6 +146,22 @@ class FieldStrErr(Exception) {
 }
 
 
+class MidErr(Exception) {
+    def(m: str) { self.message = m }
+}
+
+
+class LeafTextErr(MidErr) {
+    def(m: str) { super(m) }
+    def __str__() -> str { return "LeafText:" + self.message }
+}
+
+
+class LeafPlainErr(MidErr) {
+    def(m: str) { super(m) }
+}
+
+
 def _detail_boom() -> None { raise DetailErr("why") }
 
 
@@ -165,6 +181,12 @@ def _code_boom(code: int) -> None { raise CodeErr(code) }
 
 
 def _defaulted_boom(n: int) -> None { raise DefaultedChildErr(n) }
+
+
+def _leaf_text_boom(tag: str) -> None { raise LeafTextErr("lt-" + tag) }
+
+
+def _leaf_plain_boom(tag: str) -> None { raise LeafPlainErr("lp-" + tag) }
 
 
 def _remove_missing() {
@@ -464,6 +486,30 @@ class UserExceptionTextTests(TestCase) {
             got = e.msg
         }
         self.assertEqual(got, "from-one")
+    }
+
+    def test_subclass_str_wins_at_every_handler_level() {
+        exact: str = ""
+        mid: str = ""
+        top: str = ""
+        try { _leaf_text_boom("a") } except LeafTextErr as e { exact = str(e) }
+        try { _leaf_text_boom("b") } except MidErr as e { mid = str(e) }
+        try { _leaf_text_boom("c") } except Exception as e { top = str(e) }
+        self.assertEqual(exact, "LeafText:lt-a")
+        self.assertEqual(mid, "LeafText:lt-b")
+        self.assertEqual(top, "LeafText:lt-c")
+    }
+
+    def test_message_field_still_renders_without_a_subclass_str() {
+        exact: str = ""
+        mid: str = ""
+        top: str = ""
+        try { _leaf_plain_boom("a") } except LeafPlainErr as e { exact = str(e) }
+        try { _leaf_plain_boom("b") } except MidErr as e { mid = str(e) }
+        try { _leaf_plain_boom("c") } except Exception as e { top = str(e) }
+        self.assertEqual(exact, "lp-a")
+        self.assertEqual(mid, "lp-b")
+        self.assertEqual(top, "lp-c")
     }
 
     def test_repeated_super_concat_message_no_leak() {

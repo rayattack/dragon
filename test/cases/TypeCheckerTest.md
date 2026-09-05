@@ -3293,3 +3293,51 @@ print(str(b.has("a", xs)))
 print(str(b.has(1, ns)))
 print(str(b.has("a", "abc", "note")))
 ```
+
+#### :exit_with_parameters_rejected
+
+`__exit__` is a guaranteed cleanup hook, not an exception handler: it cannot see
+or suppress the in-flight exception. A declared parameter list used to compile
+and be called with a zero-filled argument.
+
+```dr
+class R {
+    def() {}
+    def __enter__() -> R { return self }
+    def __exit__(a: int) -> None { }
+}
+```
+
+#### :exit_without_parameters_ok
+
+```dr
+class R {
+    def() {}
+    def __enter__() -> R { return self }
+    def __exit__() -> None { }
+}
+```
+
+#### :classmethod_generator_rejected
+
+A `@classmethod` generator used to reach codegen and abort with an internal
+error about the front end rather than a diagnostic about the method.
+
+```dr
+class W {
+    def() {}
+    @classmethod
+    def gen() { yield 1 }
+}
+```
+
+#### :instance_generator_method_ok
+
+```dr
+class W {
+    def() {}
+    def gen() { yield 1 }
+    @staticmethod
+    def sgen() { yield 2 }
+}
+```

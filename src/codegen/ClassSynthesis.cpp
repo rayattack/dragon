@@ -505,8 +505,13 @@ static bool ctorDelegatesToParent(FunctionDecl* init) {
 }
 
 bool CodeGen::Impl::excMessageFieldCoversSubclasses(const std::string& sym) const {
+    auto declaresOwnText = [&](const std::string& cls) {
+        auto it = classDunderMethodsBySym.find(cls);
+        if (it == classDunderMethodsBySym.end()) return false;
+        return it->second.count("__str__") > 0 || it->second.count("__repr__") > 0;
+    };
     for (const auto& [cls, parent] : classParentNamesBySym) {
-        if (excMessageCtorBySym.count(cls)) continue;
+        if (excMessageCtorBySym.count(cls) && !declaresOwnText(cls)) continue;
         std::string cur = cls;
         for (int guard = 0; guard < kClassChainGuard; ++guard) {
             auto pit = classParentNamesBySym.find(cur);
