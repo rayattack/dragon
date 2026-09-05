@@ -297,6 +297,14 @@ add_test(NAME dr_help_lists_release_and_gc_none
 set_tests_properties(dr_help_lists_release_and_gc_none PROPERTIES
     PASS_REGULAR_EXPRESSION "--release")
 
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/untyped_param.dr
+    CONTENT "def add(a, b) -> int {\n    return a + b\n}\nprint(add(1, 2))\n")
+add_test(NAME dr_untyped_param_guard
+    COMMAND $<TARGET_FILE:dragon> check
+        ${DRAGON_INCLUDE_PROBE_DIR}/untyped_param.dr)
+set_tests_properties(dr_untyped_param_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "missing type annotation for parameter 'a' in function 'add'")
+
 file(GLOB DRAGON_EXAMPLE_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/examples/*.dr
     ${CMAKE_SOURCE_DIR}/examples/docs_site/*.dr)

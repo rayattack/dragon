@@ -304,13 +304,18 @@ int typeCheckModuleGraph(Module& entryModule,
     for (auto& mod : graph.modules) {
         mod.ast->moduleName = mod.name;
 
-        if (!mod.isDragon) {
+        {
             EnforcerOptions enfOpts;
             enfOpts.isImportedModule = true;
             enfOpts.importingFile = entryFile;
+            if (mod.isDragon) {
+                enfOpts.requireReturnTypes = false;
+                enfOpts.requireModuleVarTypes = false;
+            }
             TypeHintEnforcer enforcer(enfOpts);
             if (!enforcer.enforce(*mod.ast)) {
-                std::cerr << formatter.formatUntypedImport(mod.filepath);
+                if (!mod.isDragon)
+                    std::cerr << formatter.formatUntypedImport(mod.filepath);
                 for (const auto& diag : enforcer.diagnostics()) {
                     if (diag.level == EnforcerDiagnostic::Level::Error) {
                         std::cerr << formatter.format(
@@ -815,8 +820,13 @@ int Driver::buildFile(const std::string& filename) {
         std::cout << printer.print(*module);
     }
 
-    if (!isDragon) {
-        TypeHintEnforcer enforcer;
+    {
+        EnforcerOptions enfOpts;
+        if (isDragon) {
+            enfOpts.requireReturnTypes = false;
+            enfOpts.requireModuleVarTypes = false;
+        }
+        TypeHintEnforcer enforcer(enfOpts);
         if (!enforcer.enforce(*module)) {
             for (const auto& diag : enforcer.diagnostics()) {
                 if (diag.level == EnforcerDiagnostic::Level::Error) {
@@ -1150,8 +1160,13 @@ int Driver::checkFile(const std::string& filename) {
         std::cout << printer.print(*module);
     }
 
-    if (!isDragon) {
-        TypeHintEnforcer enforcer;
+    {
+        EnforcerOptions enfOpts;
+        if (isDragon) {
+            enfOpts.requireReturnTypes = false;
+            enfOpts.requireModuleVarTypes = false;
+        }
+        TypeHintEnforcer enforcer(enfOpts);
         if (!enforcer.enforce(*module)) {
             for (const auto& diag : enforcer.diagnostics()) {
                 if (diag.level == EnforcerDiagnostic::Level::Error) {

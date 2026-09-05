@@ -148,3 +148,45 @@ TEST(TypeHintEnforcer, MixedFunctions) {
     auto diags = enforceDiags(code("mixed_functions"));
     EXPECT_EQ(diags.size(), 2u);
 }
+
+TEST(TypeHintEnforcer, DragonUntypedParamRejected) {
+    EXPECT_FALSE(enforceDragonOk(code("dragon_untyped_param_rejected")));
+}
+
+TEST(TypeHintEnforcer, DragonUntypedParamNamesTheParameter) {
+    EnforcerOptions opts;
+    opts.requireReturnTypes = false;
+    opts.requireModuleVarTypes = false;
+    auto module = parse(code("dragon_untyped_param_rejected"), true);
+    ASSERT_NE(module, nullptr);
+    TypeHintEnforcer enforcer(opts);
+    enforcer.enforce(*module);
+    ASSERT_EQ(enforcer.diagnostics().size(), 2u);
+    EXPECT_NE(enforcer.diagnostics()[0].message.find(
+                  "missing type annotation for parameter 'a' in function 'add'"),
+              std::string::npos)
+        << enforcer.diagnostics()[0].message;
+    EXPECT_NE(enforcer.diagnostics()[1].message.find("parameter 'b'"),
+              std::string::npos)
+        << enforcer.diagnostics()[1].message;
+}
+
+TEST(TypeHintEnforcer, DragonUntypedMethodParamRejected) {
+    EnforcerOptions opts;
+    opts.requireReturnTypes = false;
+    opts.requireModuleVarTypes = false;
+    auto module = parse(code("dragon_untyped_param_in_method_rejected"), true);
+    ASSERT_NE(module, nullptr);
+    TypeHintEnforcer enforcer(opts);
+    EXPECT_FALSE(enforcer.enforce(*module));
+}
+
+TEST(TypeHintEnforcer, DragonNeedsNoReturnAnnotation) {
+    EnforcerOptions opts;
+    opts.requireReturnTypes = false;
+    opts.requireModuleVarTypes = false;
+    auto module = parse(code("dragon_no_return_type_still_ok"), true);
+    ASSERT_NE(module, nullptr);
+    TypeHintEnforcer enforcer(opts);
+    EXPECT_TRUE(enforcer.enforce(*module));
+}

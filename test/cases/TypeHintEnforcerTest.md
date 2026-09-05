@@ -129,3 +129,35 @@ def typed(x: int) -> int:
 def untyped(y):
     return y
 ```
+
+#### :dragon_untyped_param_rejected
+
+A `.dr` file used to accept a parameter with no annotation and infer it, so
+"types are mandatory, both surfaces" held only on the Python surface.
+
+```dr
+def add(a, b) -> int {
+    return a + b
+}
+```
+
+#### :dragon_untyped_param_in_method_rejected
+
+```dr
+class Box {
+    v: int
+    def () { self.v = 0 }
+    def put(value) -> None { self.v = value }
+}
+```
+
+#### :dragon_no_return_type_still_ok
+
+A `.dr` function without `->` returns None; that is the surface, not an
+omission, so the Dragon surface must not demand a return annotation.
+
+```dr
+def shout(msg: str) {
+    print(msg)
+}
+```
