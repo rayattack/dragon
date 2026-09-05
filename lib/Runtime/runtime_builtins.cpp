@@ -211,6 +211,33 @@ const char* dragon_min_list_str(DragonList* list) {
     return (const char*)(uintptr_t)result;
 }
 
+struct DragonBoxAbi { int64_t tag; int64_t payload; };
+extern int64_t dragon_box_cmp(DragonBoxAbi a, DragonBoxAbi b, int64_t op);
+
+static void* dragon_list_extreme_obj(DragonList* list, const char* what,
+                                     bool wantMax) {
+    if (!list || list->size == 0) dragon_empty_seq_raise(what);
+    const int64_t tag = (int64_t)list->elem_tag;
+    const int64_t op = wantMax ? DRAGON_CMP_GT : DRAGON_CMP_LT;
+    int64_t best = dragon_list_load(list, 0);
+    for (int64_t i = 1; i < list->size; i++) {
+        int64_t v = dragon_list_load(list, i);
+        int64_t c = dragon_box_cmp(DragonBoxAbi{tag, v},
+                                   DragonBoxAbi{tag, best}, op);
+        if (wantMax ? (c > 0) : (c < 0)) best = v;
+    }
+    dragon_incref_tagged(best, list->elem_tag);
+    return (void*)(uintptr_t)best;
+}
+
+void* dragon_min_list_obj(DragonList* list) {
+    return dragon_list_extreme_obj(list, "min", false);
+}
+
+void* dragon_max_list_obj(DragonList* list) {
+    return dragon_list_extreme_obj(list, "max", true);
+}
+
 const char* dragon_max_list_str(DragonList* list) {
     if (!list || list->size == 0) dragon_empty_seq_raise("max");
     int64_t result = dragon_list_load(list, 0);

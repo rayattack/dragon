@@ -1376,9 +1376,11 @@ t: float = sum(xs)
 
 #### :min_max_reject_container_elements
 
+A dict has no ordering, so there is no least or greatest element to pick.
+
 ```dr
-xs: list[list[int]] = [[1], [2]]
-m: list[int] = min(xs)
+xs: list[dict[str, int]] = [{"a": 1}, {"b": 2}]
+m: dict[str, int] = min(xs)
 ```
 
 #### :min_max_reject_container_elements_2
@@ -2738,4 +2740,76 @@ b: Box = Box(label="a", note="n")
 print(b.label)
 xs: list[str] = ["a"]
 each(*xs)
+```
+
+#### :sort_of_dict_elements_rejected
+
+A dict has no ordering, so `sort()` on a list of dicts cannot mean anything.
+It used to compile and reorder nothing (the runtime compared element pointers).
+
+```dr
+xs: list[dict[str, int]] = [{"a": 1}, {"b": 2}]
+xs.sort()
+```
+
+#### :sorted_of_dict_elements_rejected
+
+```dr
+xs: list[dict[str, int]] = [{"a": 1}, {"b": 2}]
+ys: list[dict[str, int]] = sorted(xs)
+```
+
+#### :dict_ordering_operator_rejected
+
+```dr
+a: dict[str, int] = {"a": 1}
+b: dict[str, int] = {"b": 2}
+print(a < b)
+```
+
+#### :tuple_ordering_field_mismatch_rejected
+
+Slot 1 would have to compare a str against an int, so the ordering is
+ambiguous and must be annotated away rather than guessed at.
+
+```dr
+a: tuple[int, str] = (1, "x")
+b: tuple[int, int] = (1, 2)
+print(a < b)
+```
+
+#### :sort_of_tuple_with_dict_field_rejected
+
+```dr
+xs: list[tuple[int, dict[str, int]]] = [(1, {"a": 1}), (0, {"b": 2})]
+xs.sort()
+```
+
+#### :sort_of_tuple_pairs_accepted
+
+```dr
+xs: list[tuple[float, int]] = [(-0.5, 103), (-1.8, 102)]
+xs.sort()
+ys: list[tuple[float, int]] = sorted(xs, reverse=True)
+print(ys[0][1])
+```
+
+#### :min_max_over_orderable_containers_accepted
+
+```dr
+xs: list[list[int]] = [[1], [2]]
+m: list[int] = min(xs)
+ts: list[tuple[int, int]] = [(1, 2), (0, 9)]
+t: tuple[int, int] = max(ts)
+print(m[0])
+print(t[0])
+```
+
+#### :tuple_ordering_operator_accepted
+
+```dr
+a: tuple[int, tuple[str, float]] = (1, ("x", 2.5))
+b: tuple[int, tuple[str, float]] = (1, ("x", 3.5))
+print(a < b)
+print(a == b)
 ```

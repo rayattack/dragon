@@ -127,6 +127,16 @@ void CodeGen::visit(NameExpr& node) {
         alloca->getAllocatedType(), alloca, node.name);
 }
 
+void CodeGen::releaseOwnedComparisonOperands(BinaryExpr& node,
+                                             llvm::Value* lhs,
+                                             llvm::Value* rhs) {
+    if (impl_->options.gcMode != GCMode::RC) return;
+    Impl::VarKind lk = impl_->ownedTempDrainKind(node.left.get(), lhs);
+    if (lk != Impl::VarKind::Other) impl_->emitDecrefByKind(lhs, lk);
+    Impl::VarKind rk = impl_->ownedTempDrainKind(node.right.get(), rhs);
+    if (rk != Impl::VarKind::Other) impl_->emitDecrefByKind(rhs, rk);
+}
+
 void CodeGen::visit(BinaryExpr& node) {
     if (node.op.type() == TokenType::NOT_IN || node.op.type() == TokenType::IS_NOT) {
         const Token saved = node.op;
@@ -653,6 +663,23 @@ void CodeGen::visit(BinaryExpr& node) {
 
     if ((op == TokenType::EQUAL_EQUAL || op == TokenType::NOT_EQUAL) &&
         lhs->getType()->isPointerTy() && rhs->getType()->isPointerTy()) {
+        auto isTupleLike = [&](Expr* e) -> bool {
+            if (!e) return false;
+            if (dynamic_cast<TupleExpr*>(e)) return true;
+            if (e->type && e->type->kind() == Type::Kind::Tuple) return true;
+            return impl_->resolveExprVarKind(e) == Impl::VarKind::Tuple;
+        };
+        if (isTupleLike(node.left.get()) && isTupleLike(node.right.get())) {
+            auto* eqI64 = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_tuple_eq"], {lhs, rhs}, "tuple.eq");
+            auto* eqBool = impl_->builder->CreateICmpNE(
+                eqI64, llvm::ConstantInt::get(impl_->i64Type, 0), "tuple.eq.bool");
+            releaseOwnedComparisonOperands(node, lhs, rhs);
+            impl_->lastValue = (op == TokenType::EQUAL_EQUAL)
+                ? eqBool
+                : impl_->builder->CreateNot(eqBool, "tuple.ne");
+            return;
+        }
         auto isListLike = [&](Expr* e) -> bool {
             if (!e) return false;
             if (dynamic_cast<ListExpr*>(e) || dynamic_cast<ListCompExpr*>(e)) return true;
@@ -696,15 +723,8 @@ void CodeGen::visit(BinaryExpr& node) {
     if ((op == TokenType::LESS || op == TokenType::LESS_EQUAL ||
          op == TokenType::GREATER || op == TokenType::GREATER_EQUAL) &&
         lhs->getType()->isPointerTy() && rhs->getType()->isPointerTy()) {
-        auto isListLike = [&](Expr* e) -> bool {
-            if (!e) return false;
-            if (dynamic_cast<ListExpr*>(e) || dynamic_cast<ListCompExpr*>(e)) return true;
-            if (e->type && e->type->kind() == Type::Kind::List) return true;
-            return impl_->resolveExprVarKind(e) == Impl::VarKind::List;
-        };
-        if (isListLike(node.left.get()) && isListLike(node.right.get())) {
-            auto* cmp = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_cmp"], {lhs, rhs}, "list.cmp");
+        auto emitCmpSign = [&](llvm::Value* cmp) {
+            releaseOwnedComparisonOperands(node, lhs, rhs);
             auto* zero = llvm::ConstantInt::get(impl_->i64Type, 0);
             switch (op) {
                 case TokenType::LESS:
@@ -716,6 +736,27 @@ void CodeGen::visit(BinaryExpr& node) {
                 default:
                     impl_->lastValue = impl_->builder->CreateICmpSGE(cmp, zero); break;
             }
+        };
+        auto isTupleLike = [&](Expr* e) -> bool {
+            if (!e) return false;
+            if (dynamic_cast<TupleExpr*>(e)) return true;
+            if (e->type && e->type->kind() == Type::Kind::Tuple) return true;
+            return impl_->resolveExprVarKind(e) == Impl::VarKind::Tuple;
+        };
+        if (isTupleLike(node.left.get()) && isTupleLike(node.right.get())) {
+            emitCmpSign(impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_tuple_cmp"], {lhs, rhs}, "tuple.cmp"));
+            return;
+        }
+        auto isListLike = [&](Expr* e) -> bool {
+            if (!e) return false;
+            if (dynamic_cast<ListExpr*>(e) || dynamic_cast<ListCompExpr*>(e)) return true;
+            if (e->type && e->type->kind() == Type::Kind::List) return true;
+            return impl_->resolveExprVarKind(e) == Impl::VarKind::List;
+        };
+        if (isListLike(node.left.get()) && isListLike(node.right.get())) {
+            emitCmpSign(impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_list_cmp"], {lhs, rhs}, "list.cmp"));
             return;
         }
     }

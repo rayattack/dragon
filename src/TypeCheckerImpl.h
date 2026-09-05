@@ -21,6 +21,9 @@ bool derivesFromBuiltinException(const ClassType* c);
 bool bodyContainsYield(const std::vector<std::unique_ptr<Stmt>>& body);
 bool hasDeclaredBase(const ClassType& ct, const char* baseName);
 bool hasDataclassDecorator(const ClassType& ct);
+bool orderableTogether(const std::shared_ptr<Type>& a,
+                       const std::shared_ptr<Type>& b);
+bool supportsOrdering(const std::shared_ptr<Type>& t);
 
 struct TypeChecker::Impl {
     std::vector<TypeDiagnostic> diagnostics;

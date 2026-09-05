@@ -1005,6 +1005,10 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
                 fn = isMin ? "dragon_min_list_f64" : "dragon_max_list_f64";
             } else if (elemKind == Type::Kind::Str) {
                 fn = isMin ? "dragon_min_list_str" : "dragon_max_list_str";
+            } else if (elemKind == Type::Kind::Tuple ||
+                       elemKind == Type::Kind::List ||
+                       elemKind == Type::Kind::Bytes) {
+                fn = isMin ? "dragon_min_list_obj" : "dragon_max_list_obj";
             } else {
                 fn = isMin ? "dragon_min_list" : "dragon_max_list";
             }

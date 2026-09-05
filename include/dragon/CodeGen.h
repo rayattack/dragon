@@ -246,6 +246,8 @@ private:
                                  bool staticContainerVal);
     bool tryEmitPrintUnionRaw(Expr* argExpr, llvm::Value* arg);
     void emitShortCircuit(BinaryExpr& node);
+    void releaseOwnedComparisonOperands(BinaryExpr& node, llvm::Value* lhs,
+                                        llvm::Value* rhs);
     bool tryEmitStrSelfAppend(AssignStmt& node);
     bool tryEmitSetitemOverloadStore(SubscriptExpr& sub, llvm::Value* val);
     bool tryEmitDictSubscriptStore(SubscriptExpr& sub, AssignStmt& node,

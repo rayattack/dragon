@@ -1814,6 +1814,15 @@ void TypeChecker::visit(BinaryExpr& node) {
             node.type = impl_->unknownType;
             return;
         }
+        bool bothSets = leftType->kind() == Type::Kind::Set &&
+                        rightType->kind() == Type::Kind::Set;
+        if (!bothSets && !orderableTogether(leftType, rightType)) {
+            error(node.location(), "'" + node.op.lexeme() +
+                  "' is not supported between '" + leftType->toString() +
+                  "' and '" + rightType->toString() + "'");
+            node.type = impl_->unknownType;
+            return;
+        }
         node.type = impl_->boolType;
         return;
     }

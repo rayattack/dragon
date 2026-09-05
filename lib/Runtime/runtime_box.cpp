@@ -16,6 +16,8 @@ int64_t dragon_list_eq(void* a, void* b);
 int64_t dragon_dict_eq(DragonDict* a, DragonDict* b);
 int64_t dragon_bytes_eq(DragonBytes* a, DragonBytes* b);
 
+const char* dragon_instance_class_name(void* instance);
+
 void dragon_print_box_raw(DragonBox box) {
     int64_t tag = box.tag;
     int64_t value = box.payload;
@@ -123,6 +125,10 @@ int64_t dragon_box_eq(DragonBox a, DragonBox b) {
         case TAG_LIST:
             if (a.payload == b.payload) return 1;
             if (!a.payload || !b.payload) return 0;
+            if (((DragonObjectHeader*)(uintptr_t)a.payload)->type_tag
+                    == DRAGON_TAG_TUPLE)
+                return dragon_tuple_eq((void*)(uintptr_t)a.payload,
+                                       (void*)(uintptr_t)b.payload);
             return dragon_list_eq((void*)(uintptr_t)a.payload,
                                   (void*)(uintptr_t)b.payload);
         case TAG_DICT:
@@ -163,7 +169,20 @@ static const char* dragon_box_type_name(int64_t valueTag, int64_t payload) {
         case TAG_FLOAT: return "float";
         case TAG_BOOL:  return "bool";
         case TAG_NONE:  return "NoneType";
-        case TAG_LIST:  return "list";
+        case TAG_LIST: {
+            auto* h = (DragonObjectHeader*)(uintptr_t)payload;
+            if (!h) return "list";
+            switch (h->type_tag) {
+                case DRAGON_TAG_TUPLE:     return "tuple";
+                case DRAGON_TAG_SET:       return "set";
+                case DRAGON_TAG_CLASS: {
+                    const char* nm = dragon_instance_class_name(h);
+                    return nm ? nm : "object";
+                }
+                case DRAGON_TAG_GENERATOR: return "generator";
+                default:                   return "list";
+            }
+        }
         case TAG_DICT:  return "dict";
         case TAG_BYTES: {
             auto* h = (DragonObjectHeader*)(uintptr_t)payload;
@@ -316,10 +335,6 @@ DragonBox dragon_box_binop(DragonBox a, DragonBox b, int64_t op) {
     return dragon_mkbox(TAG_NONE, 0);
 }
 
-enum {
-    DRAGON_CMP_LT = 0, DRAGON_CMP_LE = 1, DRAGON_CMP_GT = 2, DRAGON_CMP_GE = 3,
-};
-
 static const char* dragon_cmp_symbol(int64_t op) {
     switch (op) {
         case DRAGON_CMP_LT: return "<";
@@ -365,9 +380,18 @@ int64_t dragon_box_cmp(DragonBox a, DragonBox b, int64_t op) {
         return (ba->len < bb->len) ? -1 : (ba->len > bb->len) ? 1 : 0;
     }
 
-    if (ta == TAG_LIST && tb == TAG_LIST && a.payload && b.payload)
-        return dragon_list_cmp((void*)(uintptr_t)a.payload,
-                               (void*)(uintptr_t)b.payload);
+    if (ta == TAG_LIST && tb == TAG_LIST && a.payload && b.payload) {
+        uint8_t ka = ((DragonObjectHeader*)(uintptr_t)a.payload)->type_tag;
+        uint8_t kb = ((DragonObjectHeader*)(uintptr_t)b.payload)->type_tag;
+        if (ka == DRAGON_TAG_TUPLE && kb == DRAGON_TAG_TUPLE)
+            return dragon_tuple_cmp((void*)(uintptr_t)a.payload,
+                                    (void*)(uintptr_t)b.payload);
+        bool aList = ka == DRAGON_TAG_LIST || ka == DRAGON_TAG_LIST_BOX;
+        bool bList = kb == DRAGON_TAG_LIST || kb == DRAGON_TAG_LIST_BOX;
+        if (aList && bList)
+            return dragon_list_cmp((void*)(uintptr_t)a.payload,
+                                   (void*)(uintptr_t)b.payload);
+    }
 
     char buf[128];
     snprintf(buf, sizeof(buf),

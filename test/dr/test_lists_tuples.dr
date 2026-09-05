@@ -288,6 +288,99 @@ class ListConcatSortExtendTests(TestCase) {
         a += [99]
         self.assertEqual(len(a), 5)
     }
+
+    def test_sort_boxed_list() {
+        xs: list[Boxed] = [3, 1, 2]
+        xs.sort()
+        self.assertEqual(str(xs), "[1, 2, 3]")
+        ss: list[Boxed] = ["c", "a", "b"]
+        ss.sort(reverse=True)
+        self.assertEqual(str(ss), "['c', 'b', 'a']")
+    }
+
+    def test_sorted_and_copy_boxed_list() {
+        xs: list[Boxed] = [3, 1, 2]
+        ys: list[Boxed] = sorted(xs)
+        self.assertEqual(str(ys), "[1, 2, 3]")
+        self.assertEqual(str(xs), "[3, 1, 2]")
+        zs: list[Boxed] = xs.copy()
+        self.assertEqual(str(zs), "[3, 1, 2]")
+    }
+
+    def test_sort_tuple_pairs_orders_lexicographically() {
+        xs: list[tuple[float, int]] = []
+        xs.append((-1.192, 101))
+        xs.append((-1.800, 102))
+        xs.append((-0.500, 103))
+        xs.sort()
+        self.assertEqual(xs[0][1], 102)
+        self.assertEqual(xs[1][1], 101)
+        self.assertEqual(xs[2][1], 103)
+    }
+
+    def test_sorted_tuple_pairs_and_reverse() {
+        xs: list[tuple[float, int]] = [(-0.5, 103), (-1.8, 102), (-1.192, 101)]
+        const up: list[tuple[float, int]] = sorted(xs)
+        self.assertEqual(up[0][1], 102)
+        self.assertEqual(up[2][1], 103)
+        const down: list[tuple[float, int]] = sorted(xs, reverse=True)
+        self.assertEqual(down[0][1], 103)
+        self.assertEqual(down[2][1], 102)
+        self.assertEqual(xs[0][1], 103)
+    }
+
+    def test_sort_tuple_second_field_breaks_the_tie() {
+        xs: list[tuple[int, int]] = [(1, 9), (1, 2), (0, 7)]
+        xs.sort()
+        self.assertEqual(xs[0][0], 0)
+        self.assertEqual(xs[1][1], 2)
+        self.assertEqual(xs[2][1], 9)
+    }
+
+    def test_sort_tuple_str_first_field() {
+        ss: list[tuple[str, int]] = [("b", 1), ("a", 2)]
+        ss.sort()
+        self.assertEqual(ss[0][0], "a")
+        ss.sort(reverse=True)
+        self.assertEqual(ss[0][0], "b")
+    }
+
+    def test_sort_tuple_bool_and_str_fields() {
+        ms: list[tuple[bool, str]] = [(True, "z"), (False, "a")]
+        ms.sort()
+        self.assertEqual(ms[0][1], "a")
+    }
+
+    def test_sort_nested_tuple_elements() {
+        ns: list[tuple[int, tuple[int, int]]] = [(1, (2, 9)), (1, (2, 3))]
+        ns.sort()
+        self.assertEqual(ns[0][1][1], 3)
+        self.assertEqual(ns[1][1][1], 9)
+    }
+
+    def test_sort_list_of_lists() {
+        ll: list[list[int]] = [[2], [1, 5], [1]]
+        ll.sort()
+        self.assertEqual(ll[0], [1])
+        self.assertEqual(ll[1], [1, 5])
+        self.assertEqual(ll[2], [2])
+    }
+
+    def test_sort_bytes_elements() {
+        bs: list[bytes] = [b"cc", b"aa", b"bb"]
+        bs.sort()
+        self.assertTrue(bs[0] == b"aa")
+        self.assertTrue(bs[1] == b"bb")
+        self.assertTrue(bs[2] == b"cc")
+    }
+
+    def test_tuple_membership_compares_by_value() {
+        xs: list[tuple[int, int]] = [(1, 2), (3, 4)]
+        self.assertTrue((1, 2) in xs)
+        self.assertFalse((1, 5) in xs)
+        self.assertEqual(xs.index((3, 4)), 1)
+        self.assertEqual(xs.count((1, 2)), 1)
+    }
 }
 
 
@@ -321,6 +414,32 @@ class MinMaxSumTypedTests(TestCase) {
         self.assertRaises(ValueError, _min_empty_int)
         self.assertRaises(ValueError, _max_empty_float)
         self.assertRaises(ValueError, _min_empty_str)
+    }
+
+    def test_min_max_tuple_pairs() {
+        xs: list[tuple[int, int]] = [(2, 1), (1, 5), (1, 2)]
+        lo: tuple[int, int] = min(xs)
+        hi: tuple[int, int] = max(xs)
+        self.assertEqual(lo[0], 1)
+        self.assertEqual(lo[1], 2)
+        self.assertEqual(hi[0], 2)
+        self.assertEqual(hi[1], 1)
+    }
+
+    def test_min_max_list_elements() {
+        ll: list[list[int]] = [[2], [1, 5], [1]]
+        lo: list[int] = min(ll)
+        hi: list[int] = max(ll)
+        self.assertEqual(lo, [1])
+        self.assertEqual(hi, [2])
+    }
+
+    def test_min_max_bytes_elements() {
+        bs: list[bytes] = [b"cc", b"aa", b"bb"]
+        lo: bytes = min(bs)
+        hi: bytes = max(bs)
+        self.assertTrue(lo == b"aa")
+        self.assertTrue(hi == b"cc")
     }
 }
 
@@ -371,6 +490,41 @@ class SortedLargeTests(TestCase) {
             j = j + 1
         }
         self.assertTrue(ordered)
+    }
+
+    def test_tuple_sort_and_min_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            xs: list[tuple[int, int]] = [(i % 7, i), (i % 5, i), (i % 3, i)]
+            ys: list[tuple[int, int]] = sorted(xs)
+            lo: tuple[int, int] = min(xs)
+            xs.sort(reverse=True)
+            total = total + ys[0][0] + lo[0] + xs[0][0]
+            i = i + 1
+        }
+        self.assertTrue(total > 0)
+    }
+
+    def test_sorted_large_tuple_pairs() {
+        xs: list[tuple[int, int]] = []
+        i: int = 0
+        while i < 3000 {
+            xs.append(((i * 7919) % 97, i))
+            i = i + 1
+        }
+        const ys: list[tuple[int, int]] = sorted(xs)
+        self.assertEqual(len(ys), 3000)
+        j: int = 1
+        ordered: bool = true
+        stable: bool = true
+        while j < 3000 {
+            if ys[j - 1][0] > ys[j][0] { ordered = false }
+            if ys[j - 1][0] == ys[j][0] and ys[j - 1][1] > ys[j][1] { stable = false }
+            j = j + 1
+        }
+        self.assertTrue(ordered)
+        self.assertTrue(stable)
     }
 }
 

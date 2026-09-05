@@ -224,6 +224,10 @@ struct DragonDict {
     uint8_t key_kind;
 };
 
+enum DragonCompareOp : int64_t {
+    DRAGON_CMP_LT = 0, DRAGON_CMP_LE = 1, DRAGON_CMP_GT = 2, DRAGON_CMP_GE = 3,
+};
+
 enum DragonDictKeyKind : uint8_t {
     DRAGON_DICT_KEY_INT = 0,
     DRAGON_DICT_KEY_STR = 1,
@@ -674,6 +678,8 @@ void dragon_tuple_set(DragonTuple* t, int64_t index, int64_t val);
 void dragon_tuple_set_tagged(DragonTuple* t, int64_t index, int64_t val, int64_t tag);
 int64_t dragon_tuple_get(DragonTuple* t, int64_t index);
 int64_t dragon_tuple_len(DragonTuple* t);
+int64_t dragon_tuple_eq(void* a, void* b);
+int64_t dragon_tuple_cmp(void* a, void* b);
 
 DragonSet* dragon_set_new();
 DragonSet* dragon_set_from_list(DragonList* list);

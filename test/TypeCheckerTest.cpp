@@ -1564,6 +1564,7 @@ TEST(TypeCheckerTest, SumRejectsNonNumericElements) {
 TEST(TypeCheckerTest, MinMaxRejectContainerElements) {
     EXPECT_TRUE(checkHasErrors(code("min_max_reject_container_elements")));
     EXPECT_FALSE(checkHasErrors(code("min_max_reject_container_elements_2")));
+    EXPECT_TRUE(checkOk(code("min_max_over_orderable_containers_accepted")));
 }
 
 TEST(TypeCheckerTest, ContractDeclaresNoSuchMethodRejected) {
@@ -1949,4 +1950,14 @@ TEST(TypeCheckerTest, KeywordArgumentValuesAreTypeChecked) {
     EXPECT_TRUE(checkHasErrors(code("keyword_arg_on_ctor_overload_type_checked")));
     EXPECT_TRUE(checkHasErrors(code("keyword_arg_trailing_default_value_type_checked")));
     EXPECT_TRUE(checkOk(code("keyword_call_with_matching_args_accepted")));
+}
+
+TEST(TypeCheckerTest, OrderingNeedsAnOrderableType) {
+    EXPECT_TRUE(checkHasErrors(code("sort_of_dict_elements_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("sorted_of_dict_elements_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("dict_ordering_operator_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("tuple_ordering_field_mismatch_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("sort_of_tuple_with_dict_field_rejected")));
+    EXPECT_TRUE(checkOk(code("sort_of_tuple_pairs_accepted")));
+    EXPECT_TRUE(checkOk(code("tuple_ordering_operator_accepted")));
 }

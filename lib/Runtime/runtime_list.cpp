@@ -1,6 +1,29 @@
 #include "runtime_internal.h"
 #include <cstring>
 
+template <typename Elem, typename Greater>
+static Elem* dragon_merge_elems(Elem* buf, int64_t n, bool desc, Greater gt) {
+    Elem* src = buf;
+    Elem* dst = buf + n;
+    for (int64_t width = 1; width < n; width *= 2) {
+        for (int64_t lo = 0; lo < n; lo += 2 * width) {
+            int64_t mid = lo + width < n ? lo + width : n;
+            int64_t hi = lo + 2 * width < n ? lo + 2 * width : n;
+            int64_t a = lo, b = mid, w = lo;
+            while (a < mid && b < hi) {
+                bool takeRight = desc ? gt(src[b], src[a]) : gt(src[a], src[b]);
+                dst[w++] = takeRight ? src[b++] : src[a++];
+            }
+            while (a < mid) dst[w++] = src[a++];
+            while (b < hi) dst[w++] = src[b++];
+        }
+        Elem* tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+    return src;
+}
+
 extern "C" {
 
 int64_t dragon_str_cmp(const char* a, const char* b);
@@ -8,6 +31,10 @@ int64_t dragon_str_cmp(const char* a, const char* b);
 void dragon_decref_callable(void* p);
 
 void dragon_print_box_raw(DragonBox box);
+
+struct DragonBoxAbi { int64_t tag; int64_t payload; };
+extern int64_t dragon_box_eq(DragonBoxAbi a, DragonBoxAbi b);
+extern int64_t dragon_box_cmp(DragonBoxAbi a, DragonBoxAbi b, int64_t op);
 
 DragonList* dragon_list_new_tagged(int64_t capacity, int64_t elem_tag) {
     int64_t cap = capacity > 0 ? capacity : 8;
@@ -236,6 +263,7 @@ void dragon_list_clear(DragonList* list) {
 }
 
 void dragon_list_box_extend(DragonListBox* dst, DragonListBox* src);
+DragonListBox* dragon_list_box_new(int64_t capacity);
 DragonListBox* dragon_list_box_concat(DragonListBox* a, DragonListBox* b);
 
 void dragon_list_extend(DragonList* list, DragonList* other) {
@@ -269,8 +297,7 @@ void dragon_list_extend(DragonList* list, DragonList* other) {
 
 static bool dragon_list_elem_eq(DragonList* list, int64_t a, int64_t b) {
     switch (list->elem_tag) {
-        case TAG_STR:
-        case TAG_BYTES: {
+        case TAG_STR: {
             const char* sa = (const char*)(uintptr_t)a;
             const char* sb = (const char*)(uintptr_t)b;
             if (sa == sb) return true;
@@ -283,8 +310,15 @@ static bool dragon_list_elem_eq(DragonList* list, int64_t a, int64_t b) {
             memcpy(&db, &b, sizeof(double));
             return da == db;
         }
-        default:
+        case TAG_INT:
+        case TAG_BOOL:
             return a == b;
+        default: {
+            if (a == b) return true;
+            DragonBoxAbi ba{(int64_t)list->elem_tag, a};
+            DragonBoxAbi bb{(int64_t)list->elem_tag, b};
+            return dragon_box_eq(ba, bb) != 0;
+        }
     }
 }
 
@@ -316,10 +350,50 @@ int64_t dragon_list_contains(DragonList* list, int64_t value) {
     return 0;
 }
 
-void dragon_list_sort_ex(DragonList* list, int64_t reverse) {
-    int64_t n = list ? list->size : 0;
+static const int64_t kSortWordBudget = INT64_MAX / 16;
+static const int64_t kSortBoxBudget = INT64_MAX / 32;
+
+static void dragon_list_box_sort_ex(DragonListBox* list, int64_t reverse) {
+    int64_t n = list->size;
     if (n < 2) return;
-    if (n > INT64_MAX / 16) {
+    if (n > kSortBoxBudget) {
+        dragon_raise_exc_cstr(43, "MemoryError: list too large to sort");
+    }
+    auto* buf = (DragonListBoxElem*)dragon_malloc_nullable(
+        dragon_alloc_bytes(n * 2, sizeof(DragonListBoxElem)));
+    if (!buf) {
+        dragon_raise_exc_cstr(43, "MemoryError: out of memory sorting list");
+    }
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
+    for (int64_t i = 0; i < n; i++) buf[i] = list->data[i];
+    dragon_shared_mut_end(&list->header, mut_armed);
+
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
+    DragonListBoxElem* sorted = dragon_merge_elems(
+        buf, n, reverse != 0,
+        [](const DragonListBoxElem& a, const DragonListBoxElem& b) {
+            return dragon_box_cmp(DragonBoxAbi{a.tag, a.payload},
+                                  DragonBoxAbi{b.tag, b.payload},
+                                  DRAGON_CMP_GT) > 0;
+        });
+    dragon_cleanup_reset(clbase);
+
+    mut_armed = dragon_shared_mut_begin(&list->header, "list");
+    for (int64_t i = 0; i < n; i++) list->data[i] = sorted[i];
+    dragon_shared_mut_end(&list->header, mut_armed);
+    free(buf);
+}
+
+void dragon_list_sort_ex(DragonList* list, int64_t reverse) {
+    if (!list) return;
+    if (list->header.type_tag == DRAGON_TAG_LIST_BOX) {
+        dragon_list_box_sort_ex((DragonListBox*)(void*)list, reverse);
+        return;
+    }
+    int64_t n = list->size;
+    if (n < 2) return;
+    if (n > kSortWordBudget) {
         dragon_raise_exc_cstr(43, "MemoryError: list too large to sort");
     }
     int64_t* buf = (int64_t*)dragon_malloc_nullable(
@@ -327,46 +401,48 @@ void dragon_list_sort_ex(DragonList* list, int64_t reverse) {
     if (!buf) {
         dragon_raise_exc_cstr(43, "MemoryError: out of memory sorting list");
     }
-    int64_t* src = buf;
-    int64_t* dst = buf + n;
-    auto cmp_gt = [&](int64_t a, int64_t b) -> bool {
-        switch (list->elem_tag) {
-            case TAG_STR:
-            case TAG_BYTES:
-                return dragon_str_cmp(
-                    (const char*)(uintptr_t)a,
-                    (const char*)(uintptr_t)b) > 0;
-            case TAG_FLOAT: {
+    const bool desc = reverse != 0;
+    const int64_t elemTag = (int64_t)list->elem_tag;
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
+    for (int64_t i = 0; i < n; i++) buf[i] = dragon_list_load(list, i);
+    dragon_shared_mut_end(&list->header, mut_armed);
+
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
+    int64_t* sorted;
+    switch (list->elem_tag) {
+        case TAG_STR:
+            sorted = dragon_merge_elems(buf, n, desc, [](int64_t a, int64_t b) {
+                return dragon_str_cmp((const char*)(uintptr_t)a,
+                                      (const char*)(uintptr_t)b) > 0;
+            });
+            break;
+        case TAG_FLOAT:
+            sorted = dragon_merge_elems(buf, n, desc, [](int64_t a, int64_t b) {
                 double da, db;
                 memcpy(&da, &a, sizeof(double));
                 memcpy(&db, &b, sizeof(double));
                 return da > db;
-            }
-            default:
+            });
+            break;
+        case TAG_INT:
+        case TAG_BOOL:
+            sorted = dragon_merge_elems(buf, n, desc, [](int64_t a, int64_t b) {
                 return a > b;
-        }
-    };
-    bool desc = reverse != 0;
-    auto right_first = [&](int64_t l, int64_t r) -> bool {
-        return desc ? cmp_gt(r, l) : cmp_gt(l, r);
-    };
-    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
-    for (int64_t i = 0; i < n; i++) src[i] = dragon_list_load(list, i);
-    for (int64_t width = 1; width < n; width *= 2) {
-        for (int64_t lo = 0; lo < n; lo += 2 * width) {
-            int64_t mid = lo + width < n ? lo + width : n;
-            int64_t hi = lo + 2 * width < n ? lo + 2 * width : n;
-            int64_t a = lo, b = mid, w = lo;
-            while (a < mid && b < hi)
-                dst[w++] = right_first(src[a], src[b]) ? src[b++] : src[a++];
-            while (a < mid) dst[w++] = src[a++];
-            while (b < hi) dst[w++] = src[b++];
-        }
-        int64_t* tmp = src;
-        src = dst;
-        dst = tmp;
+            });
+            break;
+        default:
+            sorted = dragon_merge_elems(buf, n, desc, [elemTag](int64_t a, int64_t b) {
+                return dragon_box_cmp(DragonBoxAbi{elemTag, a},
+                                      DragonBoxAbi{elemTag, b},
+                                      DRAGON_CMP_GT) > 0;
+            });
+            break;
     }
-    for (int64_t i = 0; i < n; i++) dragon_list_store(list, i, src[i]);
+    dragon_cleanup_reset(clbase);
+
+    mut_armed = dragon_shared_mut_begin(&list->header, "list");
+    for (int64_t i = 0; i < n; i++) dragon_list_store(list, i, sorted[i]);
     dragon_shared_mut_end(&list->header, mut_armed);
     free(buf);
 }
@@ -397,6 +473,12 @@ DragonList* dragon_list_deep_copy(DragonList* list) {
 }
 
 DragonList* dragon_list_copy(DragonList* list) {
+    if (list && list->header.type_tag == DRAGON_TAG_LIST_BOX) {
+        auto* src = (DragonListBox*)(void*)list;
+        DragonListBox* boxCopy = dragon_list_box_new(src->size > 0 ? src->size : 8);
+        dragon_list_box_extend(boxCopy, src);
+        return (DragonList*)(void*)boxCopy;
+    }
     DragonList* copy = dragon_list_new_tagged(list->size > 0 ? list->size : 8, list->elem_tag);
     for (int64_t i = 0; i < list->size; i++) {
         int64_t elem = dragon_list_load(list, i);
@@ -787,10 +869,6 @@ void dragon_list_box_destroy(DragonListBox* list) {
     free(list);
 }
 
-struct DragonBoxAbi { int64_t tag; int64_t payload; };
-extern int64_t dragon_box_eq(DragonBoxAbi a, DragonBoxAbi b);
-extern int64_t dragon_box_cmp(DragonBoxAbi a, DragonBoxAbi b, int64_t op);
-
 DragonBoxValue dragon_list_box_pop(DragonListBox* list, int64_t index) {
     if (list->size == 0) {
         dragon_raise_exc_cstr(41, "IndexError: pop from empty list");
@@ -852,6 +930,10 @@ void dragon_list_box_insert(DragonListBox* list, int64_t index, int64_t tag, int
     dragon_shared_mut_end(&list->header, mut_armed);
 }
 
+static inline bool dragon_obj_is_list(const DragonObjectHeader* h) {
+    return h->type_tag == DRAGON_TAG_LIST || h->type_tag == DRAGON_TAG_LIST_BOX;
+}
+
 static inline DragonBoxAbi dragon_list_elem_as_box(const DragonObjectHeader* h, int64_t i) {
     DragonBoxAbi b;
     if (h->type_tag == DRAGON_TAG_LIST_BOX) {
@@ -895,6 +977,11 @@ int64_t dragon_list_cmp(void* a, void* b) {
     if (!a || !b) return (!a && !b) ? 0 : (!a ? -1 : 1);
     DragonObjectHeader* ha = (DragonObjectHeader*)a;
     DragonObjectHeader* hb = (DragonObjectHeader*)b;
+    if (!dragon_obj_is_list(ha) || !dragon_obj_is_list(hb)) {
+        dragon_raise_exc_cstr(80,
+            "TypeError: ordering comparison expected two lists");
+        return 0;
+    }
     int64_t na = (ha->type_tag == DRAGON_TAG_LIST_BOX)
                    ? ((DragonListBox*)a)->size : ((DragonList*)a)->size;
     int64_t nb = (hb->type_tag == DRAGON_TAG_LIST_BOX)

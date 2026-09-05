@@ -13,11 +13,21 @@
 
 namespace dragon {
 
-static bool aggregateElemSupported(const std::string& fn, Type::Kind ek) {
+bool supportsOrdering(const std::shared_ptr<Type>& t);
+
+static bool aggregateElemSupported(const std::string& fn,
+                                   const std::shared_ptr<Type>& e) {
+    Type::Kind ek = e ? e->kind() : Type::Kind::Unknown;
     bool numeric = ek == Type::Kind::Int || ek == Type::Kind::Float ||
                    ek == Type::Kind::Bool || ek == Type::Kind::Boxed ||
                    ek == Type::Kind::Unknown;
-    return numeric || (fn != "sum" && ek == Type::Kind::Str);
+    if (numeric) return true;
+    if (fn == "sum") return false;
+    if (ek == Type::Kind::Str) return true;
+    if (ek == Type::Kind::Tuple || ek == Type::Kind::List ||
+        ek == Type::Kind::Bytes)
+        return supportsOrdering(e);
+    return false;
 }
 
 static bool signatureHasUnknownPart(const Type& t) {
@@ -42,6 +52,59 @@ static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
                   : nullptr;
     }
     return nullptr;
+}
+
+static const int kOrderNestLimit = 32;
+
+static bool orderableTogether(const Type* a, const Type* b, int depth) {
+    if (!a || !b || depth > kOrderNestLimit) return true;
+    auto ka = a->kind();
+    auto kb = b->kind();
+    auto unresolved = [](Type::Kind k) {
+        return k == Type::Kind::Boxed || k == Type::Kind::Unknown ||
+               k == Type::Kind::TypeVar || k == Type::Kind::Never ||
+               k == Type::Kind::Union || k == Type::Kind::Optional ||
+               k == Type::Kind::Instance || k == Type::Kind::Contract ||
+               k == Type::Kind::Class;
+    };
+    if (unresolved(ka) || unresolved(kb)) return true;
+    auto numeric = [](Type::Kind k) {
+        return k == Type::Kind::Int || k == Type::Kind::Float ||
+               k == Type::Kind::Bool;
+    };
+    if (numeric(ka) && numeric(kb)) return true;
+    if (ka != kb) return false;
+    switch (ka) {
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+            return true;
+        case Type::Kind::List:
+        case Type::Kind::Deque: {
+            auto ea = static_cast<const ListType*>(a)->elementType;
+            auto eb = static_cast<const ListType*>(b)->elementType;
+            return orderableTogether(ea.get(), eb.get(), depth + 1);
+        }
+        case Type::Kind::Tuple: {
+            const auto& ea = static_cast<const TupleType*>(a)->elementTypes;
+            const auto& eb = static_cast<const TupleType*>(b)->elementTypes;
+            size_t n = ea.size() < eb.size() ? ea.size() : eb.size();
+            for (size_t i = 0; i < n; ++i)
+                if (!orderableTogether(ea[i].get(), eb[i].get(), depth + 1))
+                    return false;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+bool orderableTogether(const std::shared_ptr<Type>& a,
+                       const std::shared_ptr<Type>& b) {
+    return orderableTogether(a.get(), b.get(), 0);
+}
+
+bool supportsOrdering(const std::shared_ptr<Type>& t) {
+    return orderableTogether(t.get(), t.get(), 0);
 }
 
 bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
@@ -788,8 +851,13 @@ void TypeChecker::visit(CallExpr& node) {
             if ((cn->name == "sorted" || cn->name == "reversed") &&
                 node.args.size() == 1 && node.args[0]->type &&
                 node.args[0]->type->kind() == Type::Kind::List) {
-                node.type = std::make_shared<ListType>(
-                    static_cast<ListType&>(*node.args[0]->type).elementType);
+                auto elem = static_cast<ListType&>(*node.args[0]->type).elementType;
+                if (cn->name == "sorted" && !supportsOrdering(elem)) {
+                    error(node.location(), "sorted() needs an orderable element "
+                          "type, but list[" + elem->toString() +
+                          "] elements have no ordering");
+                }
+                node.type = std::make_shared<ListType>(elem);
                 return;
             }
             if ((cn->name == "min" || cn->name == "max") &&
@@ -797,7 +865,7 @@ void TypeChecker::visit(CallExpr& node) {
                 node.args[0]->type->kind() == Type::Kind::List) {
                 auto elem = static_cast<ListType&>(*node.args[0]->type).elementType;
                 if (elem) {
-                    if (!aggregateElemSupported(cn->name, elem->kind())) {
+                    if (!aggregateElemSupported(cn->name, elem)) {
                         error(node.location(),
                               cn->name + "() is not supported for list[" +
                               elem->toString() + "] elements");
@@ -1011,6 +1079,11 @@ void TypeChecker::visit(CallExpr& node) {
             if (!node.args.empty() && node.args[0]->type &&
                 node.args[0]->type->kind() == Type::Kind::List)
                 elem = static_cast<ListType&>(*node.args[0]->type).elementType;
+            if (n == "sorted" && !supportsOrdering(elem)) {
+                error(node.location(), "sorted() needs an orderable element "
+                      "type, but list[" + elem->toString() +
+                      "] elements have no ordering");
+            }
             node.type = std::make_shared<ListType>(elem ? elem : impl_->boxedType);
             return;
         }
@@ -1040,7 +1113,7 @@ void TypeChecker::visit(CallExpr& node) {
             if (!node.args.empty() && node.args[0]->type) {
                 if (node.args[0]->type->kind() == Type::Kind::List) {
                     auto elem = static_cast<ListType&>(*node.args[0]->type).elementType;
-                    if (elem && !aggregateElemSupported(n, elem->kind())) {
+                    if (elem && !aggregateElemSupported(n, elem)) {
                         error(node.location(),
                               n + "() is not supported for list[" + elem->toString() +
                               "] elements");
@@ -1576,6 +1649,11 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
         if (node.attribute == "sort" || node.attribute == "reverse" ||
             node.attribute == "clear") {
+            if (node.attribute == "sort" && !supportsOrdering(lt.elementType)) {
+                error(node.location(), "sort() needs an orderable element type, "
+                      "but list[" + lt.elementType->toString() +
+                      "] elements have no ordering");
+            }
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{},
                 impl_->noneType);

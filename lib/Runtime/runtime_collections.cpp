@@ -590,6 +590,51 @@ int64_t dragon_tuple_len(DragonTuple* t) {
     return t ? t->length : 0;
 }
 
+int64_t dragon_box_eq(DragonBox a, DragonBox b);
+int64_t dragon_box_cmp(DragonBox a, DragonBox b, int64_t op);
+
+static inline DragonBox dragon_tuple_elem_as_box(const DragonTuple* t, int64_t i) {
+    DragonBox b;
+    b.tag = t->elem_tags ? (int64_t)t->elem_tags[i] : (int64_t)TAG_INT;
+    b.payload = t->data[i];
+    return b;
+}
+
+static inline bool dragon_obj_is_tuple(const void* p) {
+    return p && ((const DragonObjectHeader*)p)->type_tag == DRAGON_TAG_TUPLE;
+}
+
+int64_t dragon_tuple_eq(void* a, void* b) {
+    if (a == b) return 1;
+    if (!dragon_obj_is_tuple(a) || !dragon_obj_is_tuple(b)) return 0;
+    const DragonTuple* ta = (const DragonTuple*)a;
+    const DragonTuple* tb = (const DragonTuple*)b;
+    if (ta->length != tb->length) return 0;
+    for (int64_t i = 0; i < ta->length; i++) {
+        if (!dragon_box_eq(dragon_tuple_elem_as_box(ta, i),
+                           dragon_tuple_elem_as_box(tb, i))) return 0;
+    }
+    return 1;
+}
+
+int64_t dragon_tuple_cmp(void* a, void* b) {
+    if (a == b) return 0;
+    if (!dragon_obj_is_tuple(a) || !dragon_obj_is_tuple(b)) {
+        dragon_raise_exc_cstr(80,
+            "TypeError: ordering comparison expected two tuples");
+        return 0;
+    }
+    const DragonTuple* ta = (const DragonTuple*)a;
+    const DragonTuple* tb = (const DragonTuple*)b;
+    int64_t n = ta->length < tb->length ? ta->length : tb->length;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t c = dragon_box_cmp(dragon_tuple_elem_as_box(ta, i),
+                                   dragon_tuple_elem_as_box(tb, i), DRAGON_CMP_LT);
+        if (c != 0) return c < 0 ? -1 : 1;
+    }
+    return (ta->length < tb->length) ? -1 : (ta->length > tb->length) ? 1 : 0;
+}
+
 DragonTuple* dragon_tuple_from_list(DragonList* l) {
     if (!l) return dragon_tuple_new(0);
     int64_t n = l->size;

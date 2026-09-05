@@ -296,6 +296,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_list_cmp",
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_tuple_eq",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_tuple_cmp",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_eq",
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_int_eq",
@@ -580,6 +584,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_min_list_str",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_max_list_str",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_min_list_obj",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_max_list_obj",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_sum_list_f64",
         llvm::FunctionType::get(f64Type, {i8PtrType}, false));
