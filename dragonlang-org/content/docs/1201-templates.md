@@ -202,7 +202,14 @@ A pipe applies a filter to the interpolated value:
 | `html` / `sql` / `url` | escape for that context |
 | `raw` | insert verbatim - explicit opt-out of auto-escaping |
 | `join` / `join(sep)` | concatenate a list, optionally with a separator |
-| *your function* | any in-scope **top-level** `(str) -> str` function |
+| *your function* | any in-scope **top-level** `(str) -> str` (result escaped) or `(str) -> HTML` (result inserted as markup) |
+
+A filter of your own changes the value, not its trust level. In a typed template
+the result of a `(str) -> str` filter is auto-escaped exactly like an unfiltered
+`!{expr}`, so `!{title | shout}` is as safe as `!{title}`. A filter declared
+`(str) -> HTML` returns markup and is spliced like any other `HTML` value. The
+named filters are the explicit choices: `html`, `sql` and `url` each escape for
+that context in place of the automatic escape, and `raw` inserts verbatim.
 
 A filter must be a top-level function, not a method - `!{title | upper}` does
 **not** work because `upper` is a method on `str`. Wrap it in a function (or use
@@ -226,9 +233,15 @@ and write `!{name | shout}`.
 ## File templates and custom content types
 
 `template[HTML]("page.html")` is a compile-time `#include`: the compiler reads the
-file *during compilation*, compiles its `!{}` slots against the surrounding scope,
-and emits the same concatenation chain - zero runtime file I/O. The path must be a
+file *while parsing*, compiles its `!{}` slots against the surrounding scope, and
+emits the same concatenation chain - zero runtime file I/O. The path must be a
 string literal, resolved relative to the source file.
+
+An included file is analysed exactly like the same body written inline, so
+`dragon check` sees its slots: a missing file, an unparsable slot and a name the
+surrounding scope does not define are all compile errors that name the included
+file and the line inside it. A fragment may include another fragment, resolved
+relative to its own path; a cycle is a compile error naming the chain.
 
 Any DSL with an escaping discipline can become a typed target. Subclass `Template`
 and give it an `escape` method:

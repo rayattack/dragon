@@ -1,12 +1,91 @@
 #include <gtest/gtest.h>
 #include "TestHelpers.h"
 #include "CodeBlock.h"
+#include "dragon/Platform.h"
+
+#include <cstdio>
+#include <fstream>
+#include <string>
 
 using namespace dragon;
 using namespace dragon::test;
 
 static std::string code(const std::string& block) {
     return extractCode("ParserTest.md", block);
+}
+
+static std::string templateFixturePath(const std::string& tag) {
+    return dragon::platform::getTempDir() +
+           std::string(1, dragon::platform::pathSeparator()) +
+           "dragon_tpl_parse_" +
+           std::to_string(dragon::platform::getProcessId()) + "_" + tag +
+           ".html";
+}
+
+static void writeTemplateFixture(const std::string& path,
+                                 const std::string& body) {
+    std::ofstream out(path);
+    out << body;
+}
+
+static bool anyDiagnosticContains(const std::vector<ParserDiagnostic>& diags,
+                                  const std::string& needle) {
+    for (const auto& d : diags)
+        if (d.message.find(needle) != std::string::npos) return true;
+    return false;
+}
+
+TEST(ParserTest, TemplateIncludeIsExpandedWhileParsing) {
+    const std::string path = templateFixturePath("expand");
+    writeTemplateFixture(path, "<b>!{name}</b>");
+    auto module = parse("name: str = \"ada\"\nx: str = template(\"" + path +
+                        "\")\n");
+    std::remove(path.c_str());
+    ASSERT_NE(module, nullptr);
+    ASSERT_EQ(module->body.size(), 2u);
+    auto* ann = dynamic_cast<AnnAssignStmt*>(module->body[1].get());
+    ASSERT_NE(ann, nullptr);
+    auto* file = dynamic_cast<TemplateFileExpr*>(ann->value.get());
+    ASSERT_NE(file, nullptr);
+    ASSERT_NE(file->expansion, nullptr);
+    ASSERT_EQ(file->expansion->templateParts.size(), 3u);
+    EXPECT_NE(file->expansion->templateParts[1].expr, nullptr);
+}
+
+TEST(ParserTest, TemplateIncludeMissingFileIsRejected) {
+    auto diags = parseErrors(
+        "x: str = template(\"dragon_no_such_template_fixture.html\")\n");
+    EXPECT_TRUE(anyDiagnosticContains(diags, "cannot open template file"));
+}
+
+TEST(ParserTest, TemplateIncludeSelfCycleIsRejected) {
+    const std::string path = templateFixturePath("self");
+    const std::string name = path.substr(path.find_last_of("/\\") + 1);
+    writeTemplateFixture(path, "<b>!{template(\"" + name + "\")}</b>");
+    auto diags = parseErrors("x: str = template(\"" + path + "\")\n");
+    std::remove(path.c_str());
+    EXPECT_TRUE(anyDiagnosticContains(diags, "template include cycle"));
+}
+
+TEST(ParserTest, TemplateIncludeMutualCycleIsRejected) {
+    const std::string first = templateFixturePath("mutual_a");
+    const std::string second = templateFixturePath("mutual_b");
+    const std::string firstName = first.substr(first.find_last_of("/\\") + 1);
+    const std::string secondName = second.substr(second.find_last_of("/\\") + 1);
+    writeTemplateFixture(first, "<a>!{template(\"" + secondName + "\")}</a>");
+    writeTemplateFixture(second, "<b>!{template(\"" + firstName + "\")}</b>");
+    auto diags = parseErrors("x: str = template(\"" + first + "\")\n");
+    std::remove(first.c_str());
+    std::remove(second.c_str());
+    EXPECT_TRUE(anyDiagnosticContains(diags, "template include cycle"));
+}
+
+TEST(ParserTest, TemplateIncludeErrorNamesTheIncludedFile) {
+    const std::string path = templateFixturePath("origin");
+    writeTemplateFixture(path, "<b>!{}</b>");
+    auto diags = parseErrors("x: str = template(\"" + path + "\")\n");
+    std::remove(path.c_str());
+    EXPECT_TRUE(anyDiagnosticContains(diags, "template file '" + path + "'"));
 }
 
 TEST(ParserTest, EmptyModule) {

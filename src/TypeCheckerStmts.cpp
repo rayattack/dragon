@@ -1409,6 +1409,8 @@ void TypeChecker::visit(FromImportStmt& node) {
                 continue;
             }
             impl_->define(defName, symIt->second);
+            if (symIt->second && symIt->second->kind() == Type::Kind::Function)
+                impl_->plainFunctionSymbols.insert(defName);
             if (symIt->second && symIt->second->kind() == Type::Kind::Class) {
                 auto cls = std::static_pointer_cast<ClassType>(symIt->second);
                 impl_->typeNames[defName] = std::make_shared<InstanceType>(cls);

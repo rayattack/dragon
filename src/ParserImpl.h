@@ -20,6 +20,7 @@ struct Parser::Impl {
     bool ffiProcessImportsInjected = false;
     int recursionDepth = 0;
     static constexpr int kMaxRecursionDepth = 500;
+    TemplateIncludeContext ownTemplateIncludes;
 };
 
 inline std::string reservedWordAsNameMessage(std::string_view word) {

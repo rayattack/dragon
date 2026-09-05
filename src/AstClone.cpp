@@ -441,6 +441,7 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
             for (auto& s : part.blockStmts)
                 tp.blockStmts.push_back(cloneStmt(s.get(), subst));
             tp.filterName = part.filterName;
+            tp.filterReturnClass = part.filterReturnClass;
             tp.separatorExpr = cloneExpr(part.separatorExpr.get(), subst);
             tp.isSpread = part.isSpread;
             tp.exprText = part.exprText;
@@ -455,6 +456,11 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         auto r = std::make_unique<TemplateFileExpr>();
         r->filePath = n->filePath;
         r->contentType = n->contentType;
+        if (n->expansion) {
+            auto cloned = cloneExpr(n->expansion.get(), subst);
+            r->expansion.reset(
+                static_cast<TemplateExpr*>(cloned.release()));
+        }
         setLoc(r, *e);
         return r;
     }

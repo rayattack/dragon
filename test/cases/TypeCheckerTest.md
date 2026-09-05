@@ -2913,3 +2913,143 @@ print(str(total))
 t: Task[None] = side_effect()
 await t
 ```
+
+#### :template_filter_unknown_name_rejected
+
+A filter is resolved while checking, so a name that is not a function in scope
+is a compile error rather than a backend surprise.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+title: str = "a"
+page = template[HTML] {<b>!{title | nosuch}</b>}
+```
+
+#### :template_filter_wrong_param_type_rejected
+
+A filter runs on the rendered text, so it takes one str. An int parameter used
+to reach the backend and fail LLVM verification.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+def twice(n: int) -> int { return n * 2 }
+title: str = "a"
+page = template[HTML] {<b>!{title | twice}</b>}
+```
+
+#### :template_filter_wrong_return_type_rejected
+
+The filter's result is spliced as text, so it must be str or the template's own
+content type.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+def size(s: str) -> int { return len(s) }
+title: str = "a"
+page = template[HTML] {<b>!{title | size}</b>}
+```
+
+#### :template_filter_callable_variable_rejected
+
+A filter names a function, not a value holding one, and the backend can only
+call the named symbol.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+shout: Callable[[str], str] = lambda (s: str) -> str { return s.upper() }
+title: str = "a"
+page = template[HTML] {<b>!{title | shout}</b>}
+```
+
+#### :template_filter_str_and_content_type_accepted
+
+Both allowed filter shapes: a `(str) -> str` whose result is escaped, and a
+`(str) -> HTML` whose result is spliced as markup.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+def shout(s: str) -> str { return s.upper() }
+def emphasize(s: str) -> HTML { return HTML(s) }
+title: str = "a"
+loud = template[HTML] {<b>!{title | shout}</b>}
+marked = template[HTML] {<b>!{title | emphasize}</b>}
+```
+
+#### :template_spread_with_user_filter_rejected
+
+A spread joins the list itself, so it cannot also pipe through a filter. Only
+`| raw` combines with it, to opt the elements out of escaping.
+
+```dr
+def shout(s: str) -> str { return s.upper() }
+parts: list[str] = ["a", "b"]
+page: str = template {<p>!{*parts | shout}</p>}
+```
+
+#### :template_filter_nested_function_rejected
+
+A filter names a top-level function; a nested `def` is a local of its enclosing
+function and has no plain symbol for the splice to call.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+def page(title: str) -> str {
+    def shout(s: str) -> str { return s.upper() }
+    marked = template[HTML] {<b>!{title | shout}</b>}
+    return marked.to_str()
+}
+```

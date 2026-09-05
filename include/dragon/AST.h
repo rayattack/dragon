@@ -122,6 +122,7 @@ struct TemplatePart {
     std::unique_ptr<Expr> expr;
     std::vector<std::unique_ptr<Stmt>> blockStmts;
     std::string filterName;
+    std::string filterReturnClass;
     std::unique_ptr<Expr> separatorExpr;
     bool isSpread = false;
     std::string exprText;
@@ -144,6 +145,7 @@ class TemplateFileExpr : public Expr {
 public:
     std::string filePath;
     std::string contentType;
+    std::unique_ptr<TemplateExpr> expansion;
     void accept(ASTVisitor& visitor) override;
 };
 

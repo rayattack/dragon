@@ -240,5 +240,110 @@ class StringifiedTempDrainTests(TestCase) {
 }
 
 
+def loud(s: str) -> str {
+    return s.upper()
+}
+
+
+def badge_markup(s: str) -> HTML {
+    return template[HTML] {<em>!{s}</em>}
+}
+
+
+def render_filtered(label: str) -> str {
+    h: HTML = template[HTML] {<li>!{label | loud}</li>}
+    return h.to_str()
+}
+
+
+def render_markup_filtered(label: str) -> str {
+    h: HTML = template[HTML] {<li>!{label | badge_markup}</li>}
+    return h.to_str()
+}
+
+
+def render_block_lambda(items: list[str], tag: str) -> str {
+    h: HTML = template[HTML] {
+        <ul>!{ for it in items { :{ <li>!{(lambda: tag + it)()}</li> } } }</ul>
+    }
+    return h.to_str()
+}
+
+
+def render_block_lambda_untyped(items: list[str], tag: str) -> str {
+    return template {
+        <ul>!{ for it in items { :{ <li>!{(lambda: tag + it)()}</li> } } }</ul>
+    }
+}
+
+
+class TemplateBlockLambdaRcTests(TestCase) {
+    def test_typed_template_with_a_capturing_block_lambda() {
+        out: str = ""
+        i: int = 0
+        while i < 300 {
+            out = render_block_lambda(["a", "b"], "x")
+            i = i + 1
+        }
+        self.assertTrue("<li>xa</li>" in out)
+        self.assertTrue("<li>xb</li>" in out)
+    }
+
+    def test_untyped_template_with_a_capturing_block_lambda() {
+        out: str = ""
+        i: int = 0
+        while i < 300 {
+            out = render_block_lambda_untyped(["a", "b"], "x")
+            i = i + 1
+        }
+        self.assertTrue("<li>xa</li>" in out)
+        self.assertTrue("<li>xb</li>" in out)
+    }
+
+    def test_reassigned_template_local_stays_a_template() {
+        h: HTML = template[HTML] {<b>plain</b>}
+        h = template[HTML] {<i>!{(lambda: "z")()}</i>}
+        self.assertEqual(h.to_str(), "<i>z</i>")
+    }
+}
+
+
+class TemplateFilterRcTests(TestCase) {
+    def test_filtered_row_stays_correct_under_repetition() {
+        out: str = ""
+        i: int = 0
+        while i < 2000 {
+            out = render_filtered("a&b")
+            i = i + 1
+        }
+        self.assertEqual(out, "<li>A&amp;B</li>")
+    }
+
+    def test_markup_filter_row_stays_correct_under_repetition() {
+        out: str = ""
+        i: int = 0
+        while i < 2000 {
+            out = render_markup_filtered("a&b")
+            i = i + 1
+        }
+        self.assertEqual(out, "<li><em>a&amp;b</em></li>")
+    }
+
+    def test_filtered_field_survives_repeated_renders() {
+        nodes: list[Node] = [Node("keep&me"), Node("also<kept>")]
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const row: str = render_filtered(nd.label)
+            }
+            r = r + 1
+        }
+        self.assertEqual(nodes[0].label, "keep&me")
+        self.assertEqual(nodes[1].label, "also<kept>")
+    }
+}
+
+
 main([BorrowedFieldRCTests(), TemplateRenderRcTests(),
-      StringifiedTempDrainTests()])
+      StringifiedTempDrainTests(), TemplateFilterRcTests(),
+      TemplateBlockLambdaRcTests()])

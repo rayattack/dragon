@@ -983,6 +983,34 @@ TEST(TypeCheckerTest, TypedTemplateStructTemplateReservedForD037) {
         << "Expected error mentioning StructTemplate reservation";
 }
 
+TEST(TypeCheckerTest, TemplateFilterUnknownNameRejected) {
+    EXPECT_TRUE(checkHasErrors(code("template_filter_unknown_name_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateFilterWrongParamTypeRejected) {
+    EXPECT_TRUE(checkHasErrors(code("template_filter_wrong_param_type_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateFilterWrongReturnTypeRejected) {
+    EXPECT_TRUE(checkHasErrors(code("template_filter_wrong_return_type_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateFilterCallableVariableRejected) {
+    EXPECT_TRUE(checkHasErrors(code("template_filter_callable_variable_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateFilterNestedFunctionRejected) {
+    EXPECT_TRUE(checkHasErrors(code("template_filter_nested_function_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateSpreadWithUserFilterRejected) {
+    EXPECT_TRUE(checkHasErrors(code("template_spread_with_user_filter_rejected")));
+}
+
+TEST(TypeCheckerTest, TemplateFilterStrAndContentTypeAccepted) {
+    EXPECT_TRUE(checkOk(code("template_filter_str_and_content_type_accepted")));
+}
+
 TEST(TypeCheckerTest, UntypedTemplateUnchangedStillStr) {
     auto module = parse("y: str = template {hello}\n");
     ASSERT_NE(module, nullptr);

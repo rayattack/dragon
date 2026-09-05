@@ -442,7 +442,51 @@ class OwnedReceiverReturnTest(TestCase) {
 }
 
 
+class UntypedLambdaReturnTests(TestCase) {
+    def test_expression_lambda_returning_str() {
+        const s: str = "a"
+        self.assertEqual((lambda: s.upper())(), "A")
+    }
+
+    def test_expression_lambda_returning_str_literal() {
+        self.assertEqual((lambda: "x")(), "x")
+    }
+
+    def test_expression_lambda_returning_float() {
+        const x: float = 2.5
+        self.assertEqual((lambda: x * 2.0)(), 5.0)
+    }
+
+    def test_expression_lambda_returning_list() {
+        const xs: list[int] = [1, 2]
+        self.assertEqual(len((lambda: xs)()), 2)
+    }
+
+    def test_expression_lambda_returning_int_still_works() {
+        const n: int = 5
+        self.assertEqual((lambda: n + 1)(), 6)
+    }
+
+    def test_annotated_block_lambda_returning_float() {
+        const x: float = 2.5
+        self.assertEqual((lambda () -> float { return x * 2.0 })(), 5.0)
+    }
+
+    def test_inferred_lambda_binds_to_a_callable_annotation() {
+        const s: str = "a"
+        const f: Callable[[], str] = lambda: s.upper()
+        self.assertEqual(f(), "A")
+    }
+
+    def test_declared_return_type_still_wins() {
+        const s: str = "a"
+        self.assertEqual((lambda () -> str { return s.upper() })(), "A")
+    }
+}
+
+
 main([ChainedCallTests(), CallableFieldShareTests(), CallableListTests(),
       QualifiedChainTests(), ChainedIntDictReturnTest(), ChainedStrDictReturnTest(),
       ChainedListReturnTest(), NestedMemberReturnTest(),
-      ChainedControlsTest(), OwnedReceiverReturnTest()])
+      ChainedControlsTest(), OwnedReceiverReturnTest(),
+      UntypedLambdaReturnTests()])

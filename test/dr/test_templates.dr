@@ -1,8 +1,16 @@
 from json import Data
 from unittest import TestCase, main
-from html import HTML
+from html import HTML, strip_tags
 
 const JS: str = template("tmpl_bang_data.js")
+
+const LAMBDA_ITEMS: list[str] = ["a", "b"]
+
+const LAMBDA_INLINE: HTML = template[HTML] {<ul>!{ for it in LAMBDA_ITEMS { :{ <li>!{(lambda: it.upper())()}</li> } } }</ul>}
+
+const LAMBDA_LIST: HTML = template[HTML] {<ul>!{ for it in LAMBDA_ITEMS { :{ <li>!{(lambda: it + "!")()}</li> } } }</ul>}
+
+const LAMBDA_FROM_FILE: HTML = template[HTML]("tmpl_lambda_frag.html")
 
 
 def tmpl_pair(p: tuple[str, str]) -> str {
@@ -27,6 +35,88 @@ def tmpl_block(pairs: list[tuple[str, str]]) -> str {
 
 def render_nothing() -> HTML {
     return template[HTML] {}
+}
+
+
+def shout(s: str) -> str {
+    return s.upper()
+}
+
+
+def quoted(s: str) -> str {
+    return '"' + s + '"'
+}
+
+
+def emphasize(s: str) -> HTML {
+    return template[HTML] {<em>!{s}</em>}
+}
+
+
+def tmpl_user_filter(title: str) -> str {
+    h: HTML = template[HTML] {<b>!{title | shout}</b>}
+    return h.to_str()
+}
+
+
+def tmpl_raw_filter(title: str) -> str {
+    h: HTML = template[HTML] {<b>!{title | raw}</b>}
+    return h.to_str()
+}
+
+
+def tmpl_html_filter(title: str) -> str {
+    h: HTML = template[HTML] {<b>!{title | html}</b>}
+    return h.to_str()
+}
+
+
+def tmpl_url_filter(q: str) -> str {
+    h: HTML = template[HTML] {<a href="?q=!{q | url}">go</a>}
+    return h.to_str()
+}
+
+
+def tmpl_html_returning_filter(title: str) -> str {
+    h: HTML = template[HTML] {<b>!{title | emphasize}</b>}
+    return h.to_str()
+}
+
+
+def tmpl_filter_in_loop(items: list[str]) -> str {
+    h: HTML = template[HTML] {
+        <ul>!{ for it in items { :{ <li>!{it | shout}</li> } } }</ul>
+    }
+    return h.to_str()
+}
+
+
+def tmpl_imported_filter(title: str) -> str {
+    h: HTML = template[HTML] {<b>!{title | strip_tags}</b>}
+    return h.to_str()
+}
+
+
+def tmpl_filter_on_int(n: int) -> str {
+    h: HTML = template[HTML] {<b>!{n | quoted}</b>}
+    return h.to_str()
+}
+
+
+def tmpl_untyped_filter(title: str) -> str {
+    return template {<b>!{title | shout}</b>}
+}
+
+
+def tmpl_pair_from_file(p: tuple[str, str]) -> str {
+    h: HTML = template[HTML]("tmpl_pair_frag.html")
+    return h.to_str()
+}
+
+
+def tmpl_nested_from_file(who: str) -> str {
+    h: HTML = template[HTML]("tmpl_outer_frag.html")
+    return h.to_str()
 }
 
 
@@ -182,5 +272,92 @@ class EmptyTypedTemplateTests(TestCase) {
 }
 
 
+class TemplateFilterTrustTests(TestCase) {
+    def test_user_filter_result_is_escaped() {
+        const out: str = tmpl_user_filter("<script>x</script>")
+        self.assertEqual(out, "<b>&lt;SCRIPT&gt;X&lt;/SCRIPT&gt;</b>")
+    }
+
+    def test_filter_output_is_escaped_even_when_input_is_clean() {
+        self.assertEqual(tmpl_filter_on_int(5), "<b>&quot;5&quot;</b>")
+    }
+
+    def test_raw_still_opts_out() {
+        self.assertEqual(tmpl_raw_filter("<i>ok</i>"), "<b><i>ok</i></b>")
+    }
+
+    def test_html_filter_is_not_double_escaped() {
+        self.assertEqual(tmpl_html_filter("<a>"), "<b>&lt;a&gt;</b>")
+    }
+
+    def test_url_filter_percent_encodes() {
+        self.assertEqual(tmpl_url_filter("a b&c"), "<a href=\"?q=a%20b%26c\">go</a>")
+    }
+
+    def test_filter_returning_content_type_is_markup() {
+        self.assertEqual(tmpl_html_returning_filter("a&b"),
+                         "<b><em>a&amp;b</em></b>")
+    }
+
+    def test_filter_inside_loop_block_is_escaped() {
+        const out: str = tmpl_filter_in_loop(["<a>", "<b>"])
+        self.assertTrue("&lt;A&gt;" in out)
+        self.assertFalse("<A>" in out)
+    }
+
+    def test_imported_function_is_a_usable_filter() {
+        self.assertEqual(tmpl_imported_filter("<i>hi</i>"), "<b>hi</b>")
+    }
+
+    def test_untyped_template_still_does_not_escape() {
+        self.assertEqual(tmpl_untyped_filter("<a>"), "<b><A></b>")
+    }
+}
+
+
+class TemplateIncludeTests(TestCase) {
+    def test_lambda_in_a_block_reads_the_loop_variable() {
+        const out: str = LAMBDA_INLINE.to_str()
+        self.assertTrue("<li>A</li>" in out)
+        self.assertTrue("<li>B</li>" in out)
+    }
+
+    def test_lambda_returning_a_concatenation_in_a_block() {
+        const out: str = LAMBDA_LIST.to_str()
+        self.assertTrue("<li>a!</li>" in out)
+        self.assertTrue("<li>b!</li>" in out)
+    }
+
+    def test_lambda_in_an_included_block_reads_the_loop_variable() {
+        const out: str = LAMBDA_FROM_FILE.to_str()
+        self.assertTrue("<li>A</li>" in out)
+        self.assertTrue("<li>B</li>" in out)
+    }
+
+    def test_include_slot_is_typed_like_an_inline_one() {
+        const p: tuple[str, str] = ("a", "x")
+        self.assertEqual(tmpl_pair_from_file(p).strip(), "a=x")
+        self.assertEqual(tmpl_pair_from_file(p).strip(), tmpl_pair(p).strip())
+    }
+
+    def test_include_escapes_like_an_inline_template() {
+        const p: tuple[str, str] = ("<k>", "<v>")
+        self.assertEqual(tmpl_pair_from_file(p).strip(),
+                         "&lt;k&gt;=&lt;v&gt;")
+    }
+
+    def test_include_nests_relative_to_its_own_file() {
+        self.assertEqual(tmpl_nested_from_file("ada"),
+                         "<div><span>ada</span></div>")
+    }
+
+    def test_nested_include_escapes_its_slot() {
+        self.assertEqual(tmpl_nested_from_file("<b>"),
+                         "<div><span>&lt;b&gt;</span></div>")
+    }
+}
+
+
 main([TemplateFileBangTests(), TemplateTupleInterpTests(),
-      EmptyTypedTemplateTests()])
+      EmptyTypedTemplateTests(), TemplateFilterTrustTests(),
+      TemplateIncludeTests()])

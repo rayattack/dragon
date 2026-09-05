@@ -642,6 +642,12 @@ bool TypeChecker::check(Module& module) {
         impl_->define(fd->name, funcType);
     }
 
+    for (auto& stmt : module.body) {
+        auto* fd = dynamic_cast<FunctionDecl*>(stmt.get());
+        if (!fd || !fd->typeParams.empty()) continue;
+        impl_->plainFunctionSymbols.insert(fd->name);
+    }
+
     module.accept(*this);
 
     runMonomorphization();
@@ -1234,11 +1240,17 @@ void TypeChecker::visit(StringLiteral& node) {
 
 void TypeChecker::visit(TemplateExpr& node) {
     node.type = resolveTemplateContentType(node.contentType, node.location());
+    std::string effContent = node.contentType;
+    if (effContent.empty() && node.isContentAlias &&
+        !impl_->templateContentStack.empty())
+        effContent = impl_->templateContentStack.back();
+    impl_->templateContentStack.push_back(effContent);
     for (auto& part : node.templateParts) {
         if (part.kind == TemplatePart::Kind::Interpolation) {
             if (!part.expr) continue;
             part.expr->accept(*this);
             if (part.separatorExpr) part.separatorExpr->accept(*this);
+            checkTemplateFilter(part);
             checkTemplateSplice(part, node);
         } else if (part.kind == TemplatePart::Kind::Block) {
             for (auto& stmt : part.blockStmts) {
@@ -1246,6 +1258,7 @@ void TypeChecker::visit(TemplateExpr& node) {
             }
         }
     }
+    impl_->templateContentStack.pop_back();
 }
 
 bool TypeChecker::typeIsRenderable(const Type* t, std::string& what) {
@@ -1310,6 +1323,66 @@ void TypeChecker::checkRenderable(Expr* expr, const std::string& site) {
         error(expr->location(), unrenderableTypeMessage(site, what));
 }
 
+static bool isBuiltinTemplateFilter(const std::string& filterName) {
+    return filterName == "raw" || filterName == "html" || filterName == "sql" ||
+           filterName == "url" || filterName == "join" ||
+           filterName.rfind("join(", 0) == 0;
+}
+
+void TypeChecker::checkTemplateFilter(TemplatePart& part) {
+    part.filterReturnClass.clear();
+    const std::string& filterName = part.filterName;
+    if (filterName.empty()) return;
+
+    if (part.isSpread && filterName != "raw") {
+        error(part.expr->location(),
+              "Template spread `!{*expr}` cannot be combined with an explicit "
+              "`| " + filterName + "` filter");
+        return;
+    }
+    if (isBuiltinTemplateFilter(filterName)) return;
+
+    const std::string site = "template splice `!{" + part.exprText + "}`";
+    const std::string content = impl_->templateContentStack.empty()
+                                    ? std::string()
+                                    : impl_->templateContentStack.back();
+    const std::string allowed = content.empty() ? "str" : "str or " + content;
+    const SourceLocation& loc = part.expr->location();
+
+    auto sym = impl_->lookup(filterName);
+    if (!sym || sym->kind() != Type::Kind::Function ||
+        impl_->plainFunctionSymbols.count(filterName) == 0) {
+        error(loc, site + ": unknown filter '" + filterName +
+              "'. A filter is a top-level function taking one str and "
+              "returning " + allowed + ".");
+        return;
+    }
+
+    auto& filterType = static_cast<FunctionType&>(*sym);
+    if (filterType.paramTypes.size() != 1 || !filterType.paramTypes[0] ||
+        filterType.paramTypes[0]->kind() != Type::Kind::Str) {
+        error(loc, site + ": filter '" + filterName + "' is " +
+              filterType.toString() + ". A filter runs on the rendered text, "
+              "so it must take exactly one str.");
+        return;
+    }
+
+    const Type* ret = filterType.returnType.get();
+    if (ret && ret->kind() == Type::Kind::Str) return;
+    if (ret && ret->kind() == Type::Kind::Instance && !content.empty()) {
+        const auto& inst = static_cast<const InstanceType&>(*ret);
+        if (inst.classType && inst.classType->name == content) {
+            part.filterReturnClass = content;
+            return;
+        }
+    }
+    error(loc, site + ": filter '" + filterName + "' returns " +
+          (ret ? ret->toString() : std::string("nothing")) +
+          ". A filter must return " + allowed +
+          "; it changes the value, not its trust level, so a str result is "
+          "escaped exactly like an unfiltered one.");
+}
+
 void TypeChecker::checkTemplateSplice(TemplatePart& part,
                                       const TemplateExpr& node) {
     const bool isJoin = part.filterName == "join" ||
@@ -1364,6 +1437,7 @@ void TypeChecker::checkTemplateSplice(TemplatePart& part,
 }
 
 void TypeChecker::visit(TemplateFileExpr& node) {
+    if (node.expansion) node.expansion->accept(*this);
     node.type = resolveTemplateContentType(node.contentType, node.location());
 }
 

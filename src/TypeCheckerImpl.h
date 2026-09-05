@@ -157,7 +157,12 @@ struct TypeChecker::Impl {
 
     int genericTemplateDepth = 0;
 
+    std::vector<std::string> templateContentStack;
+
+    std::unordered_set<std::string> plainFunctionSymbols;
+
     std::unordered_map<std::string, ClassDecl*> genericClasses;
+
     std::unordered_map<std::string, FunctionDecl*> genericFunctions;
 
     std::unordered_set<const FunctionDecl*> schemaDecodeFns;

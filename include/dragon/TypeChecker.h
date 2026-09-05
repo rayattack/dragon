@@ -423,6 +423,8 @@ private:
 
     void checkTemplateSplice(TemplatePart& part, const TemplateExpr& node);
 
+    void checkTemplateFilter(TemplatePart& part);
+
     void visitClassDeclBody(ClassDecl& node);
 
     void collectGenericTemplates(Module& module);

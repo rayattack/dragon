@@ -1146,7 +1146,8 @@ void CodeGen::visit(CallExpr& node) {
         auto& fnTy = static_cast<FunctionType&>(*node.callee->type);
 
         bool closureOwned =
-            dynamic_cast<CallExpr*>(node.callee.get()) != nullptr;
+            dynamic_cast<CallExpr*>(node.callee.get()) != nullptr ||
+            dynamic_cast<LambdaExpr*>(node.callee.get()) != nullptr;
 
         std::vector<llvm::Type*> userParamTypes;
         userParamTypes.reserve(fnTy.paramTypes.size());

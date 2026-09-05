@@ -338,8 +338,14 @@ void CodeGen::visit(LambdaExpr& node) {
 
     llvm::Type* retType = impl_->typeExprToLLVM(node.returnType.get());
     if (!node.returnType) {
-        retType = (node.body || impl_->bodyReturnsValue(node.bodyStmts))
-            ? impl_->i64Type : impl_->voidType;
+        retType = impl_->voidType;
+        if (node.body || impl_->bodyReturnsValue(node.bodyStmts)) {
+            retType = impl_->i64Type;
+            auto* checked = dynamic_cast<FunctionType*>(node.type.get());
+            if (checked && checked->returnType &&
+                checked->returnType->kind() != Type::Kind::Unknown)
+                retType = impl_->typeKindToLLVM(checked->returnType->kind());
+        }
     }
 
     std::vector<llvm::Type*> userParamTypes;

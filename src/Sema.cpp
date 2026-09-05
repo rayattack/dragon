@@ -164,7 +164,9 @@ void Sema::visit(TemplateExpr& node) {
         }
     }
 }
-void Sema::visit(TemplateFileExpr&) {}
+void Sema::visit(TemplateFileExpr& node) {
+    if (node.expansion) node.expansion->accept(*this);
+}
 void Sema::visit(BooleanLiteral&) {}
 void Sema::visit(NoneLiteral&) {}
 

@@ -273,6 +273,11 @@ bool isEggVerb(const std::string& cmd) {
     return false;
 }
 
+static const std::string& diagnosedFile(const SourceLocation& loc,
+                                        const std::string& fallback) {
+    return loc.filename.empty() ? fallback : loc.filename;
+}
+
 int typeCheckModuleGraph(Module& entryModule,
                          const std::string& entryFile,
                          ImportGraph& graph,
@@ -309,7 +314,8 @@ int typeCheckModuleGraph(Module& entryModule,
                 std::cerr << formatter.formatUntypedImport(mod.filepath);
                 for (const auto& diag : enforcer.diagnostics()) {
                     if (diag.level == EnforcerDiagnostic::Level::Error) {
-                        std::cerr << formatter.format(mod.filepath,
+                        std::cerr << formatter.format(
+                            diagnosedFile(diag.location, mod.filepath),
                             diag.location.line, diag.location.column,
                             "error", diag.message);
                     }
@@ -322,7 +328,8 @@ int typeCheckModuleGraph(Module& entryModule,
         if (!modSema.analyze(*mod.ast)) {
             for (const auto& diag : modSema.diagnostics()) {
                 if (diag.level == SemaDiagnostic::Level::Error) {
-                    std::cerr << formatter.format(mod.filepath,
+                    std::cerr << formatter.format(
+                        diagnosedFile(diag.location, mod.filepath),
                         diag.location.line, diag.location.column,
                         "error", diag.message);
                 }
@@ -334,7 +341,8 @@ int typeCheckModuleGraph(Module& entryModule,
             DefiniteAssignment modDa;
             if (!modDa.analyze(*mod.ast)) {
                 for (const auto& diag : modDa.diagnostics()) {
-                    std::cerr << formatter.format(mod.filepath,
+                    std::cerr << formatter.format(
+                        diagnosedFile(diag.location, mod.filepath),
                         diag.location.line, diag.location.column,
                         "error", diag.message);
                 }
@@ -357,7 +365,8 @@ int typeCheckModuleGraph(Module& entryModule,
         if (modTypeChecker.hasErrors()) {
             for (const auto& diag : modTypeChecker.diagnostics()) {
                 if (diag.level == TypeDiagnostic::Level::Error) {
-                    std::cerr << formatter.format(mod.filepath,
+                    std::cerr << formatter.format(
+                        diagnosedFile(diag.location, mod.filepath),
                         diag.location.line, diag.location.column,
                         "error", diag.message);
                 }
@@ -369,7 +378,8 @@ int typeCheckModuleGraph(Module& entryModule,
             OwnershipCheck modOwn;
             if (!modOwn.analyze(*mod.ast)) {
                 for (const auto& diag : modOwn.diagnostics()) {
-                    std::cerr << formatter.format(mod.filepath,
+                    std::cerr << formatter.format(
+                        diagnosedFile(diag.location, mod.filepath),
                         diag.location.line, diag.location.column,
                         "error", diag.message);
                 }
@@ -396,7 +406,8 @@ int typeCheckModuleGraph(Module& entryModule,
         DefiniteAssignment entryDa;
         if (!entryDa.analyze(entryModule)) {
             for (const auto& diag : entryDa.diagnostics()) {
-                std::cerr << formatter.format(entryFile,
+                std::cerr << formatter.format(
+                    diagnosedFile(diag.location, entryFile),
                     diag.location.line, diag.location.column,
                     "error", diag.message);
             }
@@ -408,7 +419,8 @@ int typeCheckModuleGraph(Module& entryModule,
     if (entryTc.hasErrors()) {
         for (const auto& diag : entryTc.diagnostics()) {
             if (diag.level == TypeDiagnostic::Level::Error) {
-                std::cerr << formatter.format(entryFile,
+                std::cerr << formatter.format(
+                    diagnosedFile(diag.location, entryFile),
                     diag.location.line, diag.location.column,
                     "error", diag.message);
             }
@@ -420,7 +432,8 @@ int typeCheckModuleGraph(Module& entryModule,
         OwnershipCheck entryOwn;
         if (!entryOwn.analyze(entryModule)) {
             for (const auto& diag : entryOwn.diagnostics()) {
-                std::cerr << formatter.format(entryFile,
+                std::cerr << formatter.format(
+                    diagnosedFile(diag.location, entryFile),
                     diag.location.line, diag.location.column,
                     "error", diag.message);
             }
@@ -748,8 +761,9 @@ int Driver::buildFile(const std::string& filename) {
     if (lexer.hasErrors()) {
         for (const auto& diag : lexer.diagnostics()) {
             if (diag.level == LexerDiagnostic::Level::Error) {
-                std::cerr << impl_->formatter.format(filename, diag.location.line,
-                    diag.location.column, "error", diag.message);
+                std::cerr << impl_->formatter.format(
+                    diagnosedFile(diag.location, filename),
+                    diag.location.line, diag.location.column, "error", diag.message);
             }
         }
         return 1;
@@ -766,8 +780,9 @@ int Driver::buildFile(const std::string& filename) {
     if (parser.hasErrors()) {
         for (const auto& diag : parser.diagnostics()) {
             if (diag.level == ParserDiagnostic::Level::Error) {
-                std::cerr << impl_->formatter.format(filename, diag.location.line,
-                    diag.location.column, "error", diag.message);
+                std::cerr << impl_->formatter.format(
+                    diagnosedFile(diag.location, filename),
+                    diag.location.line, diag.location.column, "error", diag.message);
             }
         }
         return 1;
@@ -783,8 +798,10 @@ int Driver::buildFile(const std::string& filename) {
         if (!enforcer.enforce(*module)) {
             for (const auto& diag : enforcer.diagnostics()) {
                 if (diag.level == EnforcerDiagnostic::Level::Error) {
-                    std::cerr << impl_->formatter.format(filename, diag.location.line,
-                        diag.location.column, "error", diag.message);
+                    std::cerr << impl_->formatter.format(
+                        diagnosedFile(diag.location, filename),
+                        diag.location.line, diag.location.column,
+                        "error", diag.message);
                 }
             }
             return 1;
@@ -795,8 +812,9 @@ int Driver::buildFile(const std::string& filename) {
     if (!sema.analyze(*module)) {
         for (const auto& diag : sema.diagnostics()) {
             if (diag.level == SemaDiagnostic::Level::Error) {
-                std::cerr << impl_->formatter.format(filename, diag.location.line,
-                    diag.location.column, "error", diag.message);
+                std::cerr << impl_->formatter.format(
+                    diagnosedFile(diag.location, filename),
+                    diag.location.line, diag.location.column, "error", diag.message);
             }
         }
         return 1;
@@ -1044,8 +1062,9 @@ int Driver::migrateFile(const std::string& filename) {
             d.level == MigrationDiagnostic::Level::Error   ? "error"
           : d.level == MigrationDiagnostic::Level::Warning ? "warning"
                                                            : "note";
-        std::cerr << impl_->formatter.format(filename, d.location.line,
-                                             d.location.column, level, d.message);
+        std::cerr << impl_->formatter.format(
+            diagnosedFile(d.location, filename),
+            d.location.line, d.location.column, level, d.message);
     }
     if (!ok || migrator.hasErrors()) return 1;
     std::cout << "Migrated: " << filename << " -> " << outPath << "\n";
@@ -1077,8 +1096,9 @@ int Driver::checkFile(const std::string& filename) {
     if (lexer.hasErrors()) {
         for (const auto& diag : lexer.diagnostics()) {
             if (diag.level == LexerDiagnostic::Level::Error) {
-                std::cerr << impl_->formatter.format(filename, diag.location.line,
-                    diag.location.column, "error", diag.message);
+                std::cerr << impl_->formatter.format(
+                    diagnosedFile(diag.location, filename),
+                    diag.location.line, diag.location.column, "error", diag.message);
             }
         }
         return 1;
@@ -1095,8 +1115,9 @@ int Driver::checkFile(const std::string& filename) {
     if (parser.hasErrors()) {
         for (const auto& diag : parser.diagnostics()) {
             if (diag.level == ParserDiagnostic::Level::Error) {
-                std::cerr << impl_->formatter.format(filename, diag.location.line,
-                    diag.location.column, "error", diag.message);
+                std::cerr << impl_->formatter.format(
+                    diagnosedFile(diag.location, filename),
+                    diag.location.line, diag.location.column, "error", diag.message);
             }
         }
         return 1;
@@ -1112,8 +1133,10 @@ int Driver::checkFile(const std::string& filename) {
         if (!enforcer.enforce(*module)) {
             for (const auto& diag : enforcer.diagnostics()) {
                 if (diag.level == EnforcerDiagnostic::Level::Error) {
-                    std::cerr << impl_->formatter.format(filename, diag.location.line,
-                        diag.location.column, "error", diag.message);
+                    std::cerr << impl_->formatter.format(
+                        diagnosedFile(diag.location, filename),
+                        diag.location.line, diag.location.column,
+                        "error", diag.message);
                 }
             }
             return 1;
@@ -1124,8 +1147,9 @@ int Driver::checkFile(const std::string& filename) {
     if (!sema.analyze(*module)) {
         for (const auto& diag : sema.diagnostics()) {
             if (diag.level == SemaDiagnostic::Level::Error) {
-                std::cerr << impl_->formatter.format(filename, diag.location.line,
-                    diag.location.column, "error", diag.message);
+                std::cerr << impl_->formatter.format(
+                    diagnosedFile(diag.location, filename),
+                    diag.location.line, diag.location.column, "error", diag.message);
             }
         }
         return 1;

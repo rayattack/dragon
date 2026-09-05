@@ -16,10 +16,16 @@ struct ParserDiagnostic {
     std::string message;
 };
 
+struct TemplateIncludeContext {
+    std::vector<std::string> openFiles;
+    std::vector<std::string> errors;
+};
+
 struct ParserOptions {
     bool isDragonFile = true;
     bool requireTypes = true;
     std::string filename = "<stdin>";
+    TemplateIncludeContext* templateIncludes = nullptr;
 };
 
 class Parser {
@@ -35,7 +41,9 @@ public:
 
     static std::vector<TemplatePart> parseTemplateBody(
         const std::string& body, const SourceLocation& loc, bool isDragonFile,
-        std::vector<std::string>* errorsOut = nullptr);
+        std::vector<std::string>* errorsOut = nullptr,
+        const std::string& bodyFile = std::string(),
+        TemplateIncludeContext* templateIncludes = nullptr);
 
     std::unique_ptr<Stmt> parseStatement();
     const std::vector<ParserDiagnostic>& diagnostics() const;
@@ -85,6 +93,14 @@ private:
     void rejectNonBindingOwnershipTarget(bool isDub);
     void discardOwnershipTargetSuffix();
     bool matchOwnReturnMarker();
+
+    TemplateIncludeContext* templateIncludeStack();
+
+    void reportTemplateIncludeErrors(const SourceLocation& loc);
+
+    std::unique_ptr<Expr> templateFileInclude(std::string filePath,
+                                              std::string contentType,
+                                              const SourceLocation& loc);
 
     std::unique_ptr<Expr> parseLambda();
     std::unique_ptr<Expr> parseList();

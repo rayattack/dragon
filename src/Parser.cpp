@@ -2,6 +2,8 @@
 #include "ParserImpl.h"
 #include <cctype>
 #include <charconv>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
@@ -46,17 +48,105 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
     return statement();
 }
 
+static std::string resolveTemplateFilePath(const std::string& filePath,
+                                           const std::string& sourceFile) {
+    if (filePath.empty() || filePath[0] == '/') return filePath;
+    size_t lastSlash = sourceFile.find_last_of('/');
+    if (lastSlash == std::string::npos) return filePath;
+    return sourceFile.substr(0, lastSlash + 1) + filePath;
+}
+
+TemplateIncludeContext* Parser::templateIncludeStack() {
+    return impl_->options.templateIncludes ? impl_->options.templateIncludes
+                                           : &impl_->ownTemplateIncludes;
+}
+
+void Parser::reportTemplateIncludeErrors(const SourceLocation& loc) {
+    if (impl_->options.templateIncludes) return;
+    for (auto& message : impl_->ownTemplateIncludes.errors)
+        impl_->diagnostics.push_back(
+            {ParserDiagnostic::Level::Error, loc, std::move(message)});
+    impl_->ownTemplateIncludes.errors.clear();
+}
+
+std::unique_ptr<Expr> Parser::templateFileInclude(std::string filePath,
+                                                  std::string contentType,
+                                                  const SourceLocation& loc) {
+    auto expr = std::make_unique<TemplateFileExpr>();
+    expr->setLocation(loc);
+    expr->filePath = filePath;
+    expr->contentType = contentType;
+
+    TemplateIncludeContext* includes = templateIncludeStack();
+    auto includeError = [&](std::string message) {
+        includes->errors.push_back(std::move(message));
+    };
+
+    const std::string resolved = resolveTemplateFilePath(filePath, loc.filename);
+
+    for (const auto& open : includes->openFiles) {
+        if (open != resolved) continue;
+        std::string chain;
+        for (const auto& step : includes->openFiles) chain += step + " includes ";
+        includeError("template include cycle: " + chain + resolved +
+                     ". A template file cannot include itself, directly or "
+                     "through another file.");
+        reportTemplateIncludeErrors(loc);
+        return expr;
+    }
+
+    std::ifstream in(resolved, std::ios::binary);
+    if (!in.is_open()) {
+        includeError("cannot open template file '" + filePath + "' (looked for " +
+                     resolved + "). The file is read at compile time, so the "
+                     "path must exist relative to this source file.");
+        reportTemplateIncludeErrors(loc);
+        return expr;
+    }
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    in.close();
+
+    auto body = std::make_unique<TemplateExpr>();
+    body->setLocation(loc);
+    body->body = std::move(content);
+    body->contentType = std::move(contentType);
+
+    includes->openFiles.push_back(resolved);
+    std::vector<std::string> bodyErrors;
+    body->templateParts = parseTemplateBody(
+        body->body, loc, impl_->options.isDragonFile, &bodyErrors, resolved,
+        includes);
+    includes->openFiles.pop_back();
+
+    for (const auto& e : bodyErrors)
+        includeError("template file '" + filePath + "': " + e);
+
+    reportTemplateIncludeErrors(loc);
+    expr->expansion = std::move(body);
+    return expr;
+}
+
 std::vector<TemplatePart> Parser::parseTemplateBody(
         const std::string& body, const SourceLocation& loc, bool isDragonFile,
-        std::vector<std::string>* errorsOut) {
+        std::vector<std::string>* errorsOut, const std::string& bodyFile,
+        TemplateIncludeContext* templateIncludes) {
     std::vector<TemplatePart> out;
     const std::string& val = body;
+    const bool bodyIsWholeFile = !bodyFile.empty();
+    const std::string& sourceName = bodyIsWholeFile ? bodyFile : loc.filename;
 
     auto lineOf = [&](size_t pos) {
         size_t line = 1;
         for (size_t k = 0; k < pos && k < val.size(); k++)
             if (val[k] == '\n') line++;
         return line;
+    };
+    auto columnOf = [&](size_t pos) {
+        size_t column = 1;
+        size_t k = pos;
+        while (k > 0 && val[k - 1] != '\n') { k--; column++; }
+        return column;
     };
     auto snippetOf = [&](const std::string& s) {
         return s.size() > 40 ? s.substr(0, 40) + "..." : s;
@@ -153,13 +243,17 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
             }
 
             LexerOptions fLexOpts;
-            fLexOpts.filename = "<template>";
+            fLexOpts.filename = sourceName;
             fLexOpts.inTemplateInterpolation = true;
-            fLexOpts.startLine = loc.line - (lineOf(val.size()) - lineOf(bangPos));
+            fLexOpts.startLine =
+                bodyIsWholeFile ? lineOf(bangPos)
+                                : loc.line - (lineOf(val.size()) - lineOf(bangPos));
             Lexer fLexer(parseText, fLexOpts);
             auto fTokens = fLexer.tokenize();
             ParserOptions fOpts;
             fOpts.isDragonFile = isDragonFile;
+            fOpts.filename = sourceName;
+            fOpts.templateIncludes = templateIncludes;
             Parser fParser(std::move(fTokens), fOpts);
             auto fModule = fParser.parseModule();
 
@@ -183,6 +277,8 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
                     Lexer sepLexer(sepText, sepLexOpts);
                     ParserOptions sepOpts;
                     sepOpts.isDragonFile = isDragonFile;
+                    sepOpts.filename = sourceName;
+                    sepOpts.templateIncludes = templateIncludes;
                     Parser sepParser(sepLexer.tokenize(), sepOpts);
                     auto sepExpr = sepParser.parseExpression();
                     if (sepExpr && !sepParser.hasErrors())
@@ -228,7 +324,18 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
                             (why.empty() ? "" : " (" + why + ")") +
                             ". Write '!!{' for a literal '!{'.");
             }
-            if (p.expr) p.expr->setLocation(loc);
+            if (p.expr) {
+                if (bodyIsWholeFile) {
+                    SourceLocation partLoc;
+                    partLoc.filename = sourceName;
+                    partLoc.line = lineOf(bangPos);
+                    partLoc.column = columnOf(bangPos) + 2;
+                    partLoc.offset = bangPos;
+                    p.expr->setLocation(partLoc);
+                } else {
+                    p.expr->setLocation(loc);
+                }
+            }
             out.push_back(std::move(p));
         } else {
             size_t start = i;
@@ -894,11 +1001,8 @@ std::unique_ptr<Expr> Parser::primary() {
             }
             advance();
             consume(TokenType::RIGHT_PAREN, "Expected ')' after template file path");
-            auto expr = std::make_unique<TemplateFileExpr>();
-            expr->setLocation(loc);
-            expr->filePath = filePath;
-            expr->contentType = std::move(contentType);
-            return expr;
+            return templateFileInclude(std::move(filePath), std::move(contentType),
+                                       loc);
         }
 
         auto expr = std::make_unique<TemplateExpr>();
@@ -907,7 +1011,9 @@ std::unique_ptr<Expr> Parser::primary() {
         expr->contentType = std::move(contentType);
         std::vector<std::string> bodyErrors;
         expr->templateParts = parseTemplateBody(
-            expr->body, loc, true, &bodyErrors);
+            expr->body, loc, true, &bodyErrors, std::string(),
+            templateIncludeStack());
+        reportTemplateIncludeErrors(loc);
         for (const auto& e : bodyErrors) error(e);
         return expr;
     }
@@ -920,7 +1026,9 @@ std::unique_ptr<Expr> Parser::primary() {
         expr->isContentAlias = true;
         std::vector<std::string> bodyErrors;
         expr->templateParts = parseTemplateBody(
-            expr->body, loc, true, &bodyErrors);
+            expr->body, loc, true, &bodyErrors, std::string(),
+            templateIncludeStack());
+        reportTemplateIncludeErrors(loc);
         for (const auto& e : bodyErrors) error(e);
         return expr;
     }
@@ -941,10 +1049,7 @@ std::unique_ptr<Expr> Parser::primary() {
         }
         advance();
         consume(TokenType::RIGHT_PAREN, "Expected ')' after template file path");
-        auto expr = std::make_unique<TemplateFileExpr>();
-        expr->setLocation(loc);
-        expr->filePath = filePath;
-        return expr;
+        return templateFileInclude(std::move(filePath), std::string(), loc);
     }
 
     if (match(TokenType::STRING)) {

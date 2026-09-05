@@ -2186,9 +2186,11 @@ void TypeChecker::visit(LambdaExpr& node) {
     if (node.body) {
         propagateAnnotationToEmptyLiteral(node.body.get(), retType);
         auto bodyType = inferType(node.body.get());
-        if (retType->kind() != Type::Kind::Unknown &&
-            bodyType->kind() != Type::Kind::Unknown &&
-            !bodyType->isAssignableTo(*retType)) {
+        if (inferReturn) {
+            retType = bodyType;
+        } else if (retType->kind() != Type::Kind::Unknown &&
+                   bodyType->kind() != Type::Kind::Unknown &&
+                   !bodyType->isAssignableTo(*retType)) {
             error(node.location(), "lambda body type '" + bodyType->toString() +
                   "' does not match declared return type '" +
                   retType->toString() + "'");
@@ -2200,6 +2202,8 @@ void TypeChecker::visit(LambdaExpr& node) {
     impl_->returnTypeStack.pop_back();
     impl_->returnAnnotatedStack.pop_back();
     impl_->popScope();
+
+    node.type = std::make_shared<FunctionType>(paramTypes, retType);
 }
 
 void TypeChecker::visit(IfExpr& node) {

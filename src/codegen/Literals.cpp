@@ -488,20 +488,44 @@ void CodeGen::visit(TemplateExpr& node) {
                     } else if (filterName == "url") {
                         applyFilter("dragon_template_escape_url", "esc_url");
                     } else {
-                        auto* filterFunc = impl_->module->getFunction(filterName);
-                        if (filterFunc) {
-                            llvm::Value* prev = strVal;
-                            strVal = impl_->builder->CreateCall(
-                                filterFunc, {strVal}, "filter_" + filterName);
-                            if (strValOwned && impl_->options.gcMode == GCMode::RC) {
-                                impl_->builder->CreateCall(
-                                    impl_->runtimeFuncs["dragon_decref_str"], {prev});
-                            }
-                            strValOwned = true;
-                        } else {
+                        auto* filterFunc = impl_->module->getFunction(
+                            impl_->resolveCalleeSymbol(filterName));
+                        if (!filterFunc) {
                             impl_->addError("Unknown template filter: " + filterName,
                                             node.location());
+                            parts.push_back(impl_->emitStringLiteralBytes(""));
+                            continue;
                         }
+                        llvm::Value* prev = strVal;
+                        llvm::Value* filtered = impl_->builder->CreateCall(
+                            filterFunc, {strVal}, "filter_" + filterName);
+                        if (strValOwned && impl_->options.gcMode == GCMode::RC) {
+                            impl_->builder->CreateCall(
+                                impl_->runtimeFuncs["dragon_decref_str"], {prev});
+                        }
+                        if (tp.filterReturnClass.empty()) {
+                            strVal = filtered;
+                            strValOwned = true;
+                        } else {
+                            auto filteredStr = impl_->emitRenderToStr(
+                                nullptr, nullptr, filtered, tp.filterReturnClass);
+                            if (!filteredStr.value) {
+                                impl_->addError(
+                                    unrenderableClassMessage(spliceSite(exprText),
+                                                             tp.filterReturnClass),
+                                    node.location());
+                                parts.push_back(impl_->emitStringLiteralBytes(""));
+                                continue;
+                            }
+                            if (filteredStr.consumedSource &&
+                                impl_->isOwnedPtrResult(filtered))
+                                impl_->emitDecrefByKind(filtered, Impl::VarKind::List);
+                            strVal = filteredStr.value;
+                            strValOwned = filteredStr.owned;
+                        }
+                        strVal = impl_->emitContentEscape(effContent, strVal,
+                                                          strValOwned,
+                                                          tp.filterReturnClass);
                     }
                 } else {
                     strVal = impl_->emitContentEscape(effContent, strVal,
@@ -529,13 +553,13 @@ void CodeGen::visit(TemplateExpr& node) {
                     impl_->runtimeFuncs["dragon_decref_str"], {prev});
             }
             if (impl_->options.gcMode == GCMode::RC &&
-                llvm::isa<llvm::CallInst>(parts[k])) {
+                impl_->isOwnedStrResult(parts[k])) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_decref_str"], {parts[k]});
             }
         }
         if (parts.size() > 1 && impl_->options.gcMode == GCMode::RC &&
-            llvm::isa<llvm::CallInst>(parts[0])) {
+            impl_->isOwnedStrResult(parts[0])) {
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_decref_str"], {parts[0]});
         }
@@ -811,39 +835,14 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
 }
 
 void CodeGen::visit(TemplateFileExpr& node) {
-    std::string resolvedPath = node.filePath;
-
-    if (!resolvedPath.empty() && resolvedPath[0] != '/') {
-        std::string sourceFile = node.location().filename;
-        if (!sourceFile.empty()) {
-            size_t lastSlash = sourceFile.find_last_of('/');
-            if (lastSlash != std::string::npos) {
-                resolvedPath = sourceFile.substr(0, lastSlash + 1) + resolvedPath;
-            }
-        }
-    }
-
-    std::ifstream file(resolvedPath);
-    if (!file.is_open()) {
-        impl_->addError("Cannot open template file: " + resolvedPath, node.location());
+    if (!node.expansion) {
+        impl_->addError("template file '" + node.filePath +
+                        "' was not loaded; see the earlier compile error",
+                        node.location());
         impl_->lastValue = impl_->builder->CreateGlobalString("");
         return;
     }
-    std::string content((std::istreambuf_iterator<char>(file)),
-                         std::istreambuf_iterator<char>());
-    file.close();
-
-    TemplateExpr tmp;
-    tmp.setLocation(node.location());
-    tmp.body = std::move(content);
-    tmp.contentType = node.contentType;
-    std::vector<std::string> bodyErrors;
-    tmp.templateParts = Parser::parseTemplateBody(
-        tmp.body, tmp.location(), true, &bodyErrors);
-    for (const auto& e : bodyErrors)
-        impl_->addError("template file '" + node.filePath + "': " + e,
-                        node.location());
-    visit(tmp);
+    visit(*node.expansion);
 }
 
 void CodeGen::visit(BooleanLiteral& node) {
