@@ -1154,6 +1154,28 @@ void TypeChecker::visit(CallExpr& node) {
         }
     }
 
+    if (auto* staticAttr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
+        auto* typeName = dynamic_cast<NameExpr*>(staticAttr->object.get());
+        if (typeName && typeName->name == "bytes" &&
+            staticAttr->attribute == "fromhex") {
+            node.type = impl_->bytesType;
+            return;
+        }
+        if (typeName && typeName->name == "dict" &&
+            staticAttr->attribute == "fromkeys" && node.args.size() > 1 &&
+            node.args[1]->type) {
+            std::shared_ptr<Type> key = impl_->strType;
+            if (node.args[0]->type &&
+                node.args[0]->type->kind() == Type::Kind::List) {
+                auto elem =
+                    static_cast<ListType&>(*node.args[0]->type).elementType;
+                if (elem) key = elem;
+            }
+            node.type = std::make_shared<DictType>(key, node.args[1]->type);
+            return;
+        }
+    }
+
     if (auto* name = dynamic_cast<NameExpr*>(node.callee.get())) {
         const auto& n = name->name;
         if (n == "chr" || n == "hex" || n == "oct" || n == "bin" || n == "str" ||
@@ -1198,6 +1220,34 @@ void TypeChecker::visit(CallExpr& node) {
                       orderingRejectionHint(elem));
             }
             node.type = std::make_shared<ListType>(elem ? elem : impl_->boxedType);
+            return;
+        }
+        if (n == "set") {
+            std::shared_ptr<Type> elem = impl_->unknownType;
+            if (!node.args.empty() && node.args[0]->type) {
+                auto ak = node.args[0]->type->kind();
+                if (ak == Type::Kind::List)
+                    elem = static_cast<ListType&>(*node.args[0]->type).elementType;
+                else if (ak == Type::Kind::Set)
+                    elem = static_cast<SetType&>(*node.args[0]->type).elementType;
+            }
+            node.type = std::make_shared<SetType>(elem ? elem : impl_->unknownType);
+            return;
+        }
+        if (n == "deque" && !node.args.empty() && node.args[0]->type &&
+            node.args[0]->type->kind() == Type::Kind::List) {
+            auto elem = static_cast<ListType&>(*node.args[0]->type).elementType;
+            if (elem && elem->kind() != Type::Kind::Unknown) {
+                node.type = std::make_shared<DequeType>(elem);
+                return;
+            }
+        }
+        if (n == "dict" && !node.args.empty() && node.args[0]->type &&
+            node.args[0]->type->kind() == Type::Kind::Dict) {
+            auto& dt = static_cast<DictType&>(*node.args[0]->type);
+            node.type = std::make_shared<DictType>(
+                dt.keyType ? dt.keyType : impl_->unknownType,
+                dt.valueType ? dt.valueType : impl_->unknownType);
             return;
         }
         if (n == "filter" || n == "enumerate" || n == "zip") {

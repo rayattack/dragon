@@ -610,3 +610,8 @@ TEST(CodeGenE2E, PrintSingleArgUnchanged) {
 TEST(CodeGenE2E, PrintEmptyThenValue) {
     EXPECT_EQ(compileAndRun("print()\nprint(\"after\")\n"), "\nafter\n");
 }
+
+TEST(CodeGenE2E, StaticBuiltinResultsAreTyped) {
+    auto output = compileAndRun(code("static_builtin_results_are_typed"));
+    EXPECT_EQ(output, "2\n2\n2\n0\n2\n2\n");
+}

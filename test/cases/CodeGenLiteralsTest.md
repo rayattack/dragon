@@ -822,3 +822,21 @@ print(a, b)
 xs: list[int] = [1, 2, 3]
 print("xs:", xs)
 ```
+
+#### :static_builtin_results_are_typed
+
+A builtin whose result is an owned heap value must carry a static type, or the
+release codegen would emit is skipped. These call it in a temp position, where
+nothing but the call's own type can classify the result.
+
+```dr
+from collections import deque
+xs: list[int] = [1, 2]
+ss: list[str] = ["a", "b"]
+print(str(len(bytes.fromhex("dead"))))
+print(str(len(dict.fromkeys(ss, 1))))
+print(str(len(set(xs))))
+print(str(len(set())))
+print(str(len(deque(xs))))
+print(str(len(dict.fromkeys(ss, 0))))
+```
