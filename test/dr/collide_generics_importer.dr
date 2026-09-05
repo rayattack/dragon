@@ -31,6 +31,13 @@ def importer_qualified_picks() -> int {
 }
 
 
+def importer_qualified_boxes() -> str {
+    alpha: collide_generics_one.Box[int] = collide_generics_one.Box(1)
+    beta: collide_generics_two.Box[int] = collide_generics_two.Box[int](2)
+    return str(alpha.get()) + "|" + str(beta.get() + beta.stamped())
+}
+
+
 def importer_firstish[U](xs: list[U]) -> U {
     return pick(xs)
 }

@@ -5,6 +5,7 @@ from collide_generics_one import one_box_int, one_box_str, one_pick_int
 from collide_generics_two import two_box_int, two_pick_int, Box
 from collide_generics_importer import importer_box_int, importer_alias_boxes
 from collide_generics_importer import importer_pick_int, importer_qualified_picks
+from collide_generics_importer import importer_qualified_boxes
 from collide_generics_importer import importer_firstish
 from collide_generic_methods_one import one_wrap
 from collide_generic_methods_two import two_wrap
@@ -104,6 +105,10 @@ class CollideGenericsTests(TestCase) {
     def test_both_modules_templates_coexist_in_one_module() {
         self.assertEqual(importer_alias_boxes(), "1|101")
         self.assertEqual(importer_qualified_picks(), 24)
+    }
+
+    def test_module_qualified_generic_class_stamps_its_own_template() {
+        self.assertEqual(importer_qualified_boxes(), "1|101")
     }
 
     def test_stamped_body_resolves_names_in_its_own_module() {

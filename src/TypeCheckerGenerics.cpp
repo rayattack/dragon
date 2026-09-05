@@ -915,37 +915,51 @@ bool TypeChecker::tryInstantiateGenericConstruction(
         return it == impl_->genericClasses.end() ? nullptr : it->second;
     };
 
+    auto templateOfCallee = [&](Expr* callee, std::string& outName) -> ClassDecl* {
+        if (auto* nm = dynamic_cast<NameExpr*>(callee)) {
+            outName = nm->name;
+            return templateInScope(nm->name);
+        }
+        auto* attr = dynamic_cast<AttributeExpr*>(callee);
+        if (!attr) return nullptr;
+        auto mt = std::dynamic_pointer_cast<ModuleType>(inferType(attr->object.get()));
+        if (!mt) return nullptr;
+        outName = mt->name + "." + attr->attribute;
+        auto it = impl_->genericClasses.find(
+            Impl::qualifyTemplate(mt->name, attr->attribute));
+        return it == impl_->genericClasses.end() ? nullptr : it->second;
+    };
+
     if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get())) {
-        if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
-            if (ClassDecl* templ = templateInScope(nm->name)) {
-                decl = templ;
-                clsName = nm->name;
-                std::vector<const Expr*> idxs;
-                if (auto* tup = dynamic_cast<TupleExpr*>(sub->index.get())) {
-                    for (auto& el : tup->elements) idxs.push_back(el.get());
-                } else {
-                    idxs.push_back(sub->index.get());
-                }
-                for (auto* ix : idxs) {
-                    auto te = exprToTypeExpr(ix);
-                    args.push_back(te ? resolveType(te.get()) : impl_->unknownType);
-                }
+        if (ClassDecl* templ = templateOfCallee(sub->object.get(), clsName)) {
+            decl = templ;
+            std::vector<const Expr*> idxs;
+            if (auto* tup = dynamic_cast<TupleExpr*>(sub->index.get())) {
+                for (auto& el : tup->elements) idxs.push_back(el.get());
+            } else {
+                idxs.push_back(sub->index.get());
+            }
+            for (auto* ix : idxs) {
+                auto te = exprToTypeExpr(ix);
+                args.push_back(te ? resolveType(te.get()) : impl_->unknownType);
             }
         }
-    } else if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
-        ClassDecl* templ = expected ? templateInScope(nm->name) : nullptr;
+    } else {
+        std::string calleeName;
+        ClassDecl* templ =
+            expected ? templateOfCallee(node.callee.get(), calleeName) : nullptr;
         if (templ) {
             auto exInst = std::dynamic_pointer_cast<InstanceType>(expected);
             if (exInst && exInst->classType &&
                 exInst->classType->originDecl == templ) {
                 decl = templ;
-                clsName = nm->name;
+                clsName = calleeName;
                 args = exInst->classType->genericArgs;
             } else {
                 error(node.location(),
-                      "cannot infer type arguments for generic class '" + nm->name +
-                      "'; annotate the binding (e.g. `x: " + nm->name +
-                      "[int] = ...`) or instantiate explicitly (`" + nm->name +
+                      "cannot infer type arguments for generic class '" + calleeName +
+                      "'; annotate the binding (e.g. `x: " + calleeName +
+                      "[int] = ...`) or instantiate explicitly (`" + calleeName +
                       "[int](...)`)");
                 node.type = impl_->unknownType;
                 return true;
