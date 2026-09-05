@@ -2107,11 +2107,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 llvm::Value* selfVal = impl_->builder->CreateLoad(
                     impl_->i8PtrType, selfAlloca, "self");
                 std::vector<llvm::Value*> args = {selfVal};
+                std::vector<Impl::ArgTemp> argTemps;
                 auto parentMethodType = parentMethod->getFunctionType();
                 if (method == "__init__") {
                     if (!impl_->emitParentCtorArgs(node, parentSym, parentSym,
                                                    parentMethod, selfVal,
-                                                   args, *this))
+                                                   args, argTemps, *this))
                         return true;
                 } else if (node.args.size() + 1 > parentMethodType->getNumParams()) {
                     return fail("super()." + method + "(...): parent class '" +
@@ -2127,14 +2128,17 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             parentMethodType->getParamType((unsigned)(i + 1))));
                     }
                 }
+                auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                 if (parentMethod->getReturnType()->isVoidTy()) {
                     impl_->builder->CreateCall(parentMethod, args);
                     impl_->lastValue = llvm::ConstantPointerNull::get(
                         llvm::PointerType::getUnqual(*impl_->context));
-                    return true;
+                } else {
+                    impl_->lastValue = impl_->normalizeIntC(
+                        impl_->builder->CreateCall(parentMethod, args, "super_call"));
                 }
-                impl_->lastValue = impl_->normalizeIntC(
-                    impl_->builder->CreateCall(parentMethod, args, "super_call"));
+                impl_->popArgTempCleanups(argTempBases);
+                impl_->drainBorrowTemps(argTemps);
                 return true;
             };
 

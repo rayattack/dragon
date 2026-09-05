@@ -2262,10 +2262,13 @@ struct CodeGen::Impl {
 
     bool excMessageFieldCoversSubclasses(const std::string& sym) const;
 
+    using ArgTemp = std::pair<llvm::Value*, VarKind>;
+
     bool emitParentCtorArgs(CallExpr& node, const std::string& parentName,
                             const std::string& parentSymPrefix,
                             llvm::Function* initFunc, llvm::Value* selfVal,
-                            std::vector<llvm::Value*>& args, CodeGen& cg);
+                            std::vector<llvm::Value*>& args,
+                            std::vector<ArgTemp>& argTemps, CodeGen& cg);
 
     llvm::Value* emitExcMessageField(const std::string& className,
                                      llvm::Value* inst, bool exactType);

@@ -118,6 +118,23 @@ class CodeErr(RootErr) {
 }
 
 
+def _default_tag() -> str { return "df" + "lt" }
+
+
+class DefaultedErr(Exception) {
+    tag: str
+    def(m: str, tag: str = _default_tag()) {
+        self.message = m
+        self.tag = tag
+    }
+}
+
+
+class DefaultedChildErr(DefaultedErr) {
+    def(n: int) { super("child-" + str(n)) }
+}
+
+
 class MsgErr(Exception) {
     def(m: str) { self.message = m }
 }
@@ -145,6 +162,9 @@ def _chain_boom(tag: str) -> None { raise ChainErr("chain-" + tag) }
 
 
 def _code_boom(code: int) -> None { raise CodeErr(code) }
+
+
+def _defaulted_boom(n: int) -> None { raise DefaultedChildErr(n) }
 
 
 def _remove_missing() {
@@ -444,6 +464,31 @@ class UserExceptionTextTests(TestCase) {
             got = e.msg
         }
         self.assertEqual(got, "from-one")
+    }
+
+    def test_repeated_super_concat_message_no_leak() {
+        i: int = 0
+        while i < 2000 {
+            try {
+                _code_boom(i)
+            } except RootErr as e {
+                self.assertEqual(str(e), "code-" + str(i))
+            }
+            i = i + 1
+        }
+    }
+
+    def test_repeated_super_with_defaulted_parent_param_no_leak() {
+        i: int = 0
+        while i < 2000 {
+            try {
+                _defaulted_boom(i)
+            } except DefaultedErr as e {
+                self.assertEqual(e.tag, "dflt")
+                self.assertEqual(str(e), "child-" + str(i))
+            }
+            i = i + 1
+        }
     }
 
     def test_dotted_exception_class_can_be_raised() {

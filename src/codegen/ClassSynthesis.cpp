@@ -579,9 +579,11 @@ bool CodeGen::Impl::emitParentCtorArgs(CallExpr& node,
                                        llvm::Function* initFunc,
                                        llvm::Value* selfVal,
                                        std::vector<llvm::Value*>& args,
+                                       std::vector<ArgTemp>& argTemps,
                                        CodeGen& cg) {
     auto* initType = initFunc->getFunctionType();
     const size_t arity = initType->getNumParams() - 1;
+    const std::string parentNewSym = parentSymPrefix + "_new";
     auto arityError = [&]() {
         const size_t passed = node.args.size();
         addError("super(...): the constructor of parent class '" + parentName +
@@ -596,19 +598,23 @@ bool CodeGen::Impl::emitParentCtorArgs(CallExpr& node,
     if (node.args.size() > arity) return arityError();
     for (size_t i = 0; i < node.args.size(); ++i) {
         node.args[i]->accept(cg);
-        args.push_back(coerceArgFromExpr(node.args[i].get(), lastValue,
+        llvm::Value* raw = lastValue;
+        collectArgTemp(parentNewSym, node.args[i].get(), raw, (unsigned)i,
+                       argTemps);
+        args.push_back(coerceArgFromExpr(node.args[i].get(), raw,
                                          initType->getParamType((unsigned)(i + 1))));
     }
 
-    auto defIt = funcParamDefaults.find(parentSymPrefix + "_new");
+    auto defIt = funcParamDefaults.find(parentNewSym);
     for (size_t i = node.args.size(); i < arity; ++i) {
         Expr* fallback = nullptr;
         if (defIt != funcParamDefaults.end() && i < defIt->second.size())
             fallback = defIt->second[i];
         if (!fallback) return arityError();
         fallback->accept(cg);
-        args.push_back(coerceArg(lastValue,
-                                 initType->getParamType((unsigned)(i + 1))));
+        llvm::Value* raw = lastValue;
+        collectArgTemp(parentNewSym, fallback, raw, (unsigned)i, argTemps);
+        args.push_back(coerceArg(raw, initType->getParamType((unsigned)(i + 1))));
     }
     return true;
 }

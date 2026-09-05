@@ -91,9 +91,14 @@ void CodeGen::emitSuperCtorCall(CallExpr& node) {
     }
     llvm::Value* selfVal = &*impl_->currentFunction->arg_begin();
     std::vector<llvm::Value*> args;
+    std::vector<Impl::ArgTemp> argTemps;
     if (impl_->emitParentCtorArgs(node, parentName, parentSymPrefix,
-                                  initFunc, selfVal, args, *this))
+                                  initFunc, selfVal, args, argTemps, *this)) {
+        auto argTempBases = impl_->pushArgTempCleanups(argTemps);
         impl_->builder->CreateCall(initFunc, args);
+        impl_->popArgTempCleanups(argTempBases);
+        impl_->drainBorrowTemps(argTemps);
+    }
     impl_->lastValue = llvm::ConstantPointerNull::get(
         llvm::PointerType::getUnqual(*impl_->context));
 }
