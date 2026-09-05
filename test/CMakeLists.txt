@@ -232,6 +232,14 @@ add_test(NAME dr_ffi_cxx_shim
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/app.dr
         --cc-source ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/shim.cpp)
 
+# Not auto-globbed with dr/test_*.dr: `import ui` links a webview shell, and this
+# suite substitutes a headless one that records the patch JS instead of running
+# GTK, so it must be built with its own --cc-source.
+add_test(NAME dr_ui_binders
+    COMMAND $<TARGET_FILE:dragon> run
+        ${CMAKE_CURRENT_SOURCE_DIR}/dr/ui_binders/app.dr
+        --cc-source ${CMAKE_CURRENT_SOURCE_DIR}/dr/ui_binders/webview_probe.cpp)
+
 file(GLOB DRAGON_EXAMPLE_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/examples/*.dr
     ${CMAKE_SOURCE_DIR}/examples/docs_site/*.dr)

@@ -18,6 +18,7 @@ extern "C" def dragon_webview_eval_js(js: str)
 extern "C" def dragon_webview_post(fn: ptr)
 extern "C" def dragon_json_escape_str(s: str) -> str
 
+from html import HTML
 from threading import Lock
 
 
@@ -224,6 +225,16 @@ def __patch_text(node_id: int, value: str) -> None {
     dragon_webview_eval_js(js)
 }
 
+def __bind_patcher(patcher: Callable[[], None]) -> None {
+    """Register a patch closure as an effect and run it once. The first run is
+    what records the closure's Signal subscriptions, so every binder must do it;
+    the patch it emits is a no-op against a DOM the run loop has not loaded yet
+    (the initial value is baked into the markup by the template)."""
+    eid: int = len(_effects)
+    _effects.append(patcher)
+    _run_effect(eid)
+}
+
 def bind_text(render: Callable[[], str]) -> int {
     """Bind a reactive text slot: register `render` (a `() -> str` re-evaluator
     of the interpolation) as an effect that patches its DOM node on every signal
@@ -233,8 +244,104 @@ def bind_text(render: Callable[[], str]) -> int {
     the markup), so subsequent `Signal.set()` calls drive every live update."""
     node_id: int = _next_node_id()
     patcher: Callable[[], None] = lambda () -> None { __patch_text(node_id, render()) }
-    eid: int = len(_effects)
-    _effects.append(patcher)
-    _run_effect(eid)
+    __bind_patcher(patcher)
     return node_id
+}
+
+
+def __patch_attr_js(node_id: int, name: str, value: str) -> str {
+    """Build the JS for a single attribute patch. Both the attribute name and
+    its value are JSON-encoded: a page title, a URL or a favicon data: URI is
+    hostile input, and raw-concatenating any of it into the JS source would let
+    a crafted tab title close the literal and run script with the chrome's
+    privileges. Never raw-concat either one."""
+    return "window.dr._patch({op:'attr',id:'" + str(node_id) +
+           "',name:" + dragon_json_escape_str(name) +
+           ",value:" + dragon_json_escape_str(value) + "})"
+}
+
+def __patch_attr(node_id: int, name: str, value: str) -> None {
+    """Push a targeted attribute patch to DOM node `node_id`."""
+    dragon_webview_eval_js(__patch_attr_js(node_id, name, value))
+}
+
+def bind_attr(name: str, render: Callable[[], str]) -> int {
+    """Bind a reactive attribute: `render` re-evaluates the WHOLE value of
+    attribute `name` on every signal change, and the returned node id goes in the
+    element's `data-dr`. The value is whole because the patch is `setAttribute`,
+    which replaces - so the closure, not the markup, owns that attribute
+    (`class`, `aria-selected`, `style`, `title`).
+
+    The compiler does not auto-bind interpolations inside attributes: a `!{}`
+    directly after `attr="` is rendered once, statically. Reactive attributes are
+    this call, written by hand, and the template emits only the `data-dr` id."""
+    node_id: int = _next_node_id()
+    patcher: Callable[[], None] = lambda () -> None { __patch_attr(node_id, name, render()) }
+    __bind_patcher(patcher)
+    return node_id
+}
+
+
+def __patch_html_js(node_id: int, markup: str) -> str {
+    """Build the JS for a single innerHTML patch. The markup is JSON-encoded like
+    every other value crossing the bridge; it stays markup because the receiving
+    op assigns it to `innerHTML`, not because it skipped the encoder."""
+    return "window.dr._patch({op:'html',id:'" + str(node_id) +
+           "',value:" + dragon_json_escape_str(markup) + "})"
+}
+
+def __patch_html(node_id: int, markup: str) -> None {
+    """Push a targeted innerHTML patch to DOM node `node_id`."""
+    dragon_webview_eval_js(__patch_html_js(node_id, markup))
+}
+
+def bind_html(render: Callable[[], HTML]) -> int {
+    """Bind a reactive container: `render` returns the markup for ALL of the
+    element's children, and every signal change replaces them wholesale. This is
+    the list primitive - a tab rail, a result list, a row of chips - because
+    Dragon has no keyed reconciler: there is exactly one node id for the
+    container, not one per row.
+
+    `render` returns `HTML`, not `str`, so a list of hostile titles is escaped by
+    the template that builds it rather than by remembering to escape here.
+
+    Replacing children destroys them: focus, `:hover`, text selection, scroll
+    position inside the container, CSS transitions mid-flight and any DOM state
+    the browser holds for those nodes are gone. Bind the smallest container that
+    actually changes, and drive per-item state (which tab is active) with
+    `bind_attr` on the item instead of re-rendering the list. Scripts injected
+    this way never execute - `innerHTML` does not run `<script>`."""
+    node_id: int = _next_node_id()
+    patcher: Callable[[], None] = lambda () -> None { __patch_html(node_id, render().to_str()) }
+    __bind_patcher(patcher)
+    return node_id
+}
+
+
+const HIDDEN_STYLE: str = "display:none"
+const STYLE_ATTR: str = "style"
+
+def bind_show(render: Callable[[], bool], visible_style: str = "") -> int {
+    """Bind reactive visibility: hidden is `style="display:none"`, visible is
+    `visible_style` (default: no inline style at all, so the stylesheet decides).
+
+    This is deliberately `bind_attr` over `style` and not a fourth patch op,
+    because visibility is not a distinct DOM operation - it is one attribute
+    write, and a `show` op would be `attr` with the value picked in JS instead of
+    in Dragon, which is where the state lives. The honest limitation this exposes
+    is that the patch protocol can only SET an attribute, never remove one, so
+    HTML's own `hidden` boolean attribute is unusable: `setAttribute('hidden','')`
+    hides, and there is no value that un-hides. `style` is the attribute that
+    round-trips through set-only, which is why it is the one used here.
+
+    The closure owns the whole `style` attribute of that element, so give
+    `visible_style` any inline style the element needs while shown, and keep the
+    rest in a class."""
+    styler: Callable[[], str] = lambda () -> str {
+        if render() {
+            return visible_style
+        }
+        return HIDDEN_STYLE
+    }
+    return bind_attr(STYLE_ATTR, styler)
 }

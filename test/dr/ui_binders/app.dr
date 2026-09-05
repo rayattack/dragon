@@ -1,0 +1,274 @@
+"""Reactive binder tests for stdlib/ui/ui.dr: bind_text, bind_attr, bind_html,
+bind_show, and the handler-extraction lane they share.
+
+Built by ctest with:
+    dragon run app.dr --cc-source webview_probe.cpp
+
+The probe shell captures every `dragon_webview_eval_js` string instead of handing
+it to WebKit, so each test asserts the EXACT JavaScript that crosses the bridge.
+That is the contract worth pinning: the patch op, the node id, and - above all -
+that every value is JSON-encoded, because tab titles and URLs are attacker
+controlled and a raw concatenation there is script execution with the chrome's
+privileges.
+
+Every Signal here is a module global. A Signal held in a LOCAL binding and read
+by a bound closure segfaults the process when that scope exits, so tests must not
+depend on the broken shape; the repro is written up in Aember's REACTIVITY.md.
+"""
+
+import ui
+from html import HTML
+from ui import Signal, bind_text, bind_attr, bind_html, bind_show
+from unittest import TestCase, main
+
+extern "C" def probe_js_count() -> int
+extern "C" def probe_js_at(i: int) -> str
+extern "C" def probe_js_reset()
+extern "C" def probe_dispatch(msg: str)
+
+const HOSTILE_TITLE: str = "Bob & \"Alice\" </script>\n\\x"
+const HOSTILE_TITLE_JSON: str = "\"Bob & \\\"Alice\\\" </script>\\n\\\\x\""
+const HOSTILE_TITLE_ESCAPED: str = "Bob &amp; &quot;Alice&quot; &lt;/script&gt;\\n\\\\x"
+const NON_ASCII: str = "café ☃ 日本"
+const HOSTILE_ATTR_NAME: str = "data-\"x\""
+const NODE_ID_SLOT: str = "$id"
+const OUT_OF_RANGE_CALLBACK: str = "99999"
+const FIRST_CALLBACK: str = "0"
+
+text_source: Signal[str] = Signal("initial")
+attr_source: Signal[bool] = Signal(false)
+rows_source: Signal[int] = Signal(0)
+shown_source: Signal[bool] = Signal(true)
+default_shown_source: Signal[bool] = Signal(false)
+attr_name_source: Signal[str] = Signal("seed")
+unrelated: Signal[int] = Signal(0)
+
+clicked: list[str] = []
+
+
+def render_text() -> str {
+    return text_source()
+}
+
+def render_class() -> str {
+    return "tab tab-active" if attr_source() else "tab"
+}
+
+def render_attr_name_value() -> str {
+    return attr_name_source()
+}
+
+def render_rows() -> HTML {
+    labels: list[str] = []
+    i: int = 0
+    while i < rows_source() {
+        labels.append(HOSTILE_TITLE)
+        i = i + 1
+    }
+    return template[HTML] {!{ for label in labels { :{<b>!{label}</b>} } }}
+}
+
+def render_shown() -> bool {
+    return shown_source()
+}
+
+def render_default_shown() -> bool {
+    return default_shown_source()
+}
+
+def note_click() -> None {
+    clicked.append("plain")
+}
+
+
+text_node: int = bind_text(render_text)
+attr_node: int = bind_attr("class", render_class)
+html_node: int = bind_html(render_rows)
+show_node: int = bind_show(render_shown, "display:flex")
+default_show_node: int = bind_show(render_default_shown)
+hostile_name_node: int = bind_attr(HOSTILE_ATTR_NAME, render_attr_name_value)
+
+handlers: HTML = template[HTML] {<button onclick="!{note_click}">go</button>}
+
+ui.App.timeout(0)
+
+
+def emitted_js() -> list[str] {
+    out: list[str] = []
+    i: int = 0
+    while i < probe_js_count() {
+        out.append(probe_js_at(i))
+        i = i + 1
+    }
+    return out
+}
+
+def patch_js(node_id: int, fields: str) -> str {
+    """The expected wire string, with the node id substituted, so a test reads as
+    the patch it asserts instead of as string arithmetic."""
+    return "window.dr._patch({op:" +
+           fields.replace(NODE_ID_SLOT, "'" + str(node_id) + "'") + "})"
+}
+
+
+class NodeIdTests(TestCase) {
+    """Every binder draws from the one process-wide `data-dr` counter, so ids
+    never collide across binder kinds - a rail bound with bind_html and a chip
+    bound with bind_attr cannot end up patching each other's node."""
+
+    def test_ids_are_distinct_and_sequential() {
+        self.assertEqual(attr_node, text_node + 1)
+        self.assertEqual(html_node, text_node + 2)
+        self.assertEqual(show_node, text_node + 3)
+        self.assertEqual(default_show_node, text_node + 4)
+        self.assertEqual(hostile_name_node, text_node + 5)
+    }
+}
+
+
+class BindTextTests(TestCase) {
+    """bind_text is the pre-existing binder; these pin its wire format so the
+    binders added beside it cannot quietly change it."""
+
+    def test_text_patch_is_json_encoded() {
+        probe_js_reset()
+        text_source.set(HOSTILE_TITLE)
+        js: list[str] = emitted_js()
+        self.assertEqual(len(js), 1)
+        self.assertEqual(js[0],
+            patch_js(text_node, "'text',id:$id,value:" + HOSTILE_TITLE_JSON))
+    }
+
+    def test_non_ascii_survives_the_bridge() {
+        probe_js_reset()
+        text_source.set(NON_ASCII)
+        js: list[str] = emitted_js()
+        self.assertEqual(js[0],
+            patch_js(text_node, "'text',id:$id,value:\"" + NON_ASCII + "\""))
+    }
+}
+
+
+class BindAttrTests(TestCase) {
+    """The attribute name is encoded as well as the value: a binder keyed off a
+    site-supplied name would otherwise be a second injection point."""
+
+    def test_attr_patch_carries_name_and_value() {
+        probe_js_reset()
+        attr_source.set(true)
+        js: list[str] = emitted_js()
+        self.assertEqual(len(js), 1)
+        self.assertEqual(js[0],
+            patch_js(attr_node,
+                     "'attr',id:$id,name:\"class\",value:\"tab tab-active\""))
+    }
+
+    def test_attr_name_is_json_encoded() {
+        probe_js_reset()
+        attr_name_source.set(NON_ASCII)
+        js: list[str] = emitted_js()
+        self.assertEqual(js[0],
+            patch_js(hostile_name_node,
+                     "'attr',id:$id,name:\"data-\\\"x\\\"\",value:\"" +
+                     NON_ASCII + "\""))
+    }
+}
+
+
+class BindHtmlTests(TestCase) {
+    """bind_html takes a `() -> HTML` closure, so the row markup is escaped by
+    the template that builds it; the JSON encoder protects the JS literal, not
+    the HTML, and both layers have to hold."""
+
+    def test_html_patch_is_json_encoded_markup() {
+        probe_js_reset()
+        rows_source.set(2)
+        js: list[str] = emitted_js()
+        self.assertEqual(len(js), 1)
+        const row: str = "<b>" + HOSTILE_TITLE_ESCAPED + "</b>"
+        self.assertEqual(js[0],
+            patch_js(html_node, "'html',id:$id,value:\"" + row + row + "\""))
+    }
+
+    def test_empty_list_clears_the_container() {
+        probe_js_reset()
+        rows_source.set(0)
+        js: list[str] = emitted_js()
+        self.assertEqual(js[0], patch_js(html_node, "'html',id:$id,value:\"\""))
+    }
+}
+
+
+class BindShowTests(TestCase) {
+    """Visibility rides the `style` attribute because the patch protocol can set
+    an attribute but never remove one, which rules out HTML's own `hidden`."""
+
+    def test_hidden_sets_display_none() {
+        probe_js_reset()
+        shown_source.set(false)
+        js: list[str] = emitted_js()
+        self.assertEqual(js[0],
+            patch_js(show_node,
+                     "'attr',id:$id,name:\"style\",value:\"display:none\""))
+    }
+
+    def test_visible_restores_the_given_inline_style() {
+        probe_js_reset()
+        shown_source.set(true)
+        js: list[str] = emitted_js()
+        self.assertEqual(js[0],
+            patch_js(show_node,
+                     "'attr',id:$id,name:\"style\",value:\"display:flex\""))
+    }
+
+    def test_default_visible_style_is_empty() {
+        probe_js_reset()
+        default_shown_source.set(true)
+        js: list[str] = emitted_js()
+        self.assertEqual(js[0],
+            patch_js(default_show_node, "'attr',id:$id,name:\"style\",value:\"\""))
+    }
+}
+
+
+class SubscriptionTests(TestCase) {
+    """A binder must subscribe only to the Signals its closure actually read, or
+    every tab-title edit would repaint the whole chrome."""
+
+    def test_unrelated_signal_patches_nothing() {
+        probe_js_reset()
+        unrelated.set(unrelated.get() + 1)
+        self.assertEqual(probe_js_count(), 0)
+    }
+
+    def test_one_signal_drives_only_its_own_node() {
+        probe_js_reset()
+        attr_source.set(false)
+        js: list[str] = emitted_js()
+        self.assertEqual(len(js), 1)
+        self.assertIn("id:'" + str(attr_node) + "'", js[0])
+    }
+}
+
+
+class HandlerExtractionTests(TestCase) {
+    """`onclick="!{fn}"` compiles to a registry id, and JS calls back with that
+    id and nothing else - there is no argument channel on this lane."""
+
+    def test_extracted_handler_runs_on_invoke() {
+        self.assertIn("window.dr.invoke(", handlers.to_str())
+        before: int = len(clicked)
+        probe_dispatch(FIRST_CALLBACK)
+        self.assertEqual(len(clicked), before + 1)
+    }
+
+    def test_out_of_range_callback_id_is_ignored() {
+        before: int = len(clicked)
+        probe_dispatch(OUT_OF_RANGE_CALLBACK)
+        self.assertEqual(len(clicked), before)
+    }
+}
+
+
+main([NodeIdTests(), BindTextTests(), BindAttrTests(), BindHtmlTests(),
+      BindShowTests(), SubscriptionTests(), HandlerExtractionTests()])
