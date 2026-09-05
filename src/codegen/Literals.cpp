@@ -119,7 +119,7 @@ void CodeGen::visit(StringLiteral& node) {
                     if (rendered.consumedSource)
                         impl_->emitDecrefByKind(
                             exprVal,
-                            impl_->ownedTempDrainKind(part.expr.get(), exprVal));
+                            impl_->renderedSourceDrainKind(part.expr.get(), exprVal));
                 }
             }
             parts.push_back(strVal);
@@ -220,7 +220,7 @@ void CodeGen::visit(TemplateExpr& node) {
             return impl_->emitStringLiteralBytes("");
         }
         if (rendered.consumedSource)
-            impl_->emitDecrefByKind(v, impl_->ownedTempDrainKind(src, v));
+            impl_->emitDecrefByKind(v, impl_->renderedSourceDrainKind(src, v));
         if (wantOwned && !rendered.owned && impl_->options.gcMode == GCMode::RC)
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_incref_str"],
                                        {rendered.value});
@@ -469,7 +469,7 @@ void CodeGen::visit(TemplateExpr& node) {
                 bool strValOwned = rendered.owned;
                 if (rendered.consumedSource)
                     impl_->emitDecrefByKind(exprVal,
-                                            impl_->ownedTempDrainKind(fExpr, exprVal));
+                                            impl_->renderedSourceDrainKind(fExpr, exprVal));
 
                 auto applyFilter = [&](const std::string& fnKey, const std::string& twine) {
                     llvm::Value* prev = strVal;
@@ -627,7 +627,7 @@ llvm::Value* CodeGen::emitTemplateJoin(TemplateExpr& node, const TemplatePart& p
             sepOwned = sepRendered.owned;
             if (sepRendered.consumedSource)
                 impl_->emitDecrefByKind(
-                    sepSource, impl_->ownedTempDrainKind(sepExpr, sepSource));
+                    sepSource, impl_->renderedSourceDrainKind(sepExpr, sepSource));
             if (!elementsRaw)
                 sepVal = impl_->emitContentEscape(contentType, sepVal, sepOwned,
                                                   sepClass);

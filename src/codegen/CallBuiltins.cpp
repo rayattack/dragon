@@ -929,6 +929,8 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
                 impl_->runtimeFuncs["dragon_str_retain"], {arg}, "stos");
         } else {
             impl_->lastValue = rendered.value;
+            if (rendered.consumedSource)
+                impl_->emitDecrefByKind(arg, impl_->ownedBoxDrainKind(arg));
         }
         return true;
     }

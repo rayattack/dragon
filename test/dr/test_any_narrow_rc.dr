@@ -452,6 +452,41 @@ def plain_dict_elem(n: int) -> int {
 }
 
 
+def rendered_temp_elem(n: int) -> int {
+    return len(str(fresh_doc(n)["mrn"]))
+}
+
+
+def rendered_get_hit(d: dict[str, Boxed]) -> int {
+    return len(str(d.get("mrn", "fallback")))
+}
+
+
+def rendered_get_miss(d: dict[str, Boxed]) -> int {
+    return len(str(d.get("zz", "fallback")))
+}
+
+
+def rendered_plain_elem(d: dict[str, Boxed]) -> int {
+    return len(str(d["mrn"]))
+}
+
+
+def rendered_fstring_temp(n: int) -> int {
+    return len(f"{fresh_doc(n)['mrn']}")
+}
+
+
+def rendered_owned_tuple(n: int) -> int {
+    return len(str(tuple([n, n + 1])))
+}
+
+
+def rendered_owned_list(n: int) -> int {
+    return len(str(sorted([n + 1, n])))
+}
+
+
 class AnyOwnershipTests(TestCase) {
     def test_borrowed_alias_survives_instance_death() {
         p: Boxed = "alias " + str(1)
@@ -783,6 +818,72 @@ class AnyOwnershipTests(TestCase) {
             narrowed = 1
         }
         self.assertEqual(narrowed, 1)
+    }
+
+    def test_str_of_an_owned_box_releases_it() {
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + rendered_temp_elem(i)
+            i = i + 1
+        }
+        self.assertEqual(total, 1090)
+    }
+
+    def test_str_of_a_get_hit_releases_the_retained_box() {
+        d: dict[str, Boxed] = {"mrn": "A1"}
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + rendered_get_hit(d)
+            i = i + 1
+        }
+        self.assertEqual(total, 600)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_str_of_a_get_miss_releases_the_default() {
+        d: dict[str, Boxed] = {"mrn": "A1"}
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + rendered_get_miss(d)
+            i = i + 1
+        }
+        self.assertEqual(total, 2400)
+    }
+
+    def test_str_of_a_borrowed_box_keeps_it_alive() {
+        d: dict[str, Boxed] = {"mrn": "A1"}
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + rendered_plain_elem(d)
+            i = i + 1
+        }
+        self.assertEqual(total, 600)
+        const back: str = d["mrn"]
+        self.assertEqual(back, "A1")
+    }
+
+    def test_fstring_of_an_owned_box_releases_it() {
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + rendered_fstring_temp(i)
+            i = i + 1
+        }
+        self.assertEqual(total, 1090)
+    }
+
+    def test_str_of_an_owned_container_is_released_once() {
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + rendered_owned_tuple(i) + rendered_owned_list(i)
+            i = i + 1
+        }
+        self.assertTrue(total > 0)
     }
 
 }

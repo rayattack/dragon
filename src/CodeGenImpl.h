@@ -1381,6 +1381,17 @@ struct CodeGen::Impl {
         if (dk != VarKind::Other) out.emplace_back(rawArg, dk);
     }
 
+    VarKind ownedBoxDrainKind(llvm::Value* v) {
+        if (options.gcMode != GCMode::RC || !v || v->getType() != boxType)
+            return VarKind::Other;
+        return isOwnedBoxResult(v) ? VarKind::Union : VarKind::Other;
+    }
+
+    VarKind renderedSourceDrainKind(Expr* e, llvm::Value* v) {
+        if (v && v->getType() == boxType) return ownedBoxDrainKind(v);
+        return ownedTempDrainKind(e, v);
+    }
+
     VarKind ownedTempDrainKind(Expr* e, llvm::Value* v) {
         if (options.gcMode != GCMode::RC) return VarKind::Other;
         if (!v || !e || !e->type || isBorrowedHeapExpr(e)) return VarKind::Other;
