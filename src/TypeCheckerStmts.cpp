@@ -1762,7 +1762,9 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
             if (!classType->fields.count(func->name))
                 classType->fields[func->name] = retType;
         } else {
-            classType->methods[func->name] = fType;
+            bool genericBesideConcrete = !func->typeParams.empty() &&
+                                         classType->methods.count(func->name) > 0;
+            if (!genericBesideConcrete) classType->methods[func->name] = fType;
             if (func->name == "__init__" || func->isConstructor) {
                 classType->constructorOverloads.push_back(fType);
             } else {
@@ -1784,7 +1786,8 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 if (func->isProperty) {
                     classType->fields[func->name] =
                         resolveReturnType(func->returnType.get());
-                } else {
+                } else if (func->typeParams.empty() ||
+                           classType->methods.count(func->name) == 0) {
                     classType->methods[func->name] = fType;
                 }
             }

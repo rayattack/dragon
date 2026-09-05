@@ -1201,10 +1201,6 @@ TEST(TypeCheckerTest, GenericMethodUnsolvedTypeParamRejected) {
     EXPECT_TRUE(checkHasErrors(code("generic_method_unsolved_type_param_rejected")));
 }
 
-TEST(TypeCheckerTest, GenericMethodDualDefinitionRejected) {
-    EXPECT_TRUE(checkHasErrors(code("generic_method_dual_definition_rejected")));
-}
-
 TEST(TypeCheckerTest, GenericMethodArityMismatchRejected) {
     EXPECT_TRUE(checkHasErrors(code("generic_method_arity_mismatch_rejected")));
 }
@@ -2026,4 +2022,11 @@ TEST(TypeCheckerTest, HashedContainersRejectMutableKeys) {
     EXPECT_TRUE(checkHasErrors(
         code("tuple_with_mutable_field_as_set_element_rejected")));
     EXPECT_TRUE(checkOk(code("hashable_container_keys_accepted")));
+}
+
+TEST(TypeCheckerTest, GenericMethodOverloadBesideConcrete) {
+    EXPECT_TRUE(checkHasErrors(code("generic_method_arg_must_unify_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("generic_method_needs_matching_haystack_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("two_generic_methods_same_name_rejected")));
+    EXPECT_TRUE(checkOk(code("generic_method_beside_concrete_overload_accepted")));
 }

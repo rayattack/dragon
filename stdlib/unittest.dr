@@ -120,6 +120,19 @@ class TestCase {
         }
     }
 
+    def assertIn[T](needle: T, haystack: list[T], msg: str = "") {
+        """list membership: checks `needle in haystack` element-wise."""
+        if not (needle in haystack) {
+            self._fail_with("assertIn", msg, f"'{needle}' not found in {haystack}")
+        }
+    }
+
+    def assertNotIn[T](needle: T, haystack: list[T], msg: str = "") {
+        if needle in haystack {
+            self._fail_with("assertNotIn", msg, f"'{needle}' unexpectedly found in {haystack}")
+        }
+    }
+
     def assertGreater(first: float, second: float, msg: str = "") {
         """float params (not int) so both int/float callers work via int<:float
         widening; an int-only signature crashed LLVM verification on float args."""

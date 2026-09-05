@@ -928,16 +928,6 @@ r: Reg = Reg()
 r.make()
 ```
 
-#### :generic_method_dual_definition_rejected
-
-```dr
-class Conn {
-    def one() -> int { return 0 }
-    def one[T](id: int) -> T { return T(id) }
-}
-b: Conn = Conn()
-```
-
 #### :generic_method_arity_mismatch_rejected
 
 ```dr
@@ -3232,4 +3222,74 @@ e[b"k"] = 1
 v: dict[str, list[int]] = {"a": [1]}
 c: set[Callable[[], int]] = set()
 print(len(s) + len(b) + len(d) + len(e) + len(v) + len(c))
+```
+
+#### :generic_method_arg_must_unify_rejected
+
+A generic method's arguments are checked against its parameters with the
+inferred bindings substituted in, so `T` cannot be two things at once.
+
+```dr
+class Bag {
+    def has(needle: str, haystack: str, msg: str = "") -> bool {
+        return needle in haystack
+    }
+    def has[T](needle: T, haystack: list[T], msg: str = "") -> bool {
+        return needle in haystack
+    }
+}
+b: Bag = Bag()
+xs: list[str] = ["a"]
+print(str(b.has(1, xs)))
+```
+
+#### :generic_method_needs_matching_haystack_rejected
+
+```dr
+class Bag {
+    def has(needle: str, haystack: str, msg: str = "") -> bool {
+        return needle in haystack
+    }
+    def has[T](needle: T, haystack: list[T], msg: str = "") -> bool {
+        return needle in haystack
+    }
+}
+b: Bag = Bag()
+print(str(b.has("a", 5)))
+```
+
+#### :two_generic_methods_same_name_rejected
+
+```dr
+class Bag {
+    def has[T](needle: T, haystack: list[T]) {
+        print(str(needle in haystack))
+    }
+    def has[U](needle: U, haystack: set[U]) {
+        print(str(needle in haystack))
+    }
+}
+b: Bag = Bag()
+xs: list[str] = ["a"]
+b.has("a", xs)
+```
+
+#### :generic_method_beside_concrete_overload_accepted
+
+```dr
+class Bag {
+    def has(needle: str, haystack: str, msg: str = "") -> bool {
+        return needle in haystack
+    }
+    def has[T](needle: T, haystack: list[T], msg: str = "") -> bool {
+        return needle in haystack
+    }
+}
+b: Bag = Bag()
+xs: list[str] = ["a", "b"]
+ns: list[int] = [1, 2]
+print(str(b.has("a", "abc")))
+print(str(b.has("a", xs)))
+print(str(b.has(1, ns)))
+print(str(b.has("a", "abc", "note")))
 ```

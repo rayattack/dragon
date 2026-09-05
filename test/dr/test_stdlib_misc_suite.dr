@@ -1,4 +1,4 @@
-from unittest import TestCase, main
+from unittest import TestCase, TestResult, main
 from colorsys import rgb_to_hsv, hsv_to_rgb, rgb_to_yiq, yiq_to_rgb
 from mimetypes import guess_type, guess_extension
 from functools import reduce, reduce_init, reduce_f
@@ -435,7 +435,75 @@ class EnumTests(TestCase) {
 }
 
 
+
+class Probe(TestCase) {
+    """A TestCase driven by hand so a FAILING assertion can be asserted on."""
+}
+
+
+class UnittestAssertionTests(TestCase) {
+    """unittest - assertIn / assertNotIn over a str haystack and over a list.
+
+    The str forms take a str haystack and ask for a substring. The generic
+    forms take `list[T]` and ask for membership, so `assertIn(x, xs)` means
+    what it reads like instead of a substring test on a rendered list.
+    """
+
+    def _probe() -> Probe {
+        p: Probe = Probe()
+        r: TestResult = TestResult()
+        p._result = r
+        r.begin_test("probe")
+        return p
+    }
+
+    def test_in_list_of_str() {
+        xs: list[str] = ["a", "b"]
+        self.assertIn("a", xs)
+        self.assertNotIn("z", xs)
+    }
+
+    def test_in_list_of_int() {
+        ns: list[int] = [1, 2]
+        self.assertIn(1, ns)
+        self.assertNotIn(9, ns)
+    }
+
+    def test_str_haystack_forms_are_unchanged() {
+        self.assertIn("bc", "abcd")
+        self.assertNotIn("zz", "abcd")
+    }
+
+    def test_in_list_reports_when_absent() {
+        p: Probe = self._probe()
+        xs: list[str] = ["a", "b"]
+        p.assertIn("z", xs)
+        self.assertEqual(p._result.failures_total, 1)
+    }
+
+    def test_notin_list_reports_when_present() {
+        p: Probe = self._probe()
+        offered: list[str] = ["Edit", "Delete"]
+        p.assertNotIn("Delete", offered)
+        self.assertEqual(p._result.failures_total, 1)
+    }
+
+    def test_notin_list_is_silent_when_absent() {
+        p: Probe = self._probe()
+        offered: list[str] = ["Edit"]
+        p.assertNotIn("Delete", offered)
+        self.assertEqual(p._result.failures_total, 0)
+    }
+
+    def test_str_form_still_reports_on_substring() {
+        p: Probe = self._probe()
+        p.assertNotIn("bc", "abcd")
+        self.assertEqual(p._result.failures_total, 1)
+    }
+}
+
+
 main([ColorsysTests(), MimetypesTests(), FunctoolsTests(),
       ItertoolsTests(), ItertoolsGenericTests(),
       MathDomainTests(), QuantilesTests(), MedianTests(), ModeTests(),
-      EnumTests()])
+      EnumTests(), UnittestAssertionTests()])

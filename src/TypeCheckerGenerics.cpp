@@ -584,6 +584,43 @@ bool TypeChecker::tryInstantiateGenericCall(
         return nullptr;
     };
 
+    auto concreteMethodFits = [&](const std::shared_ptr<ClassType>& cls,
+                                  const std::string& m) -> bool {
+        for (const ClassType* c = cls.get(); c; ) {
+            std::vector<std::shared_ptr<Type>> cands;
+            auto oit = c->methodOverloads.find(m);
+            if (oit != c->methodOverloads.end()) cands = oit->second;
+            auto mit = c->methods.find(m);
+            if (cands.empty() && mit != c->methods.end()) cands.push_back(mit->second);
+            for (auto& cand : cands) {
+                auto ft = std::dynamic_pointer_cast<FunctionType>(cand);
+                if (!ft || !ft->hasArgMeta) continue;
+                bool concrete = true;
+                for (auto& pt : ft->paramTypes)
+                    if (!typeIsConcrete(pt.get())) concrete = false;
+                if (!concrete) continue;
+                if (argTypes.size() > ft->paramTypes.size()) continue;
+                if (argTypes.size() < ft->requiredParams) continue;
+                bool fits = true;
+                for (size_t i = 0; i < argTypes.size() && fits; ++i) {
+                    const auto& a = argTypes[i];
+                    const auto& pt = ft->paramTypes[i];
+                    if (!a || !pt) continue;
+                    auto ak = a->kind(), pk = pt->kind();
+                    if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
+                        pk == Type::Kind::Unknown || pk == Type::Kind::Boxed)
+                        continue;
+                    fits = a->isAssignableTo(*pt);
+                }
+                if (fits) return true;
+            }
+            if (!cands.empty()) return false;
+            c = (c->parentClass && c->parentClass->kind() == Type::Kind::Class)
+                    ? static_cast<const ClassType*>(c->parentClass.get()) : nullptr;
+        }
+        return false;
+    };
+
     auto moduleGenericFn = [&](Expr* obj, const std::string& attr) -> FunctionDecl* {
         auto mt = std::dynamic_pointer_cast<ModuleType>(inferType(obj));
         if (!mt) return nullptr;
@@ -637,6 +674,7 @@ bool TypeChecker::tryInstantiateGenericCall(
         if (auto cls = receiverClass(at->object.get())) {
             probeCls = cls.get(); probeMethod = at->attribute;
             if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
+                if (concreteMethodFits(cls, at->attribute)) return false;
                 decl = m; fnName = at->attribute; methodAttr = at;
             }
         } else if (FunctionDecl* mf = moduleGenericFn(at->object.get(), at->attribute)) {
@@ -776,22 +814,33 @@ bool TypeChecker::tryInstantiateGenericCall(
         };
         for (size_t i = 0;
              i < genericFt->paramTypes.size() && i < argTypes.size(); ++i) {
-            const auto& pt = genericFt->paramTypes[i];
             const auto& aT = argTypes[i];
-            if (!pt || !aT) continue;
-            if (!typeIsConcrete(pt.get())) continue;
+            if (!genericFt->paramTypes[i] || !aT) continue;
+            auto pt = substituteType(genericFt->paramTypes[i], bindings);
+            if (!pt || !typeIsConcrete(pt.get())) continue;
             auto pk = pt->kind(), ak = aT->kind();
             if (pk == Type::Kind::Unknown || pk == Type::Kind::Boxed ||
                 ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
                 ak == Type::Kind::None_ || ak == Type::Kind::Union ||
                 pk == Type::Kind::Union)
                 continue;
-            if (isContainer(ak) && ak == pk) continue;
-            if (!aT->isSubtypeOf(*pt)) {
+            auto argMismatch = [&]() {
                 error(node.location(), "argument " + std::to_string(i + 1) +
                       " of type '" + aT->toString() + "' is not assignable to "
                       "parameter type '" + pt->toString() + "'");
+            };
+            if (isContainer(ak) && ak == pk) {
+                if (ak != Type::Kind::List) continue;
+                const auto& ae = static_cast<const ListType&>(*aT).elementType;
+                const auto& pe = static_cast<const ListType&>(*pt).elementType;
+                if (!ae || !pe) continue;
+                if (ae->kind() == Type::Kind::Unknown ||
+                    pe->kind() == Type::Kind::Unknown)
+                    continue;
+                if (!ae->isSubtypeOf(*pe)) argMismatch();
+                continue;
             }
+            if (!aT->isSubtypeOf(*pt)) argMismatch();
         }
     }
 
@@ -929,13 +978,15 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                 for (auto& other : cd->body) {
                     if (other.get() == m.get()) continue;
                     auto* od = dynamic_cast<FunctionDecl*>(other.get());
-                    if (od && od->name == fd->name) {
+                    if (od && od->name == fd->name && !od->typeParams.empty()) {
                         error(fd->location(), "method '" + fd->name + "' on class '" +
-                              cd->name + "' is declared more than once; a generic "
-                              "method 'def " + fd->name + "[T](...)' cannot be "
-                              "overloaded by another '" + fd->name + "' definition. "
-                              "Use a single generic method and let the call site "
-                              "infer T (e.g. `x: Customer = obj." + fd->name + "(...)`).");
+                              cd->name + "' has more than one generic definition; "
+                              "'def " + fd->name + "[T](...)' cannot be overloaded by "
+                              "another generic '" + fd->name + "'. Use a single "
+                              "generic method and let the call site infer T (e.g. "
+                              "`x: Customer = obj." + fd->name + "(...)`). A generic "
+                              "method may sit beside non-generic overloads of the "
+                              "same name.");
                         break;
                     }
                 }
