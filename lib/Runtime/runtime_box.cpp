@@ -6,12 +6,8 @@
 
 extern "C" {
 
-void dragon_print_dict(DragonDict* d);
-void dragon_print_list_box(DragonListBox* l);
-void dragon_print_dict_raw(DragonDict* d);
-void dragon_print_list_box_raw(DragonListBox* l);
-void dragon_print_list_int_raw(DragonList* l);
-void dragon_print_list_nested_raw(DragonList* l);
+void dragon_print_heap_obj_raw(int64_t value);
+const char* dragon_heap_obj_to_str(int64_t value);
 int64_t dragon_str_eq(const char* a, const char* b);
 const char* dragon_bool_to_str(int64_t value);
 const char* dragon_string_alloc(const char* src, int64_t len);
@@ -19,8 +15,6 @@ void dragon_incref_str(const char* s);
 int64_t dragon_list_eq(void* a, void* b);
 int64_t dragon_dict_eq(DragonDict* a, DragonDict* b);
 int64_t dragon_bytes_eq(DragonBytes* a, DragonBytes* b);
-
-const char* dragon_instance_class_name(void* instance);
 
 void dragon_print_box_raw(DragonBox box) {
     int64_t tag = box.tag;
@@ -57,60 +51,11 @@ void dragon_print_box_raw(DragonBox box) {
         case TAG_NONE:
             printf("None");
             break;
-        case TAG_LIST: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
-            if (!h) { printf("None"); break; }
-            switch (h->type_tag) {
-                case DRAGON_TAG_LIST_BOX:
-                    dragon_print_list_box_raw((DragonListBox*)h);
-                    break;
-                case DRAGON_TAG_LIST:
-                    dragon_print_list_nested_raw((DragonList*)h);
-                    break;
-                default:
-                    printf("<%s object at 0x%llx>",
-                           dragon_instance_class_name(h) ? dragon_instance_class_name(h)
-                                                         : "object",
-                           (unsigned long long)value);
-                    break;
-            }
+        case TAG_LIST:
+        case TAG_DICT:
+        case TAG_BYTES:
+            dragon_print_heap_obj_raw(value);
             break;
-        }
-        case TAG_DICT: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
-            if (!h) { printf("None"); break; }
-            if (h->type_tag == DRAGON_TAG_DICT) {
-                dragon_print_dict_raw((DragonDict*)h);
-            } else {
-                printf("<%s object at 0x%llx>",
-                       dragon_instance_class_name(h) ? dragon_instance_class_name(h)
-                                                     : "object",
-                       (unsigned long long)value);
-            }
-            break;
-        }
-        case TAG_BYTES: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
-            if (h && h->type_tag == DRAGON_TAG_BYTES) {
-                auto* bv = (DragonBytes*)h;
-                printf("b'");
-                for (int64_t bi = 0; bi < bv->len; bi++) {
-                    uint8_t c = bv->data[bi];
-                    if (c >= 32 && c < 127 && c != '\\' && c != '\'') printf("%c", c);
-                    else if (c == '\\') printf("\\\\");
-                    else if (c == '\'') printf("\\'");
-                    else printf("\\x%02x", c);
-                }
-                printf("'");
-            } else if (!h) {
-                printf("None");
-            } else {
-                const char* nm = dragon_instance_class_name(h);
-                if (nm) printf("<%s instance>", nm);
-                else    printf("<object at 0x%llx>", (unsigned long long)value);
-            }
-            break;
-        }
         default:
             printf("<box tag=%lld payload=%lld>",
                    (long long)tag, (long long)value);
@@ -142,34 +87,10 @@ const char* dragon_box_to_str(DragonBox box) {
             dragon_incref_str(s);
             return s;
         }
-        case TAG_LIST: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)box.payload;
-            const char* nm = (h && h->type_tag != DRAGON_TAG_LIST &&
-                              h->type_tag != DRAGON_TAG_LIST_BOX)
-                                 ? dragon_instance_class_name(h) : nullptr;
-            if (nm) snprintf(buf, sizeof(buf), "<%s object at 0x%llx>", nm,
-                             (unsigned long long)box.payload);
-            else    snprintf(buf, sizeof(buf), "<list 0x%llx>",
-                             (unsigned long long)box.payload);
-            return dragon_string_alloc(buf, (int64_t)strlen(buf));
-        }
-        case TAG_DICT: {
-            snprintf(buf, sizeof(buf), "<dict 0x%llx>", (unsigned long long)box.payload);
-            return dragon_string_alloc(buf, (int64_t)strlen(buf));
-        }
-        case TAG_BYTES: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)box.payload;
-            if (h && h->type_tag != DRAGON_TAG_BYTES) {
-                const char* nm = dragon_instance_class_name(h);
-                if (nm) snprintf(buf, sizeof(buf), "<%s instance>", nm);
-                else    snprintf(buf, sizeof(buf), "<object at 0x%llx>",
-                                 (unsigned long long)box.payload);
-            } else {
-                snprintf(buf, sizeof(buf), "<bytes 0x%llx>",
-                         (unsigned long long)box.payload);
-            }
-            return dragon_string_alloc(buf, (int64_t)strlen(buf));
-        }
+        case TAG_LIST:
+        case TAG_DICT:
+        case TAG_BYTES:
+            return dragon_heap_obj_to_str(box.payload);
         default: {
             snprintf(buf, sizeof(buf), "<box tag=%lld payload=%lld>",
                      (long long)box.tag, (long long)box.payload);

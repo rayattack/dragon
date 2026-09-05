@@ -3,43 +3,63 @@
 #include <cstdlib>
 #include <cstring>
 
-typedef struct { char* buf; size_t len; size_t cap; } DragonStrBuf;
+static const size_t DRAGON_STRBUF_CAP = 64;
+static const size_t DRAGON_PRINT_WINDOW = 1024;
+
+typedef struct { char* buf; size_t len; size_t cap; FILE* sink; } DragonStrBuf;
 
 static void sb_init(DragonStrBuf* b) {
-    b->cap = 64;
+    b->cap = DRAGON_STRBUF_CAP;
     b->len = 0;
+    b->sink = nullptr;
     b->buf = (char*)dragon_xmalloc(b->cap);
     b->buf[0] = '\0';
 }
+static void sb_init_stream(DragonStrBuf* b, char* window, size_t cap) {
+    b->cap = cap;
+    b->len = 0;
+    b->sink = stdout;
+    b->buf = window;
+    b->buf[0] = '\0';
+}
+static void sb_flush(DragonStrBuf* b) {
+    if (b->len) fwrite(b->buf, 1, b->len, b->sink);
+    b->len = 0;
+    b->buf[0] = '\0';
+}
 static void sb_ensure(DragonStrBuf* b, size_t extra) {
-    if (b->len + extra + 1 > b->cap) {
-        while (b->len + extra + 1 > b->cap) b->cap *= 2;
-        b->buf = (char*)dragon_xrealloc(b->buf, b->cap);
-    }
+    if (b->len + extra + 1 <= b->cap) return;
+    if (b->sink) { sb_flush(b); return; }
+    while (b->len + extra + 1 > b->cap) b->cap *= 2;
+    b->buf = (char*)dragon_xrealloc(b->buf, b->cap);
 }
 static void sb_putc(DragonStrBuf* b, char c) {
     sb_ensure(b, 1);
     b->buf[b->len++] = c;
     b->buf[b->len] = '\0';
 }
-static void sb_puts(DragonStrBuf* b, const char* s) {
-    if (!s) return;
-    size_t n = strlen(s);
+static void sb_write(DragonStrBuf* b, const char* bytes, size_t n) {
+    if (!bytes || n == 0) return;
+    if (b->sink && n + 1 > b->cap) {
+        sb_flush(b);
+        fwrite(bytes, 1, n, b->sink);
+        return;
+    }
     sb_ensure(b, n);
-    memcpy(b->buf + b->len, s, n);
+    memcpy(b->buf + b->len, bytes, n);
     b->len += n;
     b->buf[b->len] = '\0';
+}
+static void sb_puts(DragonStrBuf* b, const char* s) {
+    if (!s) return;
+    sb_write(b, s, strlen(s));
 }
 
 static void sb_put_dstr(DragonStrBuf* b, const char* s) {
     if (!s) return;
     int64_t blen = 0;
     char* enc = dragon_str_to_utf8_alloc(s, &blen);
-    const char* bytes = enc ? enc : s;
-    sb_ensure(b, (size_t)blen);
-    memcpy(b->buf + b->len, bytes, (size_t)blen);
-    b->len += (size_t)blen;
-    b->buf[b->len] = '\0';
+    sb_write(b, enc ? enc : s, (size_t)blen);
     if (enc) free(enc);
 }
 
@@ -459,25 +479,47 @@ const char* dragon_tuple_to_str(DragonTuple* t) {
     const char* r = dragon_string_alloc(b.buf, (int64_t)b.len); free(b.buf); return r;
 }
 
+const char* dragon_heap_obj_to_str(int64_t value) {
+    dragon_walk_reset();
+    DragonStrBuf b; sb_init(&b); dragon_repr_heap_obj(&b, value);
+    const char* r = dragon_string_alloc(b.buf, (int64_t)b.len); free(b.buf); return r;
+}
+
+void dragon_print_heap_obj_raw(int64_t value) {
+    dragon_walk_reset();
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_heap_obj(&b, value);
+    sb_flush(&b);
+}
+
 void dragon_print_list_nested_raw(DragonList* l) {
     dragon_walk_reset();
-    DragonStrBuf b; sb_init(&b); dragon_repr_list(&b, l);
-    fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_list(&b, l);
+    sb_flush(&b);
 }
 void dragon_print_dict_nested_raw(DragonDict* d) {
     dragon_walk_reset();
-    DragonStrBuf b; sb_init(&b); dragon_repr_dict(&b, d);
-    fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_dict(&b, d);
+    sb_flush(&b);
 }
 void dragon_print_dict_int_nested_raw(DragonDict* d) {
     dragon_walk_reset();
-    DragonStrBuf b; sb_init(&b); dragon_repr_dict_int(&b, d);
-    fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_dict_int(&b, d);
+    sb_flush(&b);
 }
 void dragon_print_list_box_nested_raw(DragonListBox* l) {
     dragon_walk_reset();
-    DragonStrBuf b; sb_init(&b); dragon_repr_list_box(&b, l);
-    fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_list_box(&b, l);
+    sb_flush(&b);
 }
 }
 
@@ -562,10 +604,10 @@ DragonTuple* dragon_tuple_from_list(DragonList* l) {
 }
 
 void dragon_print_tuple_raw(DragonTuple* t) {
-    DragonStrBuf b; sb_init(&b);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
     dragon_repr_tuple(&b, t);
-    fwrite(b.buf, 1, b.len, stdout);
-    free(b.buf);
+    sb_flush(&b);
 }
 void dragon_print_tuple(DragonTuple* t) {
     dragon_print_tuple_raw(t);
@@ -945,8 +987,10 @@ void dragon_set_update(DragonSet* a, DragonSet* b) {
 }
 
 void dragon_print_set_raw(DragonSet* s) {
-    DragonStrBuf b; sb_init(&b); dragon_repr_set(&b, s);
-    fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_set(&b, s);
+    sb_flush(&b);
 }
 void dragon_print_set(DragonSet* s) {
     dragon_print_set_raw(s);
@@ -1022,9 +1066,10 @@ const char* dragon_bytes_to_str(DragonBytes* b) {
 }
 
 void dragon_print_bytes_raw(DragonBytes* b) {
-    DragonStrBuf sb; sb_init(&sb); dragon_repr_bytes(&sb, b);
-    fwrite(sb.buf, 1, sb.len, stdout);
-    free(sb.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf sb; sb_init_stream(&sb, window, sizeof(window));
+    dragon_repr_bytes(&sb, b);
+    sb_flush(&sb);
 }
 void dragon_print_bytes(DragonBytes* b) {
     dragon_print_bytes_raw(b);
@@ -1621,8 +1666,10 @@ const char* dragon_deque_to_str(DragonDeque* d) {
 }
 
 void dragon_print_deque_raw(DragonDeque* d) {
-    DragonStrBuf b; sb_init(&b); dragon_repr_deque(&b, d);
-    fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
+    char window[DRAGON_PRINT_WINDOW];
+    DragonStrBuf b; sb_init_stream(&b, window, sizeof(window));
+    dragon_repr_deque(&b, d);
+    sb_flush(&b);
 }
 
 DragonDeque* dragon_deque_from_list(void* listPtr, int64_t maxlen) {

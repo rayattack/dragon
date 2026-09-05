@@ -20,6 +20,16 @@ static bool aggregateElemSupported(const std::string& fn, Type::Kind ek) {
     return numeric || (fn != "sum" && ek == Type::Kind::Str);
 }
 
+static bool signatureHasUnknownPart(const Type& t) {
+    if (t.kind() != Type::Kind::Function) return false;
+    auto& ft = static_cast<const FunctionType&>(t);
+    if (!ft.returnType || ft.returnType->kind() == Type::Kind::Unknown)
+        return true;
+    for (const auto& p : ft.paramTypes)
+        if (!p || p->kind() == Type::Kind::Unknown) return true;
+    return false;
+}
+
 static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
                                               const char* dunder) {
     for (int guard = 0; cls && guard < 64; ++guard) {
@@ -557,131 +567,154 @@ void TypeChecker::visit(CallExpr& node) {
         return err;
     };
 
-    auto checkPositionalArgs = [&](FunctionType& ft) {
+    auto checkArgAgainstParam = [&](Expr* arg, const std::shared_ptr<Type>& pt,
+                                    const std::string& label) {
         auto isContainer = [](Type::Kind k) {
             return k == Type::Kind::List || k == Type::Kind::Dict ||
                    k == Type::Kind::Tuple || k == Type::Kind::Task;
         };
-        for (size_t i = 0; i < node.args.size(); ++i) {
-            const auto& at = node.args[i]->type;
-            const auto& pt = ft.paramTypes[i];
-            if (!at || !pt) continue;
-            auto ak = at->kind(), pk = pt->kind();
-            if (ak == Type::Kind::Boxed || ak == Type::Kind::Union)
-                markNarrowTarget(*node.args[i], pt);
-            if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
-                pk == Type::Kind::Unknown)
-                continue;
-            if (pk == Type::Kind::Boxed) {
-                if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
-                    bool recvIsBoxList = false;
-                    if (att->object && att->object->type) {
-                        if (auto* rlt = dynamic_cast<ListType*>(
-                                att->object->type.get()))
-                            recvIsBoxList = rlt->elementType &&
-                                rlt->elementType->kind() == Type::Kind::Boxed;
-                    }
-                    if (recvIsBoxList &&
-                        (att->attribute == "append" ||
-                         att->attribute == "insert" ||
-                         att->attribute == "remove"))
-                        boxNestedContainerLiteralForAny(node.args[i].get());
+        const auto& at = arg->type;
+        if (!at || !pt) return;
+        auto ak = at->kind(), pk = pt->kind();
+        if (ak == Type::Kind::Boxed || ak == Type::Kind::Union)
+            markNarrowTarget(*arg, pt);
+        if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
+            pk == Type::Kind::Unknown)
+            return;
+        if (signatureHasUnknownPart(*at) || signatureHasUnknownPart(*pt))
+            return;
+        if (pk == Type::Kind::Boxed) {
+            if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
+                bool recvIsBoxList = false;
+                if (att->object && att->object->type) {
+                    if (auto* rlt = dynamic_cast<ListType*>(
+                            att->object->type.get()))
+                        recvIsBoxList = rlt->elementType &&
+                            rlt->elementType->kind() == Type::Kind::Boxed;
                 }
-                continue;
+                if (recvIsBoxList &&
+                    (att->attribute == "append" ||
+                     att->attribute == "insert" ||
+                     att->attribute == "remove"))
+                    boxNestedContainerLiteralForAny(arg);
             }
-            if (ak == Type::Kind::None_ || ak == Type::Kind::Union ||
-                pk == Type::Kind::Union)
-                continue;
-            if (isContainer(ak) && ak == pk) {
-                if (auto* le = dynamic_cast<ListExpr*>(node.args[i].get())) {
-                    if (le->elements.empty()) {
-                        propagateAnnotationToEmptyLiteral(
-                            node.args[i].get(), pt);
-                        continue;
-                    }
-                } else if (auto* de =
-                               dynamic_cast<DictExpr*>(node.args[i].get())) {
-                    if (de->entries.empty()) {
-                        propagateAnnotationToEmptyLiteral(
-                            node.args[i].get(), pt);
-                        continue;
-                    }
+            return;
+        }
+        if (ak == Type::Kind::None_ || ak == Type::Kind::Union ||
+            pk == Type::Kind::Union)
+            return;
+        if (isContainer(ak) && ak == pk) {
+            if (auto* le = dynamic_cast<ListExpr*>(arg)) {
+                if (le->elements.empty()) {
+                    propagateAnnotationToEmptyLiteral(
+                        arg, pt);
+                    return;
                 }
-                if (tryExpectedTypeLiteral(node.args[i].get(), pt)) continue;
-                if (ak == Type::Kind::List) {
-                    const auto& ae =
-                        static_cast<const ListType&>(*at).elementType;
-                    const auto& pe =
-                        static_cast<const ListType&>(*pt).elementType;
-                    if (ae && pe && ae->kind() != Type::Kind::Unknown &&
-                        pe->kind() != Type::Kind::Unknown) {
-                        auto boxElem = [](const Type::Kind k) {
-                            return k == Type::Kind::Boxed ||
-                                   k == Type::Kind::Union;
-                        };
-                        if (boxElem(ae->kind()) != boxElem(pe->kind())) {
-                            error(node.args[i]->location(),
-                                  "argument " + std::to_string(i + 1) +
-                                  " of type '" + at->toString() +
-                                  "' is not assignable to parameter type '" +
-                                  pt->toString() + "'" +
-                                  TypeChecker::listReprMismatchHint(*at, *pt));
-                        } else if (!diagnoseHeterogeneousLiteral(
-                                       node.args[i].get(), pt) &&
-                                   !ae->isSubtypeOf(*pe) &&
-                                   // A literal argument is built in the
-                                   // parameter's layout from birth.
-                                   !tryExpectedTypeLiteral(node.args[i].get(),
-                                                           pt)) {
-                            error(node.args[i]->location(),
-                                  "argument " + std::to_string(i + 1) +
-                                  " of type '" + at->toString() +
-                                  "' is not assignable to parameter type '" +
-                                  pt->toString() + "'" +
-                                  TypeChecker::listReprMismatchHint(*at, *pt));
-                        }
-                    }
+            } else if (auto* de =
+                           dynamic_cast<DictExpr*>(arg)) {
+                if (de->entries.empty()) {
+                    propagateAnnotationToEmptyLiteral(
+                        arg, pt);
+                    return;
                 }
-                continue;
             }
-            if (!at->isSubtypeOf(*pt)) {
-                if (pt->kind() == Type::Kind::Contract &&
-                    at->kind() == Type::Kind::Instance) {
-                    auto& ct = static_cast<ContractType&>(*pt);
-                    auto& inst = static_cast<InstanceType&>(*at);
-                    auto problems =
-                        contractConformanceProblems(*inst.classType, ct);
-                    std::string head =
-                        "argument " + std::to_string(i + 1) + " of type '" +
-                        at->toString() + "' is not assignable to parameter "
-                        "type '" + pt->toString() + "'";
-                    if (problems.empty()) {
-                        std::string argName = "value";
-                        if (auto* nm =
-                                dynamic_cast<NameExpr*>(node.args[i].get()))
-                            argName = nm->name;
-                        std::string promise = ct.display;
-                        if (!promise.empty() && promise.front() == '{')
-                            promise = promise.substr(1, promise.size() - 2);
-                        error(node.args[i]->location(), head + ". " +
-                              inst.classType->name + " has a matching method "
-                              "set but no declared conformance - cast at the "
-                              "call site ('" + argName + " as " + ct.display +
-                              "') or promise it on the class ('class " +
-                              inst.classType->name + " -> " + promise + "')");
-                    } else {
-                        std::string msg = head + ":";
-                        for (auto& pr : problems) msg += " " + pr + ";";
-                        msg.pop_back();
-                        error(node.args[i]->location(), msg);
+            if (tryExpectedTypeLiteral(arg, pt)) return;
+            if (ak == Type::Kind::List) {
+                const auto& ae =
+                    static_cast<const ListType&>(*at).elementType;
+                const auto& pe =
+                    static_cast<const ListType&>(*pt).elementType;
+                if (ae && pe && ae->kind() != Type::Kind::Unknown &&
+                    pe->kind() != Type::Kind::Unknown) {
+                    auto boxElem = [](const Type::Kind k) {
+                        return k == Type::Kind::Boxed ||
+                               k == Type::Kind::Union;
+                    };
+                    if (boxElem(ae->kind()) != boxElem(pe->kind())) {
+                        error(arg->location(),
+                              label +
+                              " of type '" + at->toString() +
+                              "' is not assignable to parameter type '" +
+                              pt->toString() + "'" +
+                              TypeChecker::listReprMismatchHint(*at, *pt));
+                    } else if (!diagnoseHeterogeneousLiteral(
+                                   arg, pt) &&
+                               !ae->isSubtypeOf(*pe) &&
+                               // A literal argument is built in the
+                               // parameter's layout from birth.
+                               !tryExpectedTypeLiteral(arg,
+                                                       pt)) {
+                        error(arg->location(),
+                              label +
+                              " of type '" + at->toString() +
+                              "' is not assignable to parameter type '" +
+                              pt->toString() + "'" +
+                              TypeChecker::listReprMismatchHint(*at, *pt));
                     }
-                    continue;
                 }
-                error(node.args[i]->location(),
-                      "argument " + std::to_string(i + 1) + " of type '" +
-                      at->toString() + "' is not assignable to parameter "
-                      "type '" + pt->toString() + "'");
             }
+            return;
+        }
+        if (!at->isSubtypeOf(*pt)) {
+            if (pt->kind() == Type::Kind::Contract &&
+                at->kind() == Type::Kind::Instance) {
+                auto& ct = static_cast<ContractType&>(*pt);
+                auto& inst = static_cast<InstanceType&>(*at);
+                auto problems =
+                    contractConformanceProblems(*inst.classType, ct);
+                std::string head =
+                    label + " of type '" +
+                    at->toString() + "' is not assignable to parameter "
+                    "type '" + pt->toString() + "'";
+                if (problems.empty()) {
+                    std::string argName = "value";
+                    if (auto* nm =
+                            dynamic_cast<NameExpr*>(arg))
+                        argName = nm->name;
+                    std::string promise = ct.display;
+                    if (!promise.empty() && promise.front() == '{')
+                        promise = promise.substr(1, promise.size() - 2);
+                    error(arg->location(), head + ". " +
+                          inst.classType->name + " has a matching method "
+                          "set but no declared conformance - cast at the "
+                          "call site ('" + argName + " as " + ct.display +
+                          "') or promise it on the class ('class " +
+                          inst.classType->name + " -> " + promise + "')");
+                } else {
+                    std::string msg = head + ":";
+                    for (auto& pr : problems) msg += " " + pr + ";";
+                    msg.pop_back();
+                    error(arg->location(), msg);
+                }
+                return;
+            }
+            error(arg->location(),
+                  label + " of type '" +
+                  at->toString() + "' is not assignable to parameter "
+                  "type '" + pt->toString() + "'");
+        }
+    };
+
+    auto checkCallArgs = [&](FunctionType& ft) {
+        const size_t declaredParams =
+            ft.hasArgMeta ? std::min(ft.paramNames.size(), ft.paramTypes.size())
+                          : ft.paramTypes.size();
+        const size_t boundArgs = std::min(node.args.size(), declaredParams);
+        for (size_t i = 0; i < boundArgs; ++i) {
+            if (dynamic_cast<StarredExpr*>(node.args[i].get())) break;
+            checkArgAgainstParam(node.args[i].get(), ft.paramTypes[i],
+                                 "argument " + std::to_string(i + 1));
+        }
+        if (!ft.hasArgMeta) return;
+        for (auto& kw : node.kwArgs) {
+            if (kw.first.empty() || !kw.second) continue;
+            auto it = std::find(ft.paramNames.begin(), ft.paramNames.end(),
+                                kw.first);
+            if (it == ft.paramNames.end()) continue;
+            size_t idx = (size_t)std::distance(ft.paramNames.begin(), it);
+            if (idx >= ft.paramTypes.size()) continue;
+            checkArgAgainstParam(kw.second.get(), ft.paramTypes[idx],
+                                 "argument '" + kw.first + "'");
         }
     };
 
@@ -726,10 +759,9 @@ void TypeChecker::visit(CallExpr& node) {
                 return;
             }
         }
-        if ((dynamic_cast<NameExpr*>(node.callee.get()) ||
-             dynamic_cast<AttributeExpr*>(node.callee.get())) &&
-            node.kwArgs.empty() && node.args.size() == ft.paramTypes.size()) {
-            checkPositionalArgs(ft);
+        if (dynamic_cast<NameExpr*>(node.callee.get()) ||
+            dynamic_cast<AttributeExpr*>(node.callee.get())) {
+            checkCallArgs(ft);
         }
         if (auto* cn = dynamic_cast<NameExpr*>(node.callee.get())) {
             if ((cn->name == "sorted" || cn->name == "reversed") &&
@@ -793,9 +825,7 @@ void TypeChecker::visit(CallExpr& node) {
                 initIt->second->kind() == Type::Kind::Function) {
                 auto& ift = static_cast<FunctionType&>(*initIt->second);
                 validateCall(ift, "class '" + ct.name + "' constructor");
-                if (node.kwArgs.empty() &&
-                    node.args.size() == ift.paramTypes.size())
-                    checkPositionalArgs(ift);
+                checkCallArgs(ift);
             } else if (!ct.isEnum && !ct.isTypedDict && ct.constructorCount == 0 &&
                        !hasDataclassDecorator(ct) &&
                        !hasDeclaredBase(ct, "NamedTuple") &&
@@ -856,8 +886,7 @@ void TypeChecker::visit(CallExpr& node) {
                       "well; call an exact overload's argument count");
             } else if (matched) {
                 validateCall(*matched, "class '" + ct.name + "' constructor");
-                if (node.kwArgs.empty() && nArgs == matched->paramTypes.size())
-                    checkPositionalArgs(*matched);
+                checkCallArgs(*matched);
             } else {
                 std::string counts;
                 for (auto& ov : ct.constructorOverloads) {

@@ -1915,3 +1915,23 @@ TEST(TypeCheckerTest, DequeIsNotIterable) {
     EXPECT_TRUE(checkOk(code("user_sorted_shadowing_builtin_accepted")));
     EXPECT_TRUE(checkOk(code("user_min_shadowing_builtin_accepted")));
 }
+
+TEST(TypeCheckerTest, DefaultedParamsDoNotSkipArgumentChecking) {
+    EXPECT_TRUE(checkHasErrors(code("list_arg_to_defaulted_str_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("int_arg_to_defaulted_str_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("list_arg_to_defaulted_method_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("list_arg_to_defaulted_self_method_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("list_arg_to_defaulted_ctor_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("arg_before_keyword_arg_type_checked")));
+    EXPECT_TRUE(checkOk(code("defaulted_call_with_matching_args_accepted")));
+}
+
+TEST(TypeCheckerTest, KeywordArgumentValuesAreTypeChecked) {
+    EXPECT_TRUE(checkHasErrors(code("keyword_arg_value_type_checked")));
+    EXPECT_TRUE(checkHasErrors(code("keyword_arg_list_to_str_param_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("keyword_arg_on_method_type_checked")));
+    EXPECT_TRUE(checkHasErrors(code("keyword_arg_on_ctor_type_checked")));
+    EXPECT_TRUE(checkHasErrors(code("keyword_arg_on_ctor_overload_type_checked")));
+    EXPECT_TRUE(checkHasErrors(code("keyword_arg_trailing_default_value_type_checked")));
+    EXPECT_TRUE(checkOk(code("keyword_call_with_matching_args_accepted")));
+}

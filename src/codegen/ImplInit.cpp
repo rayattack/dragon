@@ -80,14 +80,6 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(voidType, {boxType}, false));
     getOrDeclareRuntime("dragon_print_tagged_raw",
         llvm::FunctionType::get(voidType, {i64Type, i64Type}, false));
-    getOrDeclareRuntime("dragon_print_list_int_raw",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_str_raw",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_float_raw",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_bool_raw",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_print_list_box_raw",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_print_dict_raw",
@@ -178,14 +170,6 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_list_len",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_int",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_str",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_float",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_print_list_bool",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_list_insert",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_list_remove",

@@ -1477,3 +1477,56 @@ p.name = s
 print(p.name)
 print(s)
 ```
+
+#### :print_list_str_unicode_matches_str
+
+```dr
+xs: list[str] = ["深", "abc"]
+print(xs)
+print(str(xs))
+print(f"{xs}")
+```
+
+#### :print_list_instance_matches_str
+
+```dr
+class Money {
+    amount: int
+    def (amount: int) {
+        self.amount = amount
+    }
+}
+ms: list[Money] = [Money(1)]
+print(ms)
+print(str(ms))
+```
+
+#### :print_list_bytes_matches_str
+
+```dr
+bs: list[bytes] = [b"ab"]
+print(bs)
+print(str(bs))
+```
+
+#### :print_large_list_matches_str
+
+```dr
+xs: list[str] = []
+i: int = 0
+while i < 400 {
+    xs.append("深深深")
+    i = i + 1
+}
+print(xs)
+print(str(xs))
+```
+
+#### :print_any_container_matches_str
+
+```dr
+type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+v: Boxed = [1, {"a": 2}]
+print(v)
+print(str(v))
+```

@@ -118,6 +118,30 @@ class AnySpliceTests(TestCase) {
         page: HTML = template[HTML] {<p>!{value}</p>}
         self.assertEqual(page.to_str(), "<p>&lt;b&gt;</p>")
     }
+
+    def test_any_list_renders_its_elements() {
+        value: Boxed = [1, 2]
+        self.assertEqual(str(value), "[1, 2]")
+        self.assertEqual(f"{value}", "[1, 2]")
+    }
+
+    def test_any_dict_renders_its_entries() {
+        value: Boxed = {"a": 1}
+        self.assertEqual(str(value), "{'a': 1}")
+        self.assertEqual(f"{value}", "{'a': 1}")
+    }
+
+    def test_any_bytes_renders_its_content() {
+        value: Boxed = b"ab"
+        self.assertEqual(str(value), "b'ab'")
+        self.assertEqual(f"{value}", "b'ab'")
+    }
+
+    def test_any_nested_list_renders_deeply() {
+        value: Boxed = [[1], {"a": 2}]
+        self.assertEqual(str(value), "[[1], {'a': 2}]")
+        self.assertEqual(f"{value}", "[[1], {'a': 2}]")
+    }
 }
 
 

@@ -95,64 +95,6 @@ int64_t dragon_list_len(DragonList* list) {
     return list ? list->size : 0;
 }
 
-void dragon_print_list_int_raw(DragonList* list) {
-    printf("[");
-    for (int64_t i = 0; i < list->size; i++) {
-        if (i > 0) printf(", ");
-        printf("%ld", (long)dragon_list_load(list, i));
-    }
-    printf("]");
-}
-void dragon_print_list_int(DragonList* list) {
-    dragon_print_list_int_raw(list);
-    putchar('\n');
-}
-
-void dragon_print_list_str_raw(DragonList* list) {
-    printf("[");
-    for (int64_t i = 0; i < list->size; i++) {
-        if (i > 0) printf(", ");
-        const char* s = (const char*)(uintptr_t)dragon_list_load(list, i);
-        printf("'%s'", s ? s : "");
-    }
-    printf("]");
-}
-void dragon_print_list_str(DragonList* list) {
-    dragon_print_list_str_raw(list);
-    putchar('\n');
-}
-
-void dragon_print_list_float_raw(DragonList* list) {
-    printf("[");
-    for (int64_t i = 0; i < list->size; i++) {
-        if (i > 0) printf(", ");
-        int64_t bits = dragon_list_load(list, i);
-        double d;
-        memcpy(&d, &bits, sizeof(double));
-        char ftmp[64];
-        dragon_format_double_into(d, ftmp, sizeof(ftmp));
-        fputs(ftmp, stdout);
-    }
-    printf("]");
-}
-void dragon_print_list_float(DragonList* list) {
-    dragon_print_list_float_raw(list);
-    putchar('\n');
-}
-
-void dragon_print_list_bool_raw(DragonList* list) {
-    printf("[");
-    for (int64_t i = 0; i < list->size; i++) {
-        if (i > 0) printf(", ");
-        printf("%s", dragon_list_load(list, i) ? "True" : "False");
-    }
-    printf("]");
-}
-void dragon_print_list_bool(DragonList* list) {
-    dragon_print_list_bool_raw(list);
-    putchar('\n');
-}
-
 void dragon_list_insert(DragonList* list, int64_t index, int64_t value) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (index < 0) index += list->size;

@@ -878,10 +878,6 @@ void dragon_dict_update(DragonDict* d, DragonDict* other);
 int64_t dragon_dict_setdefault(DragonDict* d, const char* key, int64_t def);
 DragonDict* dragon_dict_copy(DragonDict* d);
 
-void dragon_print_list_int(DragonList* list);
-void dragon_print_list_str(DragonList* list);
-void dragon_print_list_float(DragonList* list);
-void dragon_print_list_bool(DragonList* list);
 DragonList* dragon_list_slice(DragonList* l, int64_t start, int64_t stop, int64_t step);
 
 static inline void dragon_incref_tagged(int64_t val, uint8_t tag) {

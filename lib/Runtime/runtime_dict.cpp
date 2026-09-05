@@ -3,35 +3,10 @@
 extern "C" {
 void dragon_decref_callable(void* p);
 
-void dragon_print_list_nested_raw(DragonList* l);
 void dragon_print_dict_nested_raw(DragonDict* d);
 void dragon_print_dict_int_nested_raw(DragonDict* d);
-void dragon_print_list_box_nested_raw(DragonListBox* l);
+void dragon_print_heap_obj_raw(int64_t value);
 void dragon_print_str_raw(const char* s);
-
-const char* dragon_instance_class_name(void* instance);
-
-static void dict_print_bytes_or_instance(int64_t value) {
-    DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
-    if (h && h->type_tag == DRAGON_TAG_BYTES) {
-        auto* bv = (DragonBytes*)h;
-        printf("b'");
-        for (int64_t bi = 0; bi < bv->len; bi++) {
-            uint8_t c = bv->data[bi];
-            if (c >= 32 && c < 127 && c != '\\' && c != '\'') printf("%c", c);
-            else if (c == '\\') printf("\\\\");
-            else if (c == '\'') printf("\\'");
-            else printf("\\x%02x", c);
-        }
-        printf("'");
-    } else if (!h) {
-        printf("None");
-    } else {
-        const char* nm = dragon_instance_class_name(h);
-        if (nm) printf("<%s instance>", nm);
-        else    printf("<object at 0x%llx>", (unsigned long long)value);
-    }
-}
 
 static const int64_t DICT_EMPTY = -1;
 static const int64_t DICT_TOMBSTONE = -2;
@@ -516,19 +491,9 @@ void dragon_print_tagged_raw(int64_t value, int64_t tag) {
             printf("None");
             break;
         case TAG_BYTES:
-            dict_print_bytes_or_instance(value);
-            break;
-        case TAG_LIST: {
-            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
-            if (!h) { printf("None"); break; }
-            if (h->type_tag == DRAGON_TAG_LIST_BOX)
-                dragon_print_list_box_nested_raw((DragonListBox*)h);
-            else
-                dragon_print_list_nested_raw((DragonList*)h);
-            break;
-        }
+        case TAG_LIST:
         case TAG_DICT:
-            dragon_print_dict_nested_raw((DragonDict*)(uintptr_t)value);
+            dragon_print_heap_obj_raw(value);
             break;
         default:
             printf("%ld", value);

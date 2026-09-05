@@ -22,17 +22,17 @@ TEST(CodeGenTest, PrintFloatCall) {
 
 TEST(CodeGenTest, PrintList) {
     auto ir = generateIR("x: list[int] = [1, 2, 3]\nprint(x)");
-    EXPECT_NE(ir.find("dragon_print_list_int"), std::string::npos);
+    EXPECT_NE(ir.find("dragon_print_list_nested_raw"), std::string::npos);
 }
 
 TEST(CodeGenTest, PrintListStrDispatch) {
     auto ir = generateIR(code("print_list_str_dispatch"));
-    EXPECT_NE(ir.find("dragon_print_list_str"), std::string::npos);
+    EXPECT_NE(ir.find("dragon_print_list_nested_raw"), std::string::npos);
 }
 
 TEST(CodeGenTest, PrintListFloatDispatch) {
     auto ir = generateIR(code("print_list_float_dispatch"));
-    EXPECT_NE(ir.find("dragon_print_list_float"), std::string::npos);
+    EXPECT_NE(ir.find("dragon_print_list_nested_raw"), std::string::npos);
 }
 
 TEST(CodeGenTest, MathSqrt) {

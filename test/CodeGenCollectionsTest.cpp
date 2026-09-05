@@ -875,3 +875,40 @@ TEST(CodeGenE2E, DictDotAssignStrOutlivesSource) {
     auto out = compileAndRun(code("dict_dot_assign_str_outlives_source"));
     EXPECT_EQ(out, "n-4\nn-4\n");
 }
+
+static const size_t kPrintStreamWindowBytes = 1024;
+
+static void expectPrintMatchesStr(const std::string& output) {
+    auto nl = output.find('\n');
+    ASSERT_NE(nl, std::string::npos);
+    std::string printed = output.substr(0, nl);
+    std::string rendered = output.substr(nl + 1);
+    if (!rendered.empty() && rendered.back() == '\n') rendered.pop_back();
+    EXPECT_EQ(printed, rendered);
+}
+
+TEST(CodeGenE2E, PrintListStrUnicodeMatchesStr) {
+    auto output = compileAndRun(code("print_list_str_unicode_matches_str"));
+    EXPECT_EQ(output, "['\xe6\xb7\xb1', 'abc']\n['\xe6\xb7\xb1', 'abc']\n['\xe6\xb7\xb1', 'abc']\n");
+}
+
+TEST(CodeGenE2E, PrintListInstanceMatchesStr) {
+    auto output = compileAndRun(code("print_list_instance_matches_str"));
+    EXPECT_EQ(output, "[<Money instance>]\n[<Money instance>]\n");
+}
+
+TEST(CodeGenE2E, PrintListBytesMatchesStr) {
+    auto output = compileAndRun(code("print_list_bytes_matches_str"));
+    EXPECT_EQ(output, "[b'ab']\n[b'ab']\n");
+}
+
+TEST(CodeGenE2E, PrintLargeListMatchesStr) {
+    auto output = compileAndRun(code("print_large_list_matches_str"));
+    expectPrintMatchesStr(output);
+    EXPECT_GT(output.find('\n'), kPrintStreamWindowBytes);
+}
+
+TEST(CodeGenE2E, PrintAnyContainerMatchesStr) {
+    auto output = compileAndRun(code("print_any_container_matches_str"));
+    EXPECT_EQ(output, "[1, {'a': 2}]\n[1, {'a': 2}]\n");
+}

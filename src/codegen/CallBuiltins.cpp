@@ -126,7 +126,7 @@ bool CodeGen::tryEmitPrintUnionRaw(Expr* argExpr, llvm::Value* arg) {
     sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 5)), listBB);
     impl_->builder->SetInsertPoint(listBB);
     auto* listPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
-    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_list_int_raw"], {listPtr});
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_list_nested_raw"], {listPtr});
     impl_->builder->CreateBr(mergePrint);
 
     auto* dictBB = llvm::BasicBlock::Create(*impl_->context, "print.dict", func2);
@@ -225,6 +225,17 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
         }
     }
 
+    auto* printListType = argExpr->type
+                              ? dynamic_cast<ListType*>(argExpr->type.get())
+                              : nullptr;
+    bool listElemIsBoxed = printListType && printListType->elementType &&
+                           Impl::isBoxedKind(printListType->elementType->kind());
+    if (!listElemIsBoxed && argNameExpr) {
+        auto vit = impl_->varListElemKinds.find(argNameExpr->name);
+        listElemIsBoxed = vit != impl_->varListElemKinds.end() &&
+                          Impl::isBoxedKind(vit->second);
+    }
+
     std::string printClassName = impl_->resolveExprClassName(argExpr);
 
     if (isPrintTuple && (argType == impl_->i8PtrType || argType->isPointerTy())) {
@@ -253,30 +264,10 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
                                     : "dragon_print_dict_raw");
         impl_->builder->CreateCall(impl_->runtimeFuncs[printDictFn], {arg});
     } else if (isPrintList && (argType == impl_->i8PtrType || argType->isPointerTy())) {
-        std::string printFn = "dragon_print_list_int_raw";
-        if (argExpr && argExpr->type) {
-            if (auto* lt = dynamic_cast<ListType*>(argExpr->type.get())) {
-                if (lt->elementType) {
-                    auto ek = lt->elementType->kind();
-                    if (ek == Type::Kind::Str) printFn = "dragon_print_list_str_raw";
-                    else if (ek == Type::Kind::Float) printFn = "dragon_print_list_float_raw";
-                    else if (ek == Type::Kind::Bool) printFn = "dragon_print_list_bool_raw";
-                    else if (Impl::isBoxedKind(ek)) printFn = "dragon_print_list_box_raw";
-                    else if (ek == Type::Kind::List || ek == Type::Kind::Dict ||
-                             ek == Type::Kind::Tuple || ek == Type::Kind::Set)
-                        printFn = "dragon_print_list_nested_raw";
-                }
-            }
-        }
-        if (printFn == "dragon_print_list_int_raw") {
-            if (auto* nameArg = dynamic_cast<NameExpr*>(argExpr)) {
-                auto vit = impl_->varListElemKinds.find(nameArg->name);
-                if (vit != impl_->varListElemKinds.end() &&
-                    Impl::isBoxedKind(vit->second))
-                    printFn = "dragon_print_list_box_raw";
-            }
-        }
-        impl_->builder->CreateCall(impl_->runtimeFuncs[printFn], {arg});
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs[listElemIsBoxed ? "dragon_print_list_box_raw"
+                                                : "dragon_print_list_nested_raw"],
+            {arg});
     } else if (!printClassName.empty() && (argType == impl_->i8PtrType || argType->isPointerTy())) {
         if (impl_->hasDunder(printClassName, "__str__")) {
             auto* strResult = impl_->callDunder(printClassName, "__str__", arg);

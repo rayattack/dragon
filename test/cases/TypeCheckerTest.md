@@ -2472,3 +2472,213 @@ def main() {
 }
 main()
 ```
+
+#### :list_arg_to_defaulted_str_param_rejected
+
+An argument bound to a declared parameter is compared to that parameter's type
+whether or not the call supplies the trailing defaulted parameters. Before, a
+call that leaned on a default skipped argument checking entirely, so a
+`list[str]` reached a `str` parameter and rendered as the empty string.
+
+```dr
+def contains(needle: str, haystack: str, msg: str = "") -> bool {
+    return needle in haystack
+}
+xs: list[str] = ["a", "b"]
+print(contains("a", xs))
+```
+
+#### :int_arg_to_defaulted_str_param_rejected
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+note(1)
+```
+
+#### :list_arg_to_defaulted_method_param_rejected
+
+```dr
+class Log {
+    def note(text: str, msg: str = "") {
+        print(text)
+    }
+}
+l: Log = Log()
+xs: list[str] = ["a"]
+l.note(xs)
+```
+
+#### :list_arg_to_defaulted_self_method_param_rejected
+
+```dr
+class Log {
+    def note(text: str, msg: str = "") {
+        print(text)
+    }
+    def go() {
+        xs: list[str] = ["a"]
+        self.note(xs)
+    }
+}
+l: Log = Log()
+l.go()
+```
+
+#### :list_arg_to_defaulted_ctor_param_rejected
+
+```dr
+class Box {
+    label: str
+    def (label: str, note: str = "") {
+        self.label = label
+    }
+}
+xs: list[str] = ["a"]
+b: Box = Box(xs)
+print(b.label)
+```
+
+#### :arg_before_keyword_arg_type_checked
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+xs: list[str] = ["a"]
+note(xs, msg="m")
+```
+
+#### :defaulted_call_with_matching_args_accepted
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+class Log {
+    def say(text: str, msg: str = "") {
+        print(text)
+    }
+}
+def each(first: str, *rest: str) {
+    print(first)
+}
+note("a")
+note("a", "b")
+l: Log = Log()
+l.say("a")
+each("a", "b", "c")
+xs: list[str] = ["a"]
+each(*xs)
+```
+
+#### :keyword_arg_value_type_checked
+
+A keyword argument binds a declared parameter, so its value is compared to that
+parameter's type exactly as a positional argument is.
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+note(text=1)
+```
+
+#### :keyword_arg_list_to_str_param_rejected
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+xs: list[str] = ["a"]
+note(text=xs)
+```
+
+#### :keyword_arg_on_method_type_checked
+
+```dr
+class Log {
+    def say(text: str, msg: str = "") {
+        print(text)
+    }
+}
+l: Log = Log()
+xs: list[str] = ["a"]
+l.say(text=xs)
+```
+
+#### :keyword_arg_on_ctor_type_checked
+
+```dr
+class Box {
+    label: str
+    def (label: str, note: str = "") {
+        self.label = label
+    }
+}
+xs: list[str] = ["a"]
+b: Box = Box(label=xs)
+print(b.label)
+```
+
+#### :keyword_arg_on_ctor_overload_type_checked
+
+```dr
+class Tag {
+    name: str
+    def (name: str) {
+        self.name = name
+    }
+    def (name: str, extra: str) {
+        self.name = name + extra
+    }
+}
+xs: list[str] = ["a"]
+t: Tag = Tag(name=xs, extra="b")
+print(t.name)
+```
+
+#### :keyword_arg_trailing_default_value_type_checked
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+note("a", msg=1)
+```
+
+#### :keyword_call_with_matching_args_accepted
+
+```dr
+def note(text: str, msg: str = "") {
+    print(text)
+}
+def each(first: str, *rest: str) {
+    print(first)
+}
+class Log {
+    def say(text: str, msg: str = "") {
+        print(text)
+    }
+    def wrap(**opts: str) {
+        print(str(len(opts)))
+    }
+}
+class Box {
+    label: str
+    def (label: str, note: str = "") {
+        self.label = label
+    }
+}
+note(text="a")
+note("a", msg="b")
+note(text="a", msg="b")
+l: Log = Log()
+l.say(text="a", msg="b")
+l.wrap(anything="a")
+b: Box = Box(label="a", note="n")
+print(b.label)
+xs: list[str] = ["a"]
+each(*xs)
+```
