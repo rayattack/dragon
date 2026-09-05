@@ -711,7 +711,9 @@ bool TypeChecker::tryInstantiateGenericCall(
                 continue;
             pts.push_back(resolveType(decl->params[i].type.get()));
         }
-        auto rt = resolveType(decl->returnType.get());
+        auto rt = bodyContainsYield(decl->body)
+                      ? resolveType(decl->returnType.get())
+                      : resolveReturnType(decl->returnType.get());
         genericFt = std::make_shared<FunctionType>(std::move(pts), rt);
         impl_->typeParamScopes.pop_back();
         if (pushedClassFrame) impl_->typeParamScopes.pop_back();

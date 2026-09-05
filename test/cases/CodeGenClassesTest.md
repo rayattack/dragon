@@ -662,7 +662,7 @@ class Animal {
         self.name = name
     }
 }
-def make(cls, n: str) {
+def make(cls, n: str) -> Animal {
     return cls(n)
 }
 x: Animal = make(Animal, "hi")

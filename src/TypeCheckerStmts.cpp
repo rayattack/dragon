@@ -1297,6 +1297,15 @@ void TypeChecker::visit(ReturnStmt& node) {
             auto& expected = impl_->returnTypeStack.back();
             if (annotationElementIsAny(expected))
                 tryExpectedTypeLiteral(node.value.get(), expected);
+            if (expected->kind() == Type::Kind::None_ &&
+                !impl_->returnAnnotatedStack.empty() &&
+                !impl_->returnAnnotatedStack.back()) {
+                error(node.location(),
+                      "returning a value from a function that declares no "
+                      "return type; a def without '->' returns None. Annotate "
+                      "it ('-> " + retType->toString() + "') to return a value");
+                return;
+            }
             if (expected->kind() != Type::Kind::Unknown &&
                 retType->kind() != Type::Kind::Unknown &&
                 // An unbound `T` in a generic TEMPLATE is re-checked with the
@@ -1479,7 +1488,9 @@ void TypeChecker::visit(FunctionDecl& node) {
     std::shared_ptr<Type> retType;
     {
         Impl::ExternSignatureScope externScope(*impl_, node.isExtern);
-        retType = resolveType(node.returnType.get());
+        retType = bodyContainsYield(node.body)
+                      ? resolveType(node.returnType.get())
+                      : resolveReturnType(node.returnType.get());
     }
     if (node.isAsync && node.isClassMethod) {
         error(node.location(),
@@ -1507,6 +1518,7 @@ void TypeChecker::visit(FunctionDecl& node) {
 
     impl_->pushScope();
     impl_->returnTypeStack.push_back(retType);
+    impl_->returnAnnotatedStack.push_back(node.returnType ? 1 : 0);
 
     if (node.isMethod && node.hasImplicitSelf) {
         auto selfType = impl_->lookup("self");
@@ -1530,6 +1542,7 @@ void TypeChecker::visit(FunctionDecl& node) {
     }
 
     impl_->returnTypeStack.pop_back();
+    impl_->returnAnnotatedStack.pop_back();
     impl_->popScope();
     if (pushedTP) { impl_->typeParamScopes.pop_back(); impl_->genericTemplateDepth--; }
 }
@@ -1707,7 +1720,9 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 continue;
             paramTypes.push_back(resolveType(func->params[i].type.get()));
         }
-        auto retType = resolveType(func->returnType.get());
+        auto retType = bodyContainsYield(func->body)
+                           ? resolveType(func->returnType.get())
+                           : resolveReturnType(func->returnType.get());
         auto externalRet = func->isAsync ? std::static_pointer_cast<Type>(
                                               std::make_shared<TaskType>(retType))
                                          : retType;
@@ -1740,7 +1755,8 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
             auto fType = impl_->lookup(func->name);
             if (fType) {
                 if (func->isProperty) {
-                    classType->fields[func->name] = resolveType(func->returnType.get());
+                    classType->fields[func->name] =
+                        resolveReturnType(func->returnType.get());
                 } else {
                     classType->methods[func->name] = fType;
                 }

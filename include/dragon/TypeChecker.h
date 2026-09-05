@@ -355,6 +355,7 @@ public:
 
 private:
     std::shared_ptr<Type> resolveType(TypeExpr* typeExpr);
+    std::shared_ptr<Type> resolveReturnType(TypeExpr* typeExpr);
     std::shared_ptr<Type> resolveTypeUncached(TypeExpr* typeExpr);
 
     void registerContracts(Module& module);

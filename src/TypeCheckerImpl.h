@@ -47,6 +47,7 @@ struct TypeChecker::Impl {
     std::vector<Scope> scopes;
 
     std::vector<std::shared_ptr<Type>> returnTypeStack;
+    std::vector<char> returnAnnotatedStack;
 
     std::unordered_set<const LambdaExpr*> checkedLambdaBodies;
 

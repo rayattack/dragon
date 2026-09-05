@@ -30,16 +30,6 @@ static bool aggregateElemSupported(const std::string& fn,
     return false;
 }
 
-static bool signatureHasUnknownPart(const Type& t) {
-    if (t.kind() != Type::Kind::Function) return false;
-    auto& ft = static_cast<const FunctionType&>(t);
-    if (!ft.returnType || ft.returnType->kind() == Type::Kind::Unknown)
-        return true;
-    for (const auto& p : ft.paramTypes)
-        if (!p || p->kind() == Type::Kind::Unknown) return true;
-    return false;
-}
-
 static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
                                               const char* dunder) {
     for (int guard = 0; cls && guard < 64; ++guard) {
@@ -664,8 +654,6 @@ void TypeChecker::visit(CallExpr& node) {
             markNarrowTarget(*arg, pt);
         if (ak == Type::Kind::Unknown || ak == Type::Kind::Boxed ||
             pk == Type::Kind::Unknown)
-            return;
-        if (signatureHasUnknownPart(*at) || signatureHasUnknownPart(*pt))
             return;
         if (pk == Type::Kind::Boxed) {
             if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
@@ -2183,13 +2171,15 @@ void TypeChecker::visit(LambdaExpr& node) {
         auto pType = resolveType(p.type.get());
         paramTypes.push_back(pType);
     }
-    auto retType = resolveType(node.returnType.get());
+    auto retType = node.body ? resolveType(node.returnType.get())
+                             : resolveReturnType(node.returnType.get());
     node.type = std::make_shared<FunctionType>(paramTypes, retType);
 
     if (!impl_->checkedLambdaBodies.insert(&node).second) return;
 
     impl_->pushScope();
     impl_->returnTypeStack.push_back(retType);
+    impl_->returnAnnotatedStack.push_back(node.returnType ? 1 : 0);
     for (size_t i = 0; i < node.params.size(); ++i) {
         impl_->define(node.params[i].name, paramTypes[i]);
     }
@@ -2208,6 +2198,7 @@ void TypeChecker::visit(LambdaExpr& node) {
         s->accept(*this);
     }
     impl_->returnTypeStack.pop_back();
+    impl_->returnAnnotatedStack.pop_back();
     impl_->popScope();
 }
 

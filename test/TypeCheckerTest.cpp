@@ -1961,3 +1961,11 @@ TEST(TypeCheckerTest, OrderingNeedsAnOrderableType) {
     EXPECT_TRUE(checkOk(code("sort_of_tuple_pairs_accepted")));
     EXPECT_TRUE(checkOk(code("tuple_ordering_operator_accepted")));
 }
+
+TEST(TypeCheckerTest, MissingReturnAnnotationIsNone) {
+    EXPECT_TRUE(checkHasErrors(code("return_value_without_return_annotation_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("return_value_without_annotation_in_method_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("return_value_without_annotation_in_nested_def_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("unannotated_def_passed_to_value_returning_callable_rejected")));
+    EXPECT_TRUE(checkOk(code("missing_return_annotation_is_none_accepted")));
+}

@@ -2813,3 +2813,103 @@ b: tuple[int, tuple[str, float]] = (1, ("x", 3.5))
 print(a < b)
 print(a == b)
 ```
+
+#### :return_value_without_return_annotation_rejected
+
+A def with no `->` returns None, so returning a value from it is a compile error
+that names the annotation to add.
+
+```dr
+def gives_a_number() {
+    return 7
+}
+print(str(gives_a_number()))
+```
+
+#### :return_value_without_annotation_in_method_rejected
+
+```dr
+class Counter {
+    n: int
+    def (n: int) {
+        self.n = n
+    }
+    def value() {
+        return self.n
+    }
+}
+c: Counter = Counter(3)
+print(str(c.value()))
+```
+
+#### :return_value_without_annotation_in_nested_def_rejected
+
+```dr
+def outer() -> int {
+    def inner() {
+        return 5
+    }
+    inner()
+    return 1
+}
+print(str(outer()))
+```
+
+#### :unannotated_def_passed_to_value_returning_callable_rejected
+
+```dr
+def no_ret() {
+    print("x")
+}
+def takes_int_cb(fn: Callable[[], int]) {
+    print(str(fn()))
+}
+takes_int_cb(no_ret)
+```
+
+#### :missing_return_annotation_is_none_accepted
+
+```dr
+def bare_return_is_fine() {
+    print("a")
+    return
+}
+def falls_off_the_end() {
+    print("b")
+}
+class Holder {
+    def announce() {
+        print("c")
+    }
+}
+def counter() {
+    i: int = 0
+    while i < 3 {
+        yield i
+        i = i + 1
+    }
+}
+async def side_effect() {
+    print("io")
+}
+def takes_void_cb(fn: Callable[[], None]) {
+    fn()
+}
+def declared_none() -> None {
+    print("d")
+    return
+}
+bare_return_is_fine()
+falls_off_the_end()
+declared_none()
+h: Holder = Holder()
+h.announce()
+takes_void_cb(falls_off_the_end)
+total: int = 0
+for v in counter() {
+    total = total + v
+}
+print(str(total))
+t: Task[None] = side_effect()
+await t
+```

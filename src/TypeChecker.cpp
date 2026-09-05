@@ -621,7 +621,9 @@ bool TypeChecker::check(Module& module) {
             if (!pt || pt->kind() == Type::Kind::Unknown) clean = false;
             paramTypes.push_back(pt);
         }
-        auto retType = resolveType(fd->returnType.get());
+        auto retType = bodyContainsYield(fd->body)
+                           ? resolveType(fd->returnType.get())
+                           : resolveReturnType(fd->returnType.get());
         if (fd->returnType && (!retType || retType->kind() == Type::Kind::Unknown))
             clean = false;
         if (impl_->diagnostics.size() > diagBefore) {
@@ -853,8 +855,7 @@ void TypeChecker::registerContracts(Module& module) {
             std::vector<std::shared_ptr<Type>> paramTypes;
             for (auto& p : m->params)
                 paramTypes.push_back(resolveType(p.type.get()));
-            auto ret = m->returnType ? resolveType(m->returnType.get())
-                                     : impl_->noneType;
+            auto ret = resolveReturnType(m->returnType.get());
             auto ft = std::make_shared<FunctionType>(paramTypes, ret);
             fillFuncMeta(*ft, m->params, true,
                          true, false);
@@ -1029,6 +1030,11 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
     auto resolved = resolveTypeUncached(typeExpr);
     typeExpr->resolved = resolved;
     return resolved;
+}
+
+std::shared_ptr<Type> TypeChecker::resolveReturnType(TypeExpr* typeExpr) {
+    if (!typeExpr) return impl_->noneType;
+    return resolveType(typeExpr);
 }
 
 std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
