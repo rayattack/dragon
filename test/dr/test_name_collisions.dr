@@ -1,6 +1,7 @@
 from unittest import TestCase, main
 from drs import Schema
 from json import loads, loads_obj, Data, as_int
+import json
 from io import make, open
 from writer_collision_mod import make_w, Writer
 from tempfile import mkdtemp
@@ -239,6 +240,18 @@ class AnnotKindTests(TestCase) {
     corruption. The bug only surfaced under whole-module compilation where the
     name collision existed, so this test recreates the collision directly.
     """
+
+    def test_qualified_alias_names_the_same_domain() -> None {
+        s: dict[str, json.Data] = {}
+        s["r"] = ["a", "b"]
+        self.assertEqual(json.dumps(s), "{\"r\": [\"a\", \"b\"]}")
+        const one: json.Data = s["r"]
+        const l: list[json.Data] = one
+        self.assertEqual(len(l), 2)
+        const bare: Data = s["r"]
+        const bl: list[Data] = bare
+        self.assertEqual(len(bl), 2)
+    }
 
     def test_str_annotation_survives_rhs_class_bleed() -> None {
         self.assertEqual(uses_r_as_class(), 9)

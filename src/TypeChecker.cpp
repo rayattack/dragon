@@ -1043,43 +1043,41 @@ std::shared_ptr<Type> TypeChecker::resolveReturnType(TypeExpr* typeExpr) {
     return resolveType(typeExpr);
 }
 
+std::shared_ptr<Type> TypeChecker::resolveQualifiedTypeName(NamedTypeExpr& named) {
+    auto dot = named.name.find('.');
+    std::string head = named.name.substr(0, dot);
+    std::string tail = named.name.substr(dot + 1);
+    auto unknown = [&]() {
+        error(named.location(), "unknown type '" + named.name + "'");
+        return impl_->unknownType;
+    };
+    auto looked = impl_->lookup(head);
+    if (!looked || looked->kind() != Type::Kind::Module) return unknown();
+    auto current = std::static_pointer_cast<ModuleType>(looked);
+    for (auto nextDot = tail.find('.'); nextDot != std::string::npos;
+         nextDot = tail.find('.')) {
+        auto subIt = current->submodules.find(tail.substr(0, nextDot));
+        if (subIt == current->submodules.end()) return unknown();
+        current = subIt->second;
+        tail = tail.substr(nextDot + 1);
+    }
+    auto aliasIt = current->typeExports.find(tail);
+    if (aliasIt != current->typeExports.end() && aliasIt->second)
+        return aliasIt->second;
+    auto expIt = current->exports.find(tail);
+    if (expIt == current->exports.end() ||
+        expIt->second->kind() != Type::Kind::Class)
+        return unknown();
+    return std::make_shared<InstanceType>(
+        std::static_pointer_cast<ClassType>(expIt->second));
+}
+
 std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
     if (!typeExpr) return impl_->unknownType;
 
     if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
-        auto dot = named->name.find('.');
-        if (dot != std::string::npos) {
-            std::string head = named->name.substr(0, dot);
-            std::string tail = named->name.substr(dot + 1);
-            auto looked = impl_->lookup(head);
-            if (!looked || looked->kind() != Type::Kind::Module) {
-                error(named->location(), "unknown type '" + named->name + "'");
-                return impl_->unknownType;
-            }
-            auto current = std::static_pointer_cast<ModuleType>(looked);
-            while (true) {
-                auto nextDot = tail.find('.');
-                std::string seg = (nextDot == std::string::npos) ? tail : tail.substr(0, nextDot);
-                if (nextDot == std::string::npos) {
-                    auto expIt = current->exports.find(seg);
-                    if (expIt == current->exports.end() ||
-                        expIt->second->kind() != Type::Kind::Class) {
-                        error(named->location(),
-                              "unknown type '" + named->name + "'");
-                        return impl_->unknownType;
-                    }
-                    auto cls = std::static_pointer_cast<ClassType>(expIt->second);
-                    return std::make_shared<InstanceType>(cls);
-                }
-                auto subIt = current->submodules.find(seg);
-                if (subIt == current->submodules.end()) {
-                    error(named->location(), "unknown type '" + named->name + "'");
-                    return impl_->unknownType;
-                }
-                current = subIt->second;
-                tail = tail.substr(nextDot + 1);
-            }
-        }
+        if (named->name.find('.') != std::string::npos)
+            return resolveQualifiedTypeName(*named);
         if (auto tv = lookupTypeParam(named->name)) return tv;
         // The dynamic tier is retired: a value domain is declared, never
         // hand-waved. The 16-byte box lives on as a closed union.

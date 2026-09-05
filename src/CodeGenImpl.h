@@ -1912,6 +1912,11 @@ struct CodeGen::Impl {
             auto* named = dynamic_cast<NamedTypeExpr*>(t);
             if (!named) return t;
             auto it = typeAliasDefs.find(named->name);
+            if (it == typeAliasDefs.end()) {
+                auto dot = named->name.rfind('.');
+                if (dot == std::string::npos) return t;
+                it = typeAliasDefs.find(named->name.substr(dot + 1));
+            }
             if (it == typeAliasDefs.end()) return t;
             t = it->second;
         }

@@ -409,10 +409,14 @@ private:
     void bindCompLoopVars(const std::vector<std::string>& names,
                           const std::shared_ptr<Type>& iterType);
     void checkCompExtraClauses(std::vector<CompClause>& clauses);
+    std::shared_ptr<Type> resolveQualifiedTypeName(NamedTypeExpr& named);
     void initBuiltinTypes();
     void reportNoConstructorCall(CallExpr& node, const ClassType& ct);
     void checkSubscriptSlotStore(AssignStmt& node,
                                  const std::shared_ptr<Type>& slot);
+    void checkUnionSlotStore(Expr* value, const std::shared_ptr<Type>& slot,
+                             const SourceLocation& loc,
+                             const std::string& what);
     void error(const SourceLocation& loc, const std::string& message);
     void warning(const SourceLocation& loc, const std::string& message);
 
