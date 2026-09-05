@@ -11,9 +11,8 @@ that every value is JSON-encoded, because tab titles and URLs are attacker
 controlled and a raw concatenation there is script execution with the chrome's
 privileges.
 
-Every Signal here is a module global. A Signal held in a LOCAL binding and read
-by a bound closure segfaults the process when that scope exits, so tests must not
-depend on the broken shape; the repro is written up in Aember's REACTIVITY.md.
+A Signal is as valid in a local binding as at module scope: the closure that
+binds it keeps it alive after the scope ends, which LocalSignalTests pins.
 """
 
 import ui
@@ -90,7 +89,26 @@ hostile_name_node: int = bind_attr(HOSTILE_ATTR_NAME, render_attr_name_value)
 
 handlers: HTML = template[HTML] {<button onclick="!{note_click}">go</button>}
 
+auto_source: Signal[int] = Signal(0)
+auto_view: HTML = template[HTML] {<p>!{auto_source()}</p>}
+
 ui.App.timeout(0)
+
+
+def bound_node_id(markup: str) -> int {
+    return int(markup.split("data-dr=\"")[1].split("\"")[0])
+}
+
+
+def bind_local_signals() -> int {
+    counter: Signal[int] = Signal(0)
+    label: Signal[str] = Signal("a")
+    first: int = bind_text(lambda () -> str { return str(counter()) })
+    second: int = bind_text(lambda () -> str { return label() })
+    counter.set(1)
+    label.set("b")
+    return first
+}
 
 
 def emitted_js() -> list[str] {
@@ -270,5 +288,39 @@ class HandlerExtractionTests(TestCase) {
 }
 
 
+class AutoBindTests(TestCase) {
+    def test_interpolated_signal_emits_a_bound_span() {
+        markup: str = auto_view.to_str()
+        self.assertIn("<span data-dr=\"", markup)
+        self.assertIn("\">0</span>", markup)
+    }
+
+    def test_signal_set_patches_the_auto_bound_node() {
+        probe_js_reset()
+        auto_source.set(7)
+        js: list[str] = emitted_js()
+        self.assertEqual(len(js), 1)
+        self.assertEqual(js[0],
+            patch_js(bound_node_id(auto_view.to_str()),
+                     "'text',id:$id,value:\"7\""))
+    }
+}
+
+
+class LocalSignalTests(TestCase) {
+    def test_local_signals_keep_patching_after_their_scope_ends() {
+        probe_js_reset()
+        first: int = bind_local_signals()
+        js: list[str] = emitted_js()
+        self.assertEqual(len(js), 4)
+        self.assertEqual(js[0], patch_js(first, "'text',id:$id,value:\"0\""))
+        self.assertEqual(js[1], patch_js(first + 1, "'text',id:$id,value:\"a\""))
+        self.assertEqual(js[2], patch_js(first, "'text',id:$id,value:\"1\""))
+        self.assertEqual(js[3], patch_js(first + 1, "'text',id:$id,value:\"b\""))
+    }
+}
+
+
 main([NodeIdTests(), BindTextTests(), BindAttrTests(), BindHtmlTests(),
-      BindShowTests(), SubscriptionTests(), HandlerExtractionTests()])
+      BindShowTests(), SubscriptionTests(), HandlerExtractionTests(),
+      AutoBindTests(), LocalSignalTests()])

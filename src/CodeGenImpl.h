@@ -604,6 +604,35 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, NestedAliasInfo> nestedFunctionAliases;
 
     llvm::FunctionType* lastClosureCallableType = nullptr;
+    llvm::Value* lastClosureCallableValue = nullptr;
+
+    llvm::FunctionType* takeCallableTypeFor(llvm::Value* boundValue) {
+        llvm::FunctionType* recorded = lastClosureCallableType;
+        llvm::Value* recordedFor = lastClosureCallableValue;
+        lastClosureCallableType = nullptr;
+        lastClosureCallableValue = nullptr;
+        return recordedFor == boundValue ? recorded : nullptr;
+    }
+
+    void recordBoundCallableType(const std::string& name, llvm::Value* boundValue,
+                                 Expr* rhs, llvm::AllocaInst* slot) {
+        if (auto* boundClosureType = takeCallableTypeFor(boundValue)) {
+            callableTypes[name] = boundClosureType;
+            setVar(name, slot, VarKind::Closure);
+            return;
+        }
+        if (auto* lambdaFn = llvm::dyn_cast<llvm::Function>(boundValue)) {
+            callableTypes[name] = lambdaFn->getFunctionType();
+            return;
+        }
+        auto* rhsName = dynamic_cast<NameExpr*>(rhs);
+        if (!rhsName) return;
+        if (auto* refFunc = module->getFunction(rhsName->name))
+            callableTypes[name] = refFunc->getFunctionType();
+        auto ctIt = callableTypes.find(rhsName->name);
+        if (ctIt != callableTypes.end())
+            callableTypes[name] = ctIt->second;
+    }
 
     bool lastValueIsType = false;
 

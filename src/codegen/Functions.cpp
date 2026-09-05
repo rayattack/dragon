@@ -443,9 +443,11 @@ void CodeGen::visit(LambdaExpr& node) {
             materializeClosureEnv(lambdaName, lambdaFunc, envStructType, captures);
         impl_->lastClosureCallableType = llvm::FunctionType::get(
             retType, userParamTypes, false);
+        impl_->lastClosureCallableValue = impl_->lastValue;
     } else {
         impl_->lastValue = lambdaFunc;
         impl_->lastClosureCallableType = nullptr;
+        impl_->lastClosureCallableValue = nullptr;
     }
 }
 

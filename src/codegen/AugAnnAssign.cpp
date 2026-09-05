@@ -1167,21 +1167,8 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 if (ownedBoxUnboxed && rhsBorrowed)
                     impl_->emitUnionDecref(ownedBoxPayload, ownedBoxTag);
 
-                if (impl_->lastClosureCallableType) {
-                    impl_->callableTypes[name->name] = impl_->lastClosureCallableType;
-                    impl_->setVar(name->name, alloca, Impl::VarKind::Closure);
-                    impl_->lastClosureCallableType = nullptr;
-                }
-                else if (auto* lambdaFn = llvm::dyn_cast<llvm::Function>(val)) {
-                    impl_->callableTypes[name->name] = lambdaFn->getFunctionType();
-                } else if (auto* rhsNameE = dynamic_cast<NameExpr*>(node.value.get())) {
-                    auto* refFunc = impl_->module->getFunction(rhsNameE->name);
-                    if (refFunc)
-                        impl_->callableTypes[name->name] = refFunc->getFunctionType();
-                    auto ctIt = impl_->callableTypes.find(rhsNameE->name);
-                    if (ctIt != impl_->callableTypes.end())
-                        impl_->callableTypes[name->name] = ctIt->second;
-                }
+                impl_->recordBoundCallableType(name->name, val,
+                                               node.value.get(), alloca);
 
                 if (!typedDictClassName.empty()) {
                     impl_->varTypedDictClass[name->name] = typedDictClassName;

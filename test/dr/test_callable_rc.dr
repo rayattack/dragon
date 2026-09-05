@@ -155,6 +155,29 @@ def make_adder(n: int) -> Callable[[int], int] {
 }
 def apply1(f: Callable[[int], int], v: int) -> int { return f(v) }
 
+class Cell {
+    v: str
+    def(initial: str) { self.v = initial }
+    def read() -> str { return self.v }
+    def write(next: str) -> None { self.v = next }
+}
+
+_bound_renders: list[Callable[[], str]] = []
+
+def bind_render(render: Callable[[], str]) -> int {
+    node: int = len(_bound_renders)
+    _bound_renders.append(render)
+    return node
+}
+
+def bind_render_label(render: Callable[[], str]) -> str {
+    return str(bind_render(render))
+}
+
+def bind_render_slot(render: Callable[[], str]) -> dict[str, int] {
+    return {"node": bind_render(render)}
+}
+
 class ClosureEscapeTests(TestCase) {
     def test_escaping_int_capture() {
         const g: Callable[[], int] = make_int_closure()
@@ -187,6 +210,35 @@ class ClosureEscapeTests(TestCase) {
     def test_raising_capturing_lambda_in_assertRaises() {
         msg: str = "notanint"
         self.assertRaises(ValueError, lambda () -> None { n: int = int(msg) })
+    }
+
+    def test_int_binding_of_an_inline_lambda_argument() {
+        seed: int = 3
+        node: int = bind_render(lambda () -> str { return str(seed) })
+        self.assertEqual(_bound_renders[node](), "3")
+    }
+
+    def test_str_binding_of_an_inline_lambda_argument() {
+        seed: int = 4
+        label: str = bind_render_label(lambda () -> str { return str(seed) })
+        self.assertEqual(_bound_renders[int(label)](), "4")
+    }
+
+    def test_dict_binding_of_an_inline_lambda_argument() {
+        seed: int = 5
+        slot: dict[str, int] = bind_render_slot(lambda () -> str { return str(seed) })
+        self.assertEqual(_bound_renders[slot["node"]](), "5")
+    }
+
+    def test_two_binders_keep_the_locals_they_captured() {
+        first: Cell = Cell("a")
+        second: Cell = Cell("b")
+        left: int = bind_render(lambda () -> str { return first.read() })
+        right: int = bind_render(lambda () -> str { return second.read() })
+        first.write("c")
+        second.write("d")
+        self.assertEqual(_bound_renders[left](), "c")
+        self.assertEqual(_bound_renders[right](), "d")
     }
 }
 

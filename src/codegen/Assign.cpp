@@ -977,10 +977,9 @@ void CodeGen::emitNewModuleGlobalStore(NameExpr& name, AssignStmt& node,
     impl_->moduleGlobalKinds[gKey] = vk;
     impl_->storeWithRCOverwrite(
         gv, gv->getValueType(), val, Impl::VarKind::Other, vk, rhsBorrowed, name.name);
-    if (impl_->lastClosureCallableType) {
-        impl_->callableTypes[name.name] = impl_->lastClosureCallableType;
+    if (auto* boundClosureType = impl_->takeCallableTypeFor(val)) {
+        impl_->callableTypes[name.name] = boundClosureType;
         impl_->moduleGlobalKinds[gKey] = Impl::VarKind::Closure;
-        impl_->lastClosureCallableType = nullptr;
     }
     if (impl_->lastValueIsType) {
         impl_->moduleGlobalKinds[gKey] = Impl::VarKind::Type;
@@ -1138,10 +1137,9 @@ void CodeGen::emitLocalSlotStore(NameExpr& name, AssignStmt& node,
     if (ownedBoxUnboxed && rhsBorrowed)
         impl_->emitUnionDecref(ownedBoxPayload, ownedBoxTag);
 
-    if (impl_->lastClosureCallableType) {
-        impl_->callableTypes[name.name] = impl_->lastClosureCallableType;
+    if (auto* boundClosureType = impl_->takeCallableTypeFor(val)) {
+        impl_->callableTypes[name.name] = boundClosureType;
         impl_->setVar(name.name, alloca, Impl::VarKind::Closure);
-        impl_->lastClosureCallableType = nullptr;
     }
     else if (impl_->lastValueIsType) {
         impl_->setVar(name.name, alloca, Impl::VarKind::Type);

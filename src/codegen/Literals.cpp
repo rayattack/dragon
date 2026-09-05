@@ -173,6 +173,10 @@ void CodeGen::visit(StringLiteral& node) {
     impl_->lastValue = impl_->emitStringLiteralBytes(processed);
 }
 
+static constexpr char kSignalTemplateKey[] = "ui.Signal";
+static constexpr char kSignalCallDunder[] = "__call__";
+static constexpr char kSignalGetMethod[] = "get";
+
 static std::string spliceSite(const std::string& exprText) {
     return "template splice `!{" + exprText + "}`";
 }
@@ -221,19 +225,13 @@ void CodeGen::visit(TemplateExpr& node) {
     };
 
     auto isSignalReceiver = [&](Expr* recv) -> bool {
-        std::string cls = impl_->resolveExprClassName(recv);
-        if (cls.empty()) {
-            if (auto* n = dynamic_cast<NameExpr*>(recv)) {
-                auto it = impl_->varClassNames.find(n->name);
-                if (it != impl_->varClassNames.end()) cls = it->second;
-            }
-        }
-        if (cls.empty()) return false;
-        std::string base = cls;
-        size_t br = base.find('[');
-        if (br != std::string::npos) base = base.substr(0, br);
-        if (base != "Signal") return false;
-        return impl_->hasDunder(cls, "__call__") || impl_->hasDunder(cls, "get");
+        if (!recv || !recv->type) return false;
+        auto* instance = dynamic_cast<InstanceType*>(recv->type.get());
+        if (!instance || !instance->classType) return false;
+        const ClassType& signalClass = *instance->classType;
+        if (signalClass.genericOrigin != kSignalTemplateKey) return false;
+        return impl_->hasDunder(signalClass.name, kSignalCallDunder) ||
+               impl_->hasDunder(signalClass.name, kSignalGetMethod);
     };
 
     std::function<void(Expr*, bool&, bool&)> analyzeReactive =
