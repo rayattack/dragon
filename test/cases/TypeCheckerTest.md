@@ -3799,3 +3799,19 @@ d: dict[bytes, int] = {}
 e: dict[tuple[int, str], int] = {}
 print(len(a) + len(b) + len(c) + len(d) + len(e))
 ```
+
+#### :container_literal_argument_reports_its_own_location
+
+A container literal passed as an argument carries its own source location, so
+the diagnostic points at the literal rather than at 0:0.
+
+```dr
+class Tag {
+    label: str
+    def (label: str) {
+        self.label = label
+    }
+}
+t: Tag = Tag(label=["x"])
+print(t.label)
+```

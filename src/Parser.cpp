@@ -1193,8 +1193,11 @@ std::unique_ptr<Expr> Parser::primary() {
     }
 
     if (match(TokenType::LEFT_PAREN)) {
+        SourceLocation parenLoc = previous().location();
         if (match(TokenType::RIGHT_PAREN)) {
-            return std::make_unique<TupleExpr>();
+            auto empty = std::make_unique<TupleExpr>();
+            empty->setLocation(parenLoc);
+            return empty;
         }
         auto expr = expression();
         if (check(TokenType::FOR)) {
@@ -1235,6 +1238,7 @@ std::unique_ptr<Expr> Parser::primary() {
         }
         if (match(TokenType::COMMA)) {
             auto tup = std::make_unique<TupleExpr>();
+            tup->setLocation(parenLoc);
             if (expr) tup->elements.push_back(std::move(expr));
             while (!check(TokenType::RIGHT_PAREN) && !isAtEnd()) {
                 tup->elements.push_back(expression());
@@ -1248,11 +1252,19 @@ std::unique_ptr<Expr> Parser::primary() {
     }
 
     if (match(TokenType::LEFT_BRACKET)) {
-        return parseList();
+        SourceLocation openLoc = previous().location();
+        auto listExpr = parseList();
+        if (listExpr && listExpr->location().line == 0)
+            listExpr->setLocation(openLoc);
+        return listExpr;
     }
 
     if (match(TokenType::LEFT_BRACE)) {
-        return parseDict();
+        SourceLocation openLoc = previous().location();
+        auto braceExpr = parseDict();
+        if (braceExpr && braceExpr->location().line == 0)
+            braceExpr->setLocation(openLoc);
+        return braceExpr;
     }
 
     if (match(TokenType::LAMBDA)) {

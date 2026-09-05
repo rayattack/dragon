@@ -2177,3 +2177,22 @@ TEST(TypeCheckerTest, DictKeyMustBeAClassifiedKind) {
     EXPECT_TRUE(checkHasErrors(code("bool_dict_key_rejected")));
     EXPECT_TRUE(checkOk(code("classified_dict_keys_accepted")));
 }
+
+TEST(TypeCheckerTest, ContainerLiteralArgumentReportsItsOwnLocation) {
+    auto source = code("container_literal_argument_reports_its_own_location");
+    auto module = parse(source);
+    ASSERT_TRUE(module != nullptr);
+    Sema sema;
+    sema.analyze(*module);
+    TypeChecker tc;
+    tc.check(*module);
+    ASSERT_TRUE(tc.hasErrors());
+    bool located = false;
+    for (const auto& d : tc.diagnostics()) {
+        if (d.message.find("argument 'label'") == std::string::npos) continue;
+        EXPECT_GT(d.location.line, 0u);
+        EXPECT_GT(d.location.column, 0u);
+        located = true;
+    }
+    EXPECT_TRUE(located);
+}
