@@ -12,9 +12,11 @@ in `stdlib/*.dr` or the docs site); the stdlib types that are part of how the
 language is used (Task, Lock, TestCase, HTML, SQL) appear here only as far as the
 language story needs them.
 
-This file describes the language as designed. Its claims were checked by
-compiling and running probe programs against the compiler (2026-08-27), so the
-examples are real code, not aspiration.
+This file describes the language as designed. Every section was re-verified on
+2026-09-05 by compiling and running probe programs against the compiler at
+commit 7a2b935 plus the fixes landed that day, so the examples are real code,
+not aspiration. When this text and the compiler disagree, the compiler wins and
+the text is wrong; report it.
 
 ## 1. Design rules (why the language is shaped this way)
 
@@ -22,13 +24,20 @@ examples are real code, not aspiration.
    sacred. Values whose type is known flow AT that type, in registers, never boxed.
 2. **No workarounds; fix at the root.** A silent fallback is a silent lie. You
    should know it is broken when you compile.
-3. **Types must be honest.** `Any` is a last resort, never a fallback. Ambiguity
-   is a compile error to annotate, not a box the compiler picks for you.
+3. **Types must be honest.** There is no dynamic tier: `Any` is not a type and
+   the compiler rejects it wherever it appears ("'Any' is not a type: Dragon has
+   no dynamic tier"). Ambiguity is a compile error to annotate, not a box the
+   compiler picks for you. When the domain really is open, declare it: a union
+   alias (`type Shape = int | str`), `from json import Data` for JSON-shaped
+   data, or a generic `[T]` when the caller picks the type.
 
 Dragon borrows Python's surface only where it compiles cleanly to fast static
-code. It rejects the dynamic crutches outright: `eval`/`exec`, `getattr`/`setattr`/
-`hasattr`, `__dict__`, monkey-patching, metaclasses, runtime module loading,
-untyped `*args`/`**kwargs`. These are refused by design, not gaps to be filled.
+code. It rejects the dynamic crutches outright: `eval`/`exec`, `setattr`,
+`__dict__`, monkey-patching, metaclasses, runtime module loading, untyped
+`*args`/`**kwargs`. These are refused by design, not gaps to be filled.
+`getattr(obj, "field")` and `hasattr(obj, "field")` do exist, but they only read
+fields declared on the class; they cannot add one, and a missing name is an
+`AttributeError` at runtime, not a new attribute.
 
 ## 2. Toolchain: the `dragon` CLI
 
@@ -43,10 +52,16 @@ dragon migrate <file.py>            # emit a typed .dr draft next to the input
 dragon ffi sync <file> [--check]    # (re)generate foreign stubs for process externs
 ```
 
-Egg / package verbs (D022): `dragon init` scaffolds a `dragon.drs` manifest in the
-current directory (works today); `grab <name>`, `sync`, `drop <name>` are wired as
-verbs but marked in progress. Until the egg manager is complete, you vendor
-dependencies: copy the `.dr` files into your tree or point `-I` at them.
+Egg / package verbs (D022) run today; they are a separate `dragon-egg` binary the
+driver shells out to. `dragon init` scaffolds a `dragon.drs` manifest;
+`grab <name>[@version] | --path <dir> | --git <url> [--name <n>]` adds a
+dependency and installs it under `.drx/`; `sync` reinstalls every egg in the
+manifest; `drop <name>` removes one. `push` publishes (needs
+`DRAGON_REGISTRY_TOKEN`), `find` and `scan` query the registry over the network.
+`bump`, `list`, `info`, `hash`, `yank` and `wipe` are accepted by the `dragon`
+front end but rejected by the egg tool ("unknown egg command"). Vendoring by hand
+(copy sources, or point `-I` at them) still works and is the fallback with no
+network.
 
 A `<dir>` argument to run/build resolves the `entry` field of that directory's
 `dragon.drs`.
@@ -60,15 +75,21 @@ Flags:
 | `--release` | optimize aggressively (use for anything you measure or ship) |
 | `-g` | debug info |
 | `-f` | force Python-surface parsing (for `.py` content) |
-| `-I <dir>` | add a module search path (repeatable) |
+| `-I <dir>` / `-I<dir>` | add a module search path (repeatable; attached and separated spellings are the same flag) |
 | `--site-packages` | search Python site-packages for typed `.py` modules (last resort) |
 | `--gc=rc` | refcounting + cycle collector (the default) |
 | `--gc=none` | no refcount emission; OS reclaims at exit. Short-lived programs only, never services |
 | `-l<name>` / `-L<dir>` | link `lib<name>` / add a library search dir (FFI) |
 | `--cc-source <file>` | compile and link a C/C++ shim (repeatable; a `.cpp` switches the link driver to `c++`) |
-| `--dump-ast` / `--dump-tokens` | print the parser/lexer output and exit |
+| `--dump-ast` | print the AST, then carry on compiling and running as normal |
+| `--dump-tokens` | print the token stream; honoured by `check` only, silently ignored by `run`/`build` |
+| `--check-overflow` | trap on signed integer overflow instead of wrapping |
 | `--backend <llvm>` | accepted for compatibility and ignored (LLVM is the only backend) |
 | `-v, --verbose` | verbose output |
+
+An unrecognized dash option is an error, not a shrug: `dragon check x.dr --nope`
+prints `Unknown option: --nope` and stops. Under `dragon run`, arguments for your
+program go after `--`; a stray flag before it is the same error and says so.
 
 Environment: `DRAGON_STDLIB_PATH` overrides the bundled stdlib root (for working
 on the stdlib itself).
@@ -77,8 +98,10 @@ The REPL accepts multi-line cells (Alt+Enter or Esc,Enter runs a cell), echoes
 the value of a bare expression, and has `:help`, `:reset`, `:quit`/`:q`. It is
 itself written in Dragon (`tools/repl/*.dr`) and JIT-compiles cells.
 
-`dragon migrate` output is a DRAFT: untyped parameters come out as `Any` and the
-inferred return types can be wrong; you are expected to fix the annotations.
+`dragon migrate` output is a DRAFT that does not necessarily compile: an untyped
+parameter comes out annotated `Any`, which the compiler rejects, and an inferred
+return type can be wrong (a body returning `a + b` can come back `-> None`). Read
+it as a starting skeleton and write the real annotations yourself.
 
 ### Compilation model
 
@@ -98,8 +121,10 @@ concrete types in the binary).
 
 - The file you hand to `dragon run`/`build` is the program; its top-level
   statements execute top to bottom. There is no `main`, no entry function, and no
-  `__name__` (writing `__name__` is a compile error). A function named `main` is
-  ordinary and runs only if called.
+  `__name__`: the name simply does not exist, so `if __name__ == "__main__"` fails
+  with `Undefined variable: __name__`. (Nothing stops you declaring a variable of
+  that name yourself; it is then an ordinary variable and means nothing.) A
+  function named `main` is ordinary and runs only if called.
 - Every other file is an import. An imported module contributes its definitions
   (functions, classes, consts, module globals with their initializers). The
   initializers run once at program start, in dependency order, BEFORE the entry
@@ -147,6 +172,57 @@ total = total + 5   # reassigns; bare = requires the name to already exist
   (Inside an expression, `:=` is the usual walrus: `while (w := f()) != "stop"`.)
 - Tuple unpacking is an implicit typed declaration: `lo, hi = minmax(xs)`.
 
+### Names you cannot use
+
+- A reserved word is not a name. `from: str = "a"`, `class: int = 1`,
+  `del = 2`, `def: int = 1` and `x.from` are each ONE diagnostic at the word
+  itself ("'from' is a reserved word and cannot be used as a name; choose a
+  different name"), not a cascade about the construct that word usually starts.
+  The parser steps over the line and keeps going, so a real error further down
+  is still reported.
+- `none`/`None` and `true`/`false`/`True`/`False` are literals, so they are
+  reserved too: `none: int = 1` is the same reserved-word error. Every read of
+  `none` is the None literal, never a variable.
+- `match`, `case` and `type` are soft keywords, not reserved words. `case` works
+  as an ordinary name anywhere. `match` and `type` work as parameter and field
+  names (`def f(match: int, type: int)` compiles), but a statement that STARTS
+  with either is read as a match statement or a type alias, so
+  `match: int = 1` and `type: int = 2` do not compile. Pick another name at
+  statement level.
+
+### A bare dict key is text, and must not be ambiguous
+
+In `.dr` source a bare identifier used as a dict key is its own TEXT, not the
+value of a variable with that name. Because both readings are plausible, the
+compiler refuses the literal whenever a binding of that name is visible:
+
+```dragon
+const EVENT: str = "view.load"
+
+counts: dict[str, int] = { EVENT: 1 }
+# COMPILE ERROR: dict key 'EVENT' is ambiguous: 'EVENT' is also a name in scope.
+# Write "EVENT" for the text key, or (EVENT) for its value
+```
+
+Both spellings are named by the message, so say which you meant:
+
+```dragon
+const EVENT: str = "view.load"
+
+text_key: dict[str, int] = { "EVENT": 1 }     # keyed on the five letters
+value_key: dict[str, int] = { (EVENT): 1 }    # keyed on "view.load"
+free_key: dict[str, int] = { view_load: 1 }   # no such binding: unambiguous text
+print(len(text_key) + len(value_key) + len(free_key))
+```
+
+The rule covers nested literals, TypedDict literals and default arguments, and
+any binding kind (const, variable, parameter, loop variable, imported name,
+function, class). A key spelled like a builtin (`{ id: 1, type: 2 }`) stays
+silent, and so does a key spelled like a class field read inside a method: a
+bare field name is not reachable there, so there is nothing to confuse it with.
+In a `.py` file `{ EVENT: 1 }` already means the value of `EVENT`, as in Python,
+and nothing changes.
+
 ### `const` and `static`
 
 ```dragon
@@ -164,6 +240,8 @@ combines on class members for class constants.
 The compiler performs flow-sensitive definite-assignment analysis:
 
 ```dragon
+cond: bool = true
+
 result: int
 if cond { result = 1 } else { result = 2 }
 print(result)                   # ok: assigned on every path
@@ -202,18 +280,21 @@ assigned on every path through the constructor, or the class does not compile
 ```dragon
 count:   int              = 42        # 64-bit signed; WRAPS on overflow, no OverflowError
 ratio:   float            = 3.14      # IEEE 754 double
-ok:      bool             = True      # its own type, not an int alias
+ok:      bool             = True      # distinct type; bool widens to int, int never narrows to bool
 label:   str              = "Dragon"  # immutable Unicode, len() counts code points
 data:    bytes            = b"\x00"   # immutable byte sequence; b[i] is an int 0-255
 ints:    list[int]        = [1, 2, 3]
 prices:  dict[str, float] = {"pen": 1.5}
 pair:    tuple[int, str]  = (1, "x")
 tags:    set[str]         = {"a", "b"}
-maybe:   int | None       = none
+maybe:   int | None       = none      # `none` and `None` are both accepted spellings
 either:  int | str        = 42
-anything: Any             = 42
 f:       Callable[[int], int]         # a function value; [] arg list, then return
 ```
+
+There is no `Any`. Writing it is a compile error that names the alternatives: a
+declared union (`type Shape = int | str`), `from json import Data` for
+JSON-shaped data, or a generic `[T]` when the caller picks the type.
 
 Type conversions are explicit: `int(x)`, `float(x)`, `str(x)`, `bool(x)`.
 `int(s)`/`float(s)` raise `ValueError` on a bad string. `/` on ints yields
@@ -225,15 +306,24 @@ Type aliases: `type UserId = int` is a zero-cost compile-time synonym.
 ### Containers are monomorphized (layout is part of the type)
 
 `list[int]` is a flat `int64[]`; `list[float]` a `double[]`; `list[str]` an array
-of refcounted pointers; `list[Any]` an array of 16-byte boxes. These are different
-memory layouts, so a NAMED concrete list never converts to `list[Any]` (or back)
-by annotation; the compiler refuses the assignment and the call-site. Cross the
-boundary with a fresh literal (built in the right layout from birth) or an
-element-wise copy. A bare `Any` parameter, by contrast, accepts ANY list and
-dispatches per element at runtime; that is the right shape for "takes any list".
+of refcounted pointers; `list[Data]` an array of 16-byte boxes. These are different
+memory layouts, so a NAMED concrete list never converts to `list[Data]` (or back)
+by annotation; the compiler refuses the assignment and the call site. Cross the
+boundary with a fresh literal or an element-wise copy.
+
+A literal is built at the layout of the slot it is stored into, so a boxed slot
+takes a literal directly but refuses a pre-built list of the other layout:
+
+```dragon
+from json import Data
+d: dict[str, Data] = {"nums": [1, 2]}   # OK: the literal is built boxed from birth
+ints: list[int] = [1, 2]
+# bad: dict[str, Data] = {"nums": ints}  # rejected: list[int] is not list[Data]
+print(str(len(d)) + str(len(ints)))
+```
 
 Empty/mixed literals cannot infer an element type: `ys: list[int] = []` (annotate)
-or `zs: list[Any] = [1, "a"]` (opt into the box explicitly).
+or `zs: list[Data] = [1, "a"]` (opt into the box explicitly).
 
 Dicts are monomorphic in their key type: `dict[str, V]` and `dict[int, V]` are
 distinct; one dict cannot hold both `1` and `"1"` as keys. Integer keys hash as
@@ -261,10 +351,14 @@ def describe(x: int | str) -> str {
 - `match` narrows the same way, and DOES narrow the subject inside the case body:
 
 ```dragon
-match v {                       # v: int | str
-    case int() { return f"num {v + 1}" }
-    case str() { return f"text {v.upper()}" }
+def show(v: int | str) -> str {
+    match v {
+        case int() { return f"num {v + 1}" }
+        case str() { return f"text {v.upper()}" }
+    }
+    return "?"
 }
+print(show(1) + show("a"))
 ```
 
 - `isinstance` is the narrowing tool: it narrows union-typed and Any-typed
@@ -273,15 +367,21 @@ match v {                       # v: int | str
   not to interrogate values whose type is already statically known (the
   compiler already knows; there is nothing to ask).
 
-### `Any`: the bounded dynamic tier
+### `Data`: the bounded dynamic tier
 
-`Any` holds anything (16-byte box), reassignable across types. To do anything
-with it you must narrow via `isinstance` (or `match`). The headline use is
-`dict[str, Any]` for genuinely heterogeneous data (JSON-shaped). Never widen a
-knowable type to `Any`: a spurious `Any` boxes, allocates, and hides bugs; in
-this codebase it is treated as a defect. There is no `type(x)`-returning-class,
-no `getattr`, no attribute discovery; `type(x)` returns the type NAME as a `str`
+There is no `Any`. For genuinely heterogeneous, JSON-shaped data use
+`from json import Data`: a 16-byte box, reassignable across types, narrowed with
+`isinstance` (or `match`) before use. `dict[str, Data]` is the headline shape.
+Never widen a knowable type to a box: it allocates and hides bugs; in this
+codebase it is treated as a defect. There is no `type(x)`-returning-class, no
+`getattr`, no attribute discovery; `type(x)` returns the type NAME as a `str`
 (e.g. `"int"`).
+
+```dragon
+from json import Data
+v: Data = 42
+if isinstance(v, int) { print(str(v + 1)) }
+```
 
 ### `TypedDict`: a dict with a fixed schema
 
@@ -322,7 +422,26 @@ the GC never touches a bare `ptr`. See section 25.
 `+` also concatenates str/list/bytes; `*` repeats str/list (`[0] * 4`). Set
 algebra works both as operators and methods: `a | b`, `a & b`, `a - b`,
 `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.symmetric_difference(b)`;
-`< <= > >=` on sets test (proper) subset/superset.
+`< <= > >=` on sets test (proper) subset/superset; compare against a named set
+or a set literal, not against an inline `a | b` expression.
+
+Tuples compare and order BY VALUE, lexicographically left to right, and hash by
+value, so they work as set elements and dict keys and `list[tuple[...]]` sorts:
+
+```dragon
+print(str((1, "a") < (1, "b")))              # True
+xs: list[tuple[float, int]] = [(-1.0, 1), (-1.8, 2)]
+xs.sort()                                    # orders by the tuple, not by address
+seen: set[tuple[int, str]] = {(1, "a"), (1, "a")}
+print(str(len(seen)))                        # 1
+```
+
+Two shapes are compile errors, not runtime surprises. A set element or dict key
+type that is not hashable (`set[list[int]]`, `dict[list[int], V]`) is rejected
+because its hash would move under mutation. Ordering a class that defines no
+`__lt__`/`__gt__` is rejected at the `<` and at `sort()`; an `IntEnum`/`StrEnum`
+member orders through its underlying int/str, and a contract may supply the
+ordering.
 
 `and`/`or` operand-typing: both operands same type -> that type; int with float
 promotes to float; unrelated types produce the union you must annotate
@@ -339,8 +458,9 @@ call/subscript/attribute.
 
 ## 9. Control flow
 
-- `if` / `elif` / `else`. Conditions must be `bool`: truthiness is NOT automatic
-  in statement conditions (`if 0 { }` is a type error; write `if n != 0`).
+- `if` / `elif` / `else`. Conditions take any type and test truthiness:
+  `0`, `0.0`, `False`, `""`, `none`, and an empty list/dict/set are falsy.
+  Prefer the explicit comparison (`if n != 0`) when the intent is a number test.
 - `while cond { }`, `for x in iterable { }`, `break`, `continue`, and the Python
   `else` clause on loops (runs only when no `break` fired).
 - `for` iterates lists, tuples, sets, dicts (keys, insertion order), strings
@@ -348,20 +468,50 @@ call/subscript/attribute.
   any `__iter__`/`__next__` object. `for k, v in d.items()` unpacks;
   `enumerate(xs)` and `zip(a, b)` drive loops.
 - `pass` is the explicit empty statement.
+- The walrus binds with the value's REAL type, so `if (n := len(xs)) > 2` gives
+  an `int` `n`. It does not narrow a `T | None`: bind on its own line, then
+  test with `is not none`.
 
 ### `match` (statement)
 
 ```dragon
-match value {
-    case 0 { print("zero") }
-    case "" { print("empty") }
-    case int() { print("some other int") }        # type test; narrows the subject in the body
-    case int() | bool() { print("numberish") }    # OR pattern
-    case [a, b] { print(a + b) }                  # sequence (list or tuple form)
-    case Point(x, y) { print(f"{x},{y}") }        # class positional destructuring (works)
-    case n if n > 100 { print("big") }            # capture + guard
-    case _ { print("anything else") }             # wildcard
+class Point {
+    x: int
+    y: int
+    def (x: int, y: int) {
+        self.x = x
+        self.y = y
+    }
 }
+
+def classify(value: int | str) {
+    match value {
+        case 0 { print("zero") }                      # literal
+        case "" { print("empty") }
+        case int() { print("some other int") }        # type test; narrows in the body
+        case n if n > 100 { print("big") }            # capture + guard
+        case _ { print("anything else") }             # wildcard
+    }
+}
+
+def sum_pair(xs: list[int]) -> int {
+    match xs {
+        case [a, b] { return a + b }                  # sequence pattern
+        case _ { return -1 }
+    }
+    return -1
+}
+
+def where(p: Point) -> str {
+    match p {
+        case Point(x, y) { return f"{x},{y}" }        # class positional destructuring
+    }
+    return "?"
+}
+
+classify(0)
+print(str(sum_pair([1, 2])))
+print(where(Point(1, 2)))
 ```
 
 Verified: literals, type tests (runtime tag for Union/Any subjects; non-null
@@ -391,8 +541,14 @@ F-strings implement Python's full format mini-language:
 `{value:[[fill]align][sign][#][0][width][grouping][.precision][type]}`.
 
 ```dragon
-f"{pi:.2f}"    # 3.14        f"{n:08b}"   # 11111111    f"{n:#x}"   # 0xff
-f"{x:*^6}"     # **42**      f"{big:,}"   # 1,234,567   f"{r:.1%}"  # 25.0%
+pi: float = 3.14159
+n: int = 255
+x: int = 42
+big: int = 1234567
+r: float = 0.25
+print(f"{pi:.2f}")   # 3.14        print(f"{n:08b}")  # 11111111
+print(f"{n:#x}")     # 0xff        print(f"{x:*^6}")  # **42**
+print(f"{big:,}")    # 1,234,567   print(f"{r:.1%}")  # 25.0%
 ```
 
 Quote rule: inside a double-quoted f-string use single-quoted dict keys
@@ -430,7 +586,12 @@ dedupes a list. `add remove discard pop union intersection difference
 symmetric_difference issubset issuperset` plus the operator forms (section 8).
 
 Tuples are fixed-size, heterogeneous, immutable: `t: tuple[int, str] = (1, "a")`;
-index or unpack (`x, y = point`). The natural multi-value return type.
+index or unpack (`x, y = point`). The natural multi-value return type. They
+compare, order and hash by value (section 8), so they are valid set elements and
+dict keys and a `list[tuple[...]]` sorts.
+
+A set element type and a dict key type must be hashable: `set[list[int]]` and
+`dict[list[int], V]` are compile errors.
 
 `from collections import deque`: `appendleft append popleft pop`, O(1) both ends.
 (Stdlib, listed here because it completes the container story.)
@@ -438,6 +599,10 @@ index or unpack (`x, y = point`). The natural multi-value return type.
 ### Comprehensions
 
 ```dragon
+rows:  list[list[int]] = [[1, 2], [3]]
+words: list[str]       = ["ab", "c"]
+nums:  list[int]       = [1, 2, 5, 6]
+
 squares: list[int]      = [n * n for n in range(10) if n % 2 == 0]
 flat:    list[int]      = [x for row in rows for x in row]
 lengths: dict[str, int] = {w: len(w) for w in words}
@@ -455,16 +620,18 @@ def greet(name: str) -> str {
 }
 ```
 
-- Every parameter and the return type are annotated. A function with no result
-  is `-> None`; a bare `return` (exit early) is legal only in `-> None`
-  functions.
+- Every parameter is annotated. A missing return annotation IS `-> None`:
+  `return <value>` from such a def is a compile error that names the annotation
+  to add, and a bare `return` (exit early) is legal only in a `-> None` function.
+- Every argument is type-checked against the parameter it binds, positional and
+  keyword alike, whether or not the call leans on a default.
 - Multiple values: return a `tuple[...]` and unpack at the call site.
 - Defaults: `def connect(host: str = "localhost", port: int = 5432)`. A default
   may be any expression of the parameter type and is re-evaluated ON EACH CALL
   that omits it, so Python's shared-mutable-default trap does not exist.
 - Keyword calls: any parameter may be passed by name, reordered, or skipped.
-  Unknown keyword names and duplicate positional+keyword bindings are compile
-  errors.
+  Unknown keyword names, duplicate positional+keyword bindings, and a keyword
+  value of the wrong type are compile errors.
 - Variadics REQUIRE the element type: `def f(*nums: int)` (a `list[int]` in the
   body), `def g(**opts: str)` (a `dict[str, str]` in the body). An unannotated
   `*args` is a compile error. Order: fixed params, `*args`, `**kwargs`.
@@ -480,14 +647,26 @@ def greet(name: str) -> str {
 double: Callable[[int], int] = lambda (n: int) -> int { return n * 2 }
 ```
 
-Lambda syntax is a typed parameter list, `->` return type, and a BRACED BODY
-(full statements allowed, not just one expression). The enclosing binding must
-carry the `Callable` type. A non-capturing lambda compiles to a bare function
-pointer; a capturing one costs one small environment allocation.
+The braced form is the only one that can be annotated: a typed parameter list,
+`->` return type, and a BRACED BODY (full statements allowed, not just one
+expression). A braced lambda written without `->` returns None, so a `return
+<value>` inside it is the same compile error a def gets.
+
+The expression form `lambda n: n * 2` infers its return type from the body but
+has no syntax for a parameter annotation, so its type is `(<unknown>) -> int`.
+It fits only positions that supply the parameter type, such as
+`map(lambda n: n * 2, xs)`; assigning it to a `Callable[[int], int]` is a
+compile error. Use the braced form for a named callable.
+
+A non-capturing lambda compiles to a bare function pointer; a capturing one
+costs one small environment allocation.
 
 Closures capture enclosing locals by reference. Reading needs nothing; REBINDING
 needs `nonlocal` (compile error otherwise). Closures escape correctly: return
 them, store them, call them inline (`make_adder(5)(10)`).
+
+Reassigning a parameter is legal and makes the function the owner of what it
+rebinds: the caller's binding is untouched and needs no `own` at the call site.
 
 ## 13. Classes
 
@@ -519,8 +698,9 @@ c: Counter = Counter(10)
 - A class with no constructor is constructed with NO arguments (fields keep
   defaults); passing arguments is a compile error. Exceptions to this rule are
   the synthesized families: `@dataclass` (field constructor), `TypedDict` (named
-  fields), `NamedTuple` (positional fields), exception subclasses (a message),
-  and `Enum` (member lookup by value).
+  fields), `NamedTuple` (positional fields), exception subclasses (an optional
+  message: `E()` or `E("text")`, anything else a compile error), and `Enum`
+  (member lookup by value).
 - Classes are compile-time entities, not values: you cannot bind a class and
   construct through the binding. But `type` exists as an annotation for
   class-decorator plumbing (`def reg(cls: type) -> type`, `registry: list[type]`)
@@ -561,6 +741,7 @@ class Temp {
     @celsius.setter
     def celsius(v: float) -> None { self._c = v }
 }
+t: Temp = Temp()
 t.celsius = 25.0      # setter; reading t.celsius calls the getter, no parens
 ```
 
@@ -579,7 +760,9 @@ class Dog(Animal) {                  # single inheritance
 ```
 
 - `super(args)` calls the parent constructor; `super.method()` calls a parent
-  method (`.py`: `super().__init__(...)`, `super().method()`).
+  method (`.py`: `super().__init__(...)`, `super().method()`). `super(args)` is
+  checked against the parent constructor's arity and fills its defaults, so
+  passing the wrong count is a compile error naming both numbers.
 - Constructor chaining is OPT-IN: if a subclass constructor never calls
   `super(...)`, the parent constructor does not run. A subclass with no
   constructor is constructed with no arguments (it does not inherit the parent
@@ -588,6 +771,8 @@ class Dog(Animal) {                  # single inheritance
   the most-derived override through one vtable pointer; calls the compiler can
   prove monomorphic are direct. `list[Shape]` of mixed subclasses dispatches per
   element. Prefer overriding over `isinstance` chains.
+- Rendering dispatches the same way: `str(x)`, `print(x)` and `f"{x}"` on a
+  base-typed variable call the most-derived `__str__`.
 - `isinstance(obj, Base)` walks the ancestor chain.
 
 ### Dunder methods (one parameter shorter than Python: self is implicit)
@@ -668,14 +853,36 @@ Token.RPAREN                            # 1 (0-based)
 class AppError(Exception) {
     def(message: str) { self.message = message }
 }
-class NotFoundError(AppError) {
-    def(message: str) { self.message = message }
+class HttpError(AppError) {
+    status: int
+    def(message: str, status: int) {
+        super(message)
+        self.status = status
+    }
+    def __str__() -> str { return str(self.status) + " " + self.message }
 }
+class ConfigError(Exception) {}          # no constructor: the synthesized family
 ```
 
 Subclass `Exception` (or any tree type); catching a base catches the subtypes.
-Store structured data in fields and read `e.message` / `e.status` in handlers;
-`str(e)` always yields printable text.
+
+- A subclass that declares NO constructor is constructed with an optional
+  message: `ConfigError()` or `ConfigError("no [server] section")`. Any other
+  argument list is a compile error naming both spellings. Its message is
+  reachable only through `str(e)`: `e.message` on such a class is a compile
+  error, because the class declares no field.
+- A subclass that declares a constructor owns its fields: assign what you want
+  and read `e.message` / `e.status` in handlers. Delegate with `super(message)`,
+  which works even when the parent declares no constructor of its own.
+- A field named `message` on an exception subclass must be `str`; it is the
+  slot the synthesized constructor writes and the text an exception renders
+  from. Declaring it at another type is a compile error.
+- An exception's text is its own `__str__`, else its `__repr__`, else the
+  message it was constructed with, else its class name. That text is decided by
+  the raised class, so a handler typed at any level prints the same string: an
+  exact `except HttpError as e`, an intermediate `except AppError as e` and a
+  broad `except Exception as e` all show the subclass's `__str__`.
+- `str(e)` always yields printable text.
 
 ## 14. Generics (monomorphized, PEP 695 syntax)
 
@@ -705,6 +912,9 @@ def both[T: {Amazing, Speaker}](x: T) { ... } # braced set: must satisfy all
   erasure.
 - **Cross-module generics work**: define a generic function or class in one
   module, import and instantiate it in another.
+- A generic method may sit beside concrete overloads of the same name; a
+  fitting concrete overload wins at the call and the generic takes the rest.
+  Two generic definitions of one name are a compile error.
 - Current limits (clean compile errors, never miscompiles):
   - Subclassing a generic instantiation (`class L(Box[str])`) is not supported
     yet.
@@ -737,8 +947,9 @@ pack: list[Amazing] = [dog, robot as Amazing]
 `as` is compile-time only and free (same pointer in and out). A call through a
 contract value is one vtable load (the conforming set is closed at whole-program
 compile, so there is no Go-style runtime interface conversion cost). A class
-with the right methods but no promise/cast is refused with an error offering
-both remedies.
+with the right methods but no promise and no cast is refused as an ordinary
+assignment mismatch (`cannot assign 'Robot' to variable of type 'Amazing'`);
+add the promise on the class or the `as` at the use site.
 
 Current limits:
 - Contracts move upward only: there is no narrowing from a contract-typed
@@ -814,10 +1025,12 @@ for v in count_up(4) { print(v) }   # 0 1 2 3
 - State persists across yields; `yield` accepts any expression; generators work
   as methods (instance and `@staticmethod`), not as `@classmethod`.
 - There is NO `next()` builtin; the supported consumption is `for`. A generator
-  object can only be bound to an `Any`-typed variable; idiomatic use iterates
-  the call directly.
-- Implement `__iter__() -> Self` and `__next__() -> T` (raising
-  `StopIteration()` when done) to make any class for-loopable.
+  call cannot be bound to a variable at all (there is no generator type to
+  name): iterate the call directly, or collect it with a comprehension
+  (`xs: list[int] = [x for x in gen(...)]`).
+- Implement `__iter__() -> <the class>` and `__next__() -> T` (raising
+  `StopIteration()` when done) to make any class for-loopable. There is no
+  `Self` type; name the class.
 
 ## 18. Exceptions
 
@@ -827,6 +1040,8 @@ try {
 } except ValueError as e {          # `catch` is an accepted synonym for `except`
     print("bad: " + str(e))
 } except (TypeError, KeyError) as e {   # tuple groups types
+    ...
+} except errors.AppError as e {     # a module-qualified class, after `import errors`
     ...
 } except Exception as e {           # broad net last; matching is hierarchy-based
     ...
@@ -838,8 +1053,13 @@ try {
 ```
 
 - `raise ValueError("message")` throws; a bare `raise` inside a handler
-  re-throws. `raise X from Y` is REFUSED at compile time (no traceback exists to
-  chain; the error says to raise without `from`).
+  re-throws. `raise X from Y` is REFUSED at compile time: the cause is not
+  retained and cannot be read back, so the error says to raise without `from`.
+- An except clause names a class or a parenthesised group of them, bare
+  (`except AppError`) or module-qualified (`except errors.AppError`) on both
+  surfaces; `e` binds at that class.
+- A user exception subclass that declares no constructor takes an optional
+  message and nothing else (section 13); `super(message)` reaches such a parent.
 - Built-in hierarchy (abridged): `BaseException > Exception >` `ArithmeticError`
   (`ZeroDivisionError`, `OverflowError`, `FloatingPointError`), `LookupError`
   (`IndexError`, `KeyError`), `OSError` (`FileNotFoundError`, `PermissionError`,
@@ -908,11 +1128,16 @@ def load_index(path: str) -> Index {
 - Defers run during unwind, before the handler sees the exception. If NO handler
   exists and the process dies on an uncaught exception, pending defers are
   skipped (defer is a scope tool, not a shutdown hook).
-- Current limits (loud compile errors): no `defer` at module top level
-  ("'defer' outside function"); the operand must BE a direct function/method
-  call (bare names refuse; computed/closure callees refuse); no keyword
-  arguments in the deferred call (pass positionally); `Any`/union-typed
-  arguments refuse (annotate concretely); no `defer fire f(x)` fusion.
+- Current limits. Two refuse at check time: `defer` at module top level
+  ("'defer' outside function") and a bare identifier operand ("'defer' requires
+  a direct call: a function call, method call, or bound-closure call"). Three
+  refuse at LOWERING, so `dragon check` passes them and only `dragon run`/
+  `build` reports them: a callee that is a closure value ("cannot resolve the
+  callee to a direct function or method"), keyword arguments ("defer does not
+  support keyword arguments yet; pass them positionally"), and a union-typed
+  argument ("an argument of Any/union type is not supported yet"). `Any` is not
+  a parameter type in Dragon at all, so that case never reaches defer.
+  `defer fire f(x)` does not parse.
 
 ## 21. Ownership: `del`, `own`, `dub`
 
@@ -935,8 +1160,11 @@ sole owner (nothing aliased, stored, or captured it; otherwise the error names
 the escape). Use it to cut peak memory and as a lifetime probe: every refusal
 reveals an alias you did not know about. Debug builds lower it to
 `assert(rc == 1); free` (a leak trips loudly); release builds emit exactly the
-scope-exit release, earlier. v1 scope: LOCALS inside functions only; `del` or
-`own`-moves of module-level bindings refuse ("v1: locals only"). Fields cannot
+scope-exit release, earlier. v1 scope: LOCALS inside functions only. `del` of a
+module global or of a binding owned by an enclosing function refuses ("del of a
+module global or outer binding is not supported (v1: locals only)"); an
+`own`-move of either refuses the same way ("a move of a module global or outer
+binding is not supported (v1: locals only)"). Fields cannot
 be `del`-ed (they release when their owner dies). `del d["key"]` (container
 entry) is a separate, ordinary operation.
 
@@ -972,10 +1200,11 @@ entry) is a separate, ordinary operation.
 The only way to mint a second independent owner; the cost sits on the line you
 wrote (grep `dub` to find every copy). Deep copy for list/dict/set (recursively,
 if every element is dubable); trivial for scalars; a free retain for str/bytes/
-tuple (immutable, indistinguishable from a copy). Non-dubable: `Lock`
-("a raw OS mutex cannot be copied"), handle-holding classes (composition rule:
-a class is dubable iff every field is), Task handles. `dub` copies a binding or
-a field, not an element (`dub xs[0]` refuses).
+tuple (immutable, indistinguishable from a copy). Non-dubable in v1: `Lock`
+("a raw OS mutex cannot be copied"), Task handles ("a task handle is
+single-owner; a second joiner would race the result move"), and EVERY class,
+whatever its fields ("class dub is not in v1; copy the fields you need"). `dub`
+copies a binding or a field, not an element (`dub xs[0]` refuses).
 
 ### The three MANDATORY places
 
@@ -1013,6 +1242,24 @@ a held handle. A bare async call in statement position whose Task nobody binds
 is a compile error ("silently discarded; bind it, then await, join, or del
 it"); `fire fn()` in statement position stays legal (the keyword IS the visible
 detach). `dub t` on a task refuses (a second joiner would race the move).
+
+### What the compiler frees for you (no keyword needed)
+
+Ownership keywords mark the values YOU hand around. Values the compiler mints on
+your behalf are its own problem, and it releases them on every exit path:
+
+- A loop over an owned temporary releases it when the loop ends: `for n in dub
+  self.names`, `for k in d` (which builds a key list you never named), and
+  `for e in make_rows()` all free the hidden collection on fall-through,
+  `break`, `return`, and an exception raised out of the loop body.
+- A walrus binding OWNS its value at the value's real type, not at a guess:
+  `stream := tokenize(text)` releases a `Stream`, a `list`, a `dict` or a
+  `tuple` correctly, and a walrus in a loop condition
+  (`while (line := next_line(i)) != "stop"`) releases the previous iteration's
+  value before it binds the next one.
+- A parameter the body REASSIGNS is retained on entry and released at exit, so
+  `def norm(s: str, force: bool) { if force { s = s + "!" } }` is safe whether
+  or not the branch is taken. The caller's value is never freed by the callee.
 
 ### Ownership error codes
 
@@ -1135,6 +1382,8 @@ runtime parsing; a typo in `!{naem}` is a compile error.
 > `:{ ... }` breaks BACK into content from inside that code.
 
 ```dragon
+name: str = "ada"
+age: int = 3
 greeting: str = template {Hello !{name}, you are !{age}}     # untyped -> plain str
 ```
 
@@ -1157,14 +1406,18 @@ Ship-in types: `HTML`, `CSS`, `XML` (`from html import ...`), `JSON`
 Splice dispatch inside a typed template: same content type -> inserted RAW (no
 double-escape; this is why components compose); `str` -> escaped; a class ->
 `__str__()` (or `__repr__()`) then escaped; a container -> the same text
-`f"{xs}"` gives, then escaped; `Any` -> dispatched at runtime, then escaped;
-`!{x | raw}` -> verbatim (explicit opt-out). A class with neither `__str__` nor
-`__repr__` has no text form and the splice is a compile error naming the fix
-(section 13); the same rule governs `print`, `str()`, and f-strings.
+`f"{xs}"` gives, then escaped; a union (`type Shape = int | str`) or `Data` ->
+dispatched at runtime, then escaped; `!{x | raw}` -> verbatim (explicit opt-out).
+There is no `Any` splice: `Any` is not a writable type (section 7). A class with
+neither `__str__` nor `__repr__` has no text form and the splice is a compile
+error naming the fix (section 13); the same rule governs `print`, `str()`, and
+f-strings.
 
 Components and layouts are just functions:
 
 ```dragon
+from html import HTML
+
 def button(label: str) -> HTML {
     return template[HTML] { <button>!{label}</button> }
 }
@@ -1172,10 +1425,14 @@ ui: HTML = template[HTML] { <div>!{button("Save")}</div> }
 ```
 
 Logic: full statements inside `!{ }`, `:{ }` to emit markup, nesting allowed,
-content type inherited:
+content type inherited. A block sees the enclosing scope, and an expression
+lambda inside one may read the loop variable:
 
 ```dragon
+from html import HTML
+xs: list[str] = ["a", "b"]
 lst: HTML = template[HTML] {<ul>!{ for x in xs { :{<li>!{x}</li>} } }</ul>}
+loud: HTML = template[HTML] {<ul>!{ for x in xs { :{<li>!{(lambda: x.upper())()}</li>} } }</ul>}
 ```
 
 Inline shortcuts: `!{*xs}` spreads a list (empty separator); `!{xs | join(", ")}`.
@@ -1184,16 +1441,43 @@ Both render EACH element through the splice dispatch above, so a spread and the
 escaped, `HTML` elements are inserted raw, `list[int]` renders digits. The
 separator travels the same rule (a `str` separator is escaped, an `HTML`
 separator is raw) and is evaluated once per join. `!{*xs | raw}` joins without
-escaping. The operand must be a list whose element type is renderable:
-`list[Any]`, a list of containers, a list of classes without `__str__`, and
-non-list operands are compile errors.
-Filters: `html`/`sql`/`url` (context escapes), `raw`, `join`/`join(sep)`, or any
-in-scope TOP-LEVEL `(str) -> str` function (`!{title | shout}`); methods do not
-work as filters (wrap `upper` in a function).
+escaping. The operand must be a list whose element type is renderable: a list of
+containers, a list of classes without `__str__`, and non-list operands are
+compile errors. A list of unions or of `Data` renders element by element.
+A spread takes no filter but `raw`.
 
-`template[HTML]("page.html")` is a compile-time include: the file is read during
-compilation, its `!{}` slots compile against the surrounding scope, zero runtime
-I/O. Path must be a string literal, relative to the source file.
+### Filters escape too
+
+A filter changes the value, never its trust level. Inside `template[T]` the
+result is escaped for `T` unless you wrote `| raw`, the value already has type
+`T`, or the filter returns `T`. `html`/`sql`/`url` transform the text and denote
+that context's trust class, so each is inserted verbatim only when its class IS
+`T`: `!{x | html}` inside `template[HTML]` is escaped exactly once and never
+doubled, `!{q | url}` is percent-encoded and then markup-escaped (a no-op on the
+bytes, since percent encoding leaves only unreserved characters), and
+`!{title | sql}` inside `template[HTML]` is still markup-escaped, because SQL
+escaping does not make text safe to paste into a page. Untyped `template { }` has
+no content type, so it escapes nothing.
+
+A filter of your own must be an in-scope TOP-LEVEL function taking one `str` and
+returning `str` (escaped like any other value) or the template's own content type
+(inserted as markup). Anything else is a compile error naming the signature: a
+method (`!{title | upper}`), a nested `def`, a value holding a lambda, a wrong
+parameter type, a wrong return type. Only the LAST top-level `|` is the filter;
+everything before it is the expression, so `!{flags | mask | html}` bitwise-ors
+two ints and then escapes, and `!{t | a | b}` is a type error on `t | a`, not a
+chain of two filters.
+
+`template[HTML]("page.html")` is a compile-time include: the file is read while
+parsing, its `!{}` slots compile against the surrounding scope exactly like the
+same body written inline, zero runtime I/O. Path must be a string literal,
+relative to the file that names it. `dragon check` sees the slots, so a missing
+fragment, an unparsable slot and a name the surrounding scope does not define are
+all compile errors. A name or type error carries the fragment's own path and line
+(`undefined name 'naem' at [frag.html:1:6]`); a parse error names the file and
+the line within its body (`template file 'badslot.html': ... at line 1 of the
+template body`). A fragment may include another fragment, resolved relative to
+its own path; a cycle is a compile error naming the chain.
 
 Custom content types: subclass `Template`, give it a `@staticmethod escape(s:
 str) -> str`, then `template[SHELL] { ... }` works like the built-ins.
@@ -1226,14 +1510,21 @@ from math import gcd as g     # alias a name
 - A sibling file `shapes.dr` next to the entry file imports as `from shapes
   import area`.
 - **Package rule**: a package is a directory whose root module is
-  `name/name.dr`; submodules are files beside it (`textkit/case.dr` imports as
-  `textkit.case`). Dots map to directory separators. No `__init__` files. A
-  flat `name.dr` AND a `name/` directory in the same place is a hard error
-  ("module conflict"), never a precedence guess.
-- Resolution order, first match wins: (1) the entry file's directory, (2) `-I`
-  dirs in order, (3) the stdlib (`DRAGON_STDLIB_PATH` overrides), (4) Python
-  site-packages if `--site-packages`. Your files shadow the stdlib (closest
-  wins), which is also how you stub a module in tests.
+  `name/name.dr`, or `name/__init__.py` on the Python surface; submodules are
+  files beside it (`textkit/case.dr` imports as `textkit.case`). Dots map to
+  directory separators. A flat `name.dr` AND a `name/` directory in the same
+  place is a hard error ("module conflict"); both roots inside one directory is
+  a "package conflict". Never a precedence guess.
+- A directory is only a package if it holds one of those two roots. A directory
+  that merely shares a module's name (a C include tree passed with `-I`, say)
+  is not a package: the resolver walks straight past it and keeps searching. It
+  reports "has no root module" only if nothing resolves anywhere, and then it
+  lists every rootless directory it stepped over and every location it looked in.
+- Resolution order, first match wins: (1) the entry file's directory, (2) `.drx/`
+  (installed eggs), (3) `-I` dirs in order, (4) the stdlib
+  (`DRAGON_STDLIB_PATH` overrides), (5) Python site-packages if
+  `--site-packages`. Your files shadow the stdlib (closest wins), which is also
+  how you stub a module in tests. `-I<dir>` and `-I <dir>` are the same flag.
 - Module globals: a top-level declaration; functions read freely, writers must
   declare `global name`. A dependency's loose statements do not run; its
   initializers do (once, at startup, before the entry body): express import-time
@@ -1246,12 +1537,24 @@ from math import gcd as g     # alias a name
   int]]`, populated at top level; plugins register themselves into it. Code
   never compiled in cannot be loaded, by design.
 - **Eggs (D022)**: `dragon init` scaffolds `dragon.drs` (Dragon Script: `#`
-  comments, single quotes, nested `{ }` tables; fields: name, version, entry,
-  eggs = {}). The full manager (grab/sync/drop with inline SHA-256 pins in the
-  manifest, `.drx/` install dir, capability permissions) is designed and partly
-  wired but in progress: TODAY YOU VENDOR (copy sources, or `-I`). Lay shared
-  code out as `name/name.dr` so it is egg-shaped later. No install scripts
-  exist, ever: a task is a `.dr` file you `dragon run`.
+  comments, single quotes, and ONE top-level `{ }` block holding the fields,
+  `name`, `version`, `entry`, and a nested `eggs = { }` table; a `.drs` with no
+  root block is an error). The manager works today:
+
+```
+dragon init                       # writes dragon.drs
+dragon grab --path ../mylib       # or <name>[@version], or --git <url>
+dragon sync                       # reinstall every egg in the manifest
+dragon drop mylib                 # remove it again
+```
+
+  `grab` records the source in `eggs` (`mylib = { path = '../mylib' }`),
+  installs the package under `.drx/mylib/`, and writes a `.dragon-entry` hint
+  there so the resolver finds the root module wherever the egg keeps it. `.drx/`
+  is searched right after the entry file's directory, so `from mylib import
+  greet` just works with no `-I`. Vendoring by hand still works and is what you
+  do with no network. Lay shared code out as `name/name.dr` either way. No
+  install scripts exist, ever: a task is a `.dr` file you `dragon run`.
 
 ## 25. FFI
 
@@ -1355,10 +1658,11 @@ stderr/traceback verbatim), SchemaError (clean exit, output did not match the
 declared type). `except FFIError` catches all three. No decode is attempted
 after a non-zero exit.
 
-The kernel under the sugar is public: `runs[T](argv, input_bytes)` spawns a
-one-shot process, feeds stdin, decodes stdout into `T` with the same error
-taxonomy. `encode[T]`/`decode[T]` are the same public schema-directed
-serializer pair, usable directly on any class.
+The kernel under the sugar is public: `from ffi import runs`, then
+`runs[T](argv, input_bytes)` spawns a one-shot process, feeds stdin, decodes
+stdout into `T` with the same error taxonomy. The schema-directed serializer
+pair is public too and ships in `json`, not `ffi`: `from json import encode,
+decode`, then `encode[T](value) -> bytes` and `decode[T](buf)` on any class.
 
 Current limits: crossing types are scalars, `list` of scalars, classes, `list`
 of classes, `dict[str, scalar]`, `Optional` of those, and `bytes` as a
@@ -1379,7 +1683,10 @@ annotation type), `enumerate`, `zip`, `int` `float` `str` `bool` (conversions),
 `bytes()` / `bytes(n)` / `bytes(list[int])`, `abs` `min` `max` `sum`, `sorted`
 `reversed` (return new lists), `any` `all`, `isinstance` (see the caveat in
 section 7), `issubclass(Sub, Base)`, `repr` `id` `hash`, `chr` `ord`, `hex`
-`oct` `bin`, `set()` / `set(xs)`, `dict()`, `list()` (empty -> `list[Any]`
+`oct` `bin`, `getattr(obj, "field")` and `hasattr(obj, "field")` (static: the
+name is a literal checked against the class at compile time, not reflection),
+`deque()` (the type is built in: `d: deque[int] = deque()` needs no import),
+`set()` / `set(xs)`, `dict()`, `list()` (empty -> `list[<boxed>]`
 only) and `list(iterable)` (typed copy: `xs: list[int] = list([1, 2, 3])`
 works), `tuple(iterable)`, `pow(int, int)`, `round(x: float) -> int` (1-arg
 ONLY), `divmod(a, b) -> tuple[int, int]`, `map(fn, xs)` / `filter(fn, xs)`
@@ -1387,14 +1694,16 @@ ONLY), `divmod(a, b) -> tuple[int, int]`, `map(fn, xs)` / `filter(fn, xs)`
 (the type NAME, not a class object), `dir(obj) -> list[str]` (method names,
 including `__init__`; how the unittest runner finds `test_*` methods).
 
-Not part of the surface: 2-arg `round(x, n)`, `bytes("text", "utf-8")`
-(use `s.encode()`), `next`, `iter`, `callable`, `frozenset`, `format`, `slice`,
-`getattr`, `setattr`, `hasattr`, `delattr`, `vars`, `globals`, `locals`,
-`eval`, `exec`, `compile` (the reflection/eval family is rejected by design,
-not a gap).
+Not part of the surface: `next`, `iter`, `callable`, `frozenset`, `format`,
+`slice`, `setattr`, `delattr`, `vars`, `globals`, `locals`, `eval`, `exec`,
+`compile` (the reflection/eval family is rejected by design, not a gap; the
+static `getattr`/`hasattr` above are the exception because the field name is a
+compile-time literal). Also unavailable, but only at lowering: 2-arg
+`round(x, n)` and `bytes("text", "utf-8")` (use `s.encode()`) pass
+`dragon check` and then fail the build with "Unknown function".
 
-An empty `list()` is a `list[Any]` and so cannot initialize a concretely typed
-binding; the typed empty list is the literal: `xs: list[int] = []`.
+An empty `list()` is a `list[<boxed>]` and so cannot initialize a concretely
+typed binding; the typed empty list is the literal: `xs: list[int] = []`.
 
 ## 27. Testing
 
@@ -1405,6 +1714,10 @@ code (0/1) is the whole contract for CI/CTest.
 
 ```dragon
 from unittest import TestCase, main
+
+def overdraw() -> None {
+    raise ValueError("insufficient funds")
+}
 
 class MathTests(TestCase) {
     def test_addition() {
@@ -1427,8 +1740,14 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   `assertEqual[T](a, b)` and `assertNotEqual[T](a, b)`: GENERIC, so comparing
   mismatched concrete types (`assertEqual(1, "x")`) is a COMPILE error, and
   equality is deep for containers; `assertTrue/assertFalse(bool)`;
-  `assertIsNone/assertIsNotNone(Any)`; `assertIn/assertNotIn(needle, haystack)`
-  (substring on str); `assertGreater/Less/GreaterEqual/LessEqual(float)`;
+  `assertIsNone[T]/assertIsNotNone[T](value: T | None)`, so the natural argument
+  is an optional value (`self.assertIsNone(find("z"))`) and a bare `None` needs
+  the type written (`self.assertIsNone[str](None)`);
+  `assertIn/assertNotIn(needle: str, haystack: str)` (substring) beside
+  `assertIn[T]/assertNotIn[T](needle: T, haystack: list[T])` (membership), so
+  `assertIn("ell", "hello")` and `assertIn(2, [1, 2, 3])` both hold and a
+  mismatched element type is a COMPILE error;
+  `assertGreater/Less/GreaterEqual/LessEqual(float)`;
   `assertAlmostEqual(a, b, places=7)`; `assertRaises(exc_type, fn)` (pass a
   zero-arg function or lambda; subclass matches count; there is NO
   context-manager form).
@@ -1453,12 +1772,20 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   that line. Every block is a scope, so a heap value declared in a block dies
   at the closing brace. No pauses, no collector thread on the hot path.
 - Exceptions unwind and free owned locals as they go; error paths do not leak.
+  That includes the collections you never named: a loop over `dub self.field`,
+  over `d` (its key list), or over a call result frees the temporary when the
+  body raises out of the loop, not only when the loop finishes.
+- A walrus binding is a declaration and releases at its value's real type, in a
+  loop condition as well as in a statement. A parameter the body reassigns is
+  retained on entry and released at exit.
 - Cycles (A <-> B) are reclaimed by an incremental cycle collector backstop
   (with adaptive back-off when it finds nothing); `own` fields form trees and
   are excluded from cycle tracking.
 - `--gc=none` disables refcount emission for one-shot programs (benchmarks,
-  short CLI filters); never ship a service with it.
-- Performance levers: build `--release` for anything measured; keep types
+  short CLI filters); never ship a service with it. Neither it nor `--release`
+  is listed by `dragon --help`; both are accepted.
+- Performance levers: build `--release` (exactly `-O3`) for anything measured;
+  the default is `-O0`, so an unflagged build is not a measurement. Keep types
   concrete (a value left `Any` is boxed; a knowable type in a register is not);
   never build strings with `out = out + x` in a loop (O(n^2)): collect
   `list[str]` and `"".join(parts)`; `del` big buffers early to cut peak memory;
@@ -1475,20 +1802,22 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
 | `x = 1` creates a variable | `x: int = 1` declares; bare `=` only reassigns |
 | function-scoped `if`/`for` locals | block scoping; hoist a declaration before the block |
 | forgot-`nonlocal` silently makes a local | compile error naming both fixes |
-| `if __name__ == "__main__"` | delete it; the file you run is the program |
+| `if __name__ == "__main__"` | delete it; `__name__` does not exist, so it fails to compile |
 | arbitrary-precision int | 64-bit `int`, wraps silently |
-| truthy `if x:` on any value | conditions are `bool`; write `if x != 0`, `if len(s) > 0` |
+| truthy `if x:` on any value | works, with Python's emptiness rule: `0`, `0.0`, `""`, an empty list/dict/set and `none` are false, an instance is true. Prefer the explicit `if x != 0` / `if len(s) > 0` when you mean a number or a length |
 | mutable default evaluated once | defaults re-evaluate per call; trap gone |
 | `eval` / `exec` / `compile` | absent, by design |
-| `getattr`/`setattr`/`hasattr`/`__dict__`/metaclass/monkeypatch | absent; declare fields, or keep dynamism in a `dict[str, V]` value |
+| `setattr` / `__dict__` / metaclass / monkeypatch | absent; declare fields, or keep dynamism in a `dict[str, V]` value |
+| `getattr`/`hasattr` add or invent attributes | they exist but only read fields the class declares; a miss is `hasattr -> False` and `getattr -> AttributeError` |
+| `Any` as an escape hatch | not a type at all; declare a union alias, `json.Data`, or a generic `[T]` |
 | `type(x)` returns a class to compare/construct | `type(x)` is a name string; narrow with `isinstance`, dispatch via base class or generics |
 | duck typing | declare it: a base class, or a contract (`type Shape { ... }` + promise/cast) |
 | `importlib` / plugins from disk | typed `dict[str, Callable]` dispatch tables; the compiled-in set is the universe |
 | `async def` colors callers | colorless: `await` anywhere, `fire` spawns, no event loop |
-| pip / PyPI / C extensions | statically linked stdlib; FFI to C; vendor sources (eggs in progress) |
+| pip / PyPI / C extensions | statically linked stdlib; FFI to C; eggs (`dragon grab`/`sync`/`drop` into `.drx/`) or vendored sources |
 | `raise X from Y` | refused; fold the cause into the new message |
 | tracebacks | none; exceptions carry your fields and `str(e)` |
-| `del x` unbinds a name | `del x` PROVES sole ownership and frees on that line |
+| `del x` unbinds a name | `del x` PROVES sole ownership and frees on that line; locals only, a module global is refused |
 | implicit copies/aliases | copies are spelled `dub`, moves are spelled `own`, both greppable |
 
 Porting checklist for a `.py` file: annotate everything; first bindings get
