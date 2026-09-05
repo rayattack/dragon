@@ -77,6 +77,12 @@ def tmpl_url_filter(q: str) -> str {
 }
 
 
+def tmpl_sql_filter(title: str) -> str {
+    h: HTML = template[HTML] {<b>!{title | sql}</b>}
+    return h.to_str()
+}
+
+
 def tmpl_html_returning_filter(title: str) -> str {
     h: HTML = template[HTML] {<b>!{title | emphasize}</b>}
     return h.to_str()
@@ -287,11 +293,20 @@ class TemplateFilterTrustTests(TestCase) {
     }
 
     def test_html_filter_is_not_double_escaped() {
-        self.assertEqual(tmpl_html_filter("<a>"), "<b>&lt;a&gt;</b>")
+        const out: str = tmpl_html_filter("<a>")
+        self.assertEqual(out, "<b>&lt;a&gt;</b>")
+        self.assertFalse("&amp;lt;" in out)
     }
 
-    def test_url_filter_percent_encodes() {
-        self.assertEqual(tmpl_url_filter("a b&c"), "<a href=\"?q=a%20b%26c\">go</a>")
+    def test_sql_filter_result_is_still_escaped_for_the_markup() {
+        self.assertEqual(tmpl_sql_filter("<script>x</script>"),
+                         "<b>&lt;script&gt;x&lt;/script&gt;</b>")
+    }
+
+    def test_url_filter_percent_encodes_then_survives_markup_escaping() {
+        const out: str = tmpl_url_filter("a b&c")
+        self.assertEqual(out, "<a href=\"?q=a%20b%26c\">go</a>")
+        self.assertFalse("&amp;" in out)
     }
 
     def test_filter_returning_content_type_is_markup() {

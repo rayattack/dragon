@@ -181,6 +181,13 @@ static std::string spliceSite(const std::string& exprText) {
     return "template splice `!{" + exprText + "}`";
 }
 
+static std::string contextFilterTrustClass(const std::string& filterName) {
+    if (filterName == "html") return "HTML";
+    if (filterName == "sql") return "SQL";
+    if (filterName == "url") return "URL";
+    return std::string();
+}
+
 static std::string templateRenderError(const std::string& exprText,
                                        const std::string& className) {
     if (!className.empty())
@@ -481,12 +488,17 @@ void CodeGen::visit(TemplateExpr& node) {
 
                 if (!filterName.empty()) {
                     if (filterName == "raw") {
-                    } else if (filterName == "html") {
-                        applyFilter("dragon_template_escape_html", "esc_html");
-                    } else if (filterName == "sql") {
-                        applyFilter("dragon_template_escape_sql", "esc_sql");
-                    } else if (filterName == "url") {
-                        applyFilter("dragon_template_escape_url", "esc_url");
+                    } else if (filterName == "html" || filterName == "sql" ||
+                               filterName == "url") {
+                        if (filterName == "html")
+                            applyFilter("dragon_template_escape_html", "esc_html");
+                        else if (filterName == "sql")
+                            applyFilter("dragon_template_escape_sql", "esc_sql");
+                        else
+                            applyFilter("dragon_template_escape_url", "esc_url");
+                        strVal = impl_->emitContentEscape(
+                            effContent, strVal, strValOwned,
+                            contextFilterTrustClass(filterName));
                     } else {
                         auto* filterFunc = impl_->module->getFunction(
                             impl_->resolveCalleeSymbol(filterName));

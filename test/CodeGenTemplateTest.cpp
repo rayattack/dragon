@@ -337,7 +337,7 @@ TEST(CodeGenE2E, TypedTemplateMultipleExprs) {
     EXPECT_EQ(output, "FOO and BAR\n");
 }
 
-TEST(CodeGenE2E, TypedTemplateExplicitFilterOverride) {
+TEST(CodeGenE2E, ContextFilterStillEscapesForTheTemplatesOwnType) {
     auto output = compileAndRun(
         TPL_BASE +
         "class YELL(Template) {\n"
@@ -350,7 +350,31 @@ TEST(CodeGenE2E, TypedTemplateExplicitFilterOverride) {
         "y: YELL = template[YELL] {!{x | html}}\n"
         "print(y)\n"
     );
-    EXPECT_EQ(output, "&lt;b&gt;hi&lt;/b&gt;\n");
+    EXPECT_EQ(output, "&LT;B&GT;HI&LT;/B&GT;\n")
+        << "`| html` marks the text trusted for HTML, not for YELL, so the "
+           "template's own escape still runs over it";
+}
+
+TEST(CodeGenE2E, ContextFilterMatchingTheContentTypeIsNotDoubleEscaped) {
+    auto output = compileAndRun(
+        TPL_BASE +
+        "class HTML(Template) {\n"
+        "  def(inner: str) { self._inner = inner }\n"
+        "  @staticmethod\n"
+        "  def escape(s: str) -> str {\n"
+        "    s = s.replace(\"&\", \"&amp;\")\n"
+        "    s = s.replace(\"<\", \"&lt;\")\n"
+        "    return s.replace(\">\", \"&gt;\")\n"
+        "  }\n"
+        "  def __str__() -> str { return self._inner }\n"
+        "}\n"
+        "x: str = \"<b>hi</b>\"\n"
+        "y: HTML = template[HTML] {!{x | html}}\n"
+        "print(y)\n"
+    );
+    EXPECT_EQ(output, "&lt;b&gt;hi&lt;/b&gt;\n")
+        << "`| html` inside template[HTML] denotes the template's own trust "
+           "class, so it is inserted verbatim and escaped exactly once";
 }
 
 TEST(CodeGenE2E, TypedTemplateHTMLEscape) {

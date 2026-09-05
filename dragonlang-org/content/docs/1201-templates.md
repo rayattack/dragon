@@ -204,12 +204,19 @@ A pipe applies a filter to the interpolated value:
 | `join` / `join(sep)` | concatenate a list, optionally with a separator |
 | *your function* | any in-scope **top-level** `(str) -> str` (result escaped) or `(str) -> HTML` (result inserted as markup) |
 
-A filter of your own changes the value, not its trust level. In a typed template
-the result of a `(str) -> str` filter is auto-escaped exactly like an unfiltered
-`!{expr}`, so `!{title | shout}` is as safe as `!{title}`. A filter declared
-`(str) -> HTML` returns markup and is spliced like any other `HTML` value. The
-named filters are the explicit choices: `html`, `sql` and `url` each escape for
-that context in place of the automatic escape, and `raw` inserts verbatim.
+Inside `template[T]` a spliced value is escaped for `T` unless you wrote `| raw`,
+the value already has type `T`, or the filter returns `T`. A filter changes the
+value, not its trust level: `!{title | shout}` is as safe as `!{title}`, and a
+filter declared `(str) -> HTML` returns markup and is spliced like any other
+`HTML` value.
+
+`html`, `sql` and `url` transform the text and denote that context's trust class,
+so each one is inserted verbatim only when its class IS `T`. `!{x | html}` inside
+`template[HTML]` is escaped exactly once; `!{q | url}` inside `template[HTML]` is
+url-escaped and then markup-escaped, which changes nothing because percent
+encoding leaves only unreserved characters; `!{title | sql}` inside
+`template[HTML]` is still markup-escaped, because SQL escaping does not make text
+safe to paste into a page. `| raw` is the one opt-out.
 
 A filter must be a top-level function, not a method - `!{title | upper}` does
 **not** work because `upper` is a method on `str`. Wrap it in a function (or use
