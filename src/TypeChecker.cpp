@@ -1129,9 +1129,14 @@ std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
             return std::make_shared<ListType>(resolveType(generic->typeArgs[0].get()));
         }
         if (baseName->name == "dict" && generic->typeArgs.size() == 2) {
+            auto keyType = resolveType(generic->typeArgs[0].get());
+            if (!supportsHashing(keyType)) {
+                error(generic->location(), "'" + keyType->toString() +
+                      "' cannot be a dict key: it is mutable, so its hash would "
+                      "change under you; use a tuple of immutable values");
+            }
             return std::make_shared<DictType>(
-                resolveType(generic->typeArgs[0].get()),
-                resolveType(generic->typeArgs[1].get()));
+                keyType, resolveType(generic->typeArgs[1].get()));
         }
         if (baseName->name == "tuple") {
             std::vector<std::shared_ptr<Type>> elems;
@@ -1141,7 +1146,13 @@ std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
             return std::make_shared<TupleType>(std::move(elems));
         }
         if (baseName->name == "set" && generic->typeArgs.size() == 1) {
-            return std::make_shared<SetType>(resolveType(generic->typeArgs[0].get()));
+            auto elemType = resolveType(generic->typeArgs[0].get());
+            if (!supportsHashing(elemType)) {
+                error(generic->location(), "'" + elemType->toString() +
+                      "' cannot be a set element: it is mutable, so its hash "
+                      "would change under you; use a tuple of immutable values");
+            }
+            return std::make_shared<SetType>(elemType);
         }
         if (baseName->name == "deque" && generic->typeArgs.size() == 1) {
             return std::make_shared<DequeType>(resolveType(generic->typeArgs[0].get()));

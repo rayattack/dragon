@@ -699,11 +699,21 @@ static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
     return s;
 }
 
+static inline bool dragon_set_tag_is_scalar(uint8_t tag) {
+    return tag == TAG_INT || tag == TAG_BOOL || tag == TAG_NONE;
+}
+
 static inline uint64_t dragon_set_hash(int64_t val, uint8_t tag) {
     if (tag == TAG_STR && val) {
         return dragon_str_content_hash((const char*)(uintptr_t)val);
     }
-    return (uint64_t)val * 2654435761ULL;
+    if (!val || dragon_set_tag_is_scalar(tag) || tag == TAG_CALLABLE) {
+        return (uint64_t)val * 2654435761ULL;
+    }
+    DragonBox b;
+    b.tag = (int64_t)tag;
+    b.payload = val;
+    return dragon_box_hash(b);
 }
 
 static inline int dragon_set_value_eq(int64_t a, int64_t b, uint8_t tag) {
@@ -712,7 +722,14 @@ static inline int dragon_set_value_eq(int64_t a, int64_t b, uint8_t tag) {
         return dragon_str_bytes_equal(
             (const char*)(uintptr_t)a, (const char*)(uintptr_t)b);
     }
-    return 0;
+    if (!a || !b || dragon_set_tag_is_scalar(tag) || tag == TAG_CALLABLE) return 0;
+    DragonBox ba;
+    ba.tag = (int64_t)tag;
+    ba.payload = a;
+    DragonBox bb;
+    bb.tag = (int64_t)tag;
+    bb.payload = b;
+    return dragon_box_eq(ba, bb) ? 1 : 0;
 }
 
 static void dragon_set_grow(DragonSet* s) {

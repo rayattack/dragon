@@ -319,6 +319,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_dict_set_str_ptr",
         llvm::FunctionType::get(voidType, {i8PtrType, i8PtrType, i8PtrType, i64Type}, false));
 
+    getOrDeclareRuntime("dragon_dict_mark_obj_keys",
+        llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_mark_float_keys",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
 

@@ -232,6 +232,7 @@ enum DragonDictKeyKind : uint8_t {
     DRAGON_DICT_KEY_INT = 0,
     DRAGON_DICT_KEY_STR = 1,
     DRAGON_DICT_KEY_FLOAT = 2,
+    DRAGON_DICT_KEY_OBJ = 3,
 };
 
 struct DragonTuple {
@@ -680,6 +681,7 @@ void dragon_tuple_set(DragonTuple* t, int64_t index, int64_t val);
 void dragon_tuple_set_tagged(DragonTuple* t, int64_t index, int64_t val, int64_t tag);
 int64_t dragon_tuple_get(DragonTuple* t, int64_t index);
 int64_t dragon_tuple_len(DragonTuple* t);
+uint64_t dragon_box_hash(struct DragonBox b);
 int64_t dragon_tuple_eq(void* a, void* b);
 int64_t dragon_tuple_cmp(void* a, void* b);
 

@@ -1398,6 +1398,18 @@ std::unique_ptr<Expr> Parser::parseDict() {
             }
             if (match(TokenType::LEFT_PAREN)) {
                 auto key = expression();
+                if (match(TokenType::COMMA)) {
+                    auto tup = std::make_unique<TupleExpr>();
+                    tup->setLocation(key->location());
+                    tup->elements.push_back(std::move(key));
+                    while (!check(TokenType::RIGHT_PAREN) && !isAtEnd()) {
+                        tup->elements.push_back(expression());
+                        if (!match(TokenType::COMMA)) break;
+                    }
+                    consume(TokenType::RIGHT_PAREN,
+                            "Expect ')' after tuple dict key");
+                    return tup;
+                }
                 consume(TokenType::RIGHT_PAREN, "Expect ')' after computed dict key");
                 return key;
             }

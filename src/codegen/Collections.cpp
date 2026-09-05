@@ -181,12 +181,15 @@ void CodeGen::visit(DictExpr& node) {
 
     bool intKeys = false;
     bool floatKeys = false;
+    bool objKeys = false;
     if (auto* dt = dynamic_cast<DictType*>(node.type.get())) {
         if (dt->keyType && dt->keyType->kind() == Type::Kind::Int) intKeys = true;
         if (dt->keyType && dt->keyType->kind() == Type::Kind::Float) {
             intKeys = true;
             floatKeys = true;
         }
+        if (dt->keyType && Impl::dictKeyKindUsesObjEngine(dt->keyType->kind()))
+            objKeys = true;
     }
     for (auto& entry : node.entries) {
         if (!entry.first) continue;
@@ -201,12 +204,18 @@ void CodeGen::visit(DictExpr& node) {
         } else if (dynamic_cast<FloatLiteral*>(entry.first.get())) {
             intKeys = true;
             floatKeys = true;
+        } else if (entry.first->type &&
+                   Impl::dictKeyKindUsesObjEngine(entry.first->type->kind())) {
+            objKeys = true;
         }
         break;
     }
     if (floatKeys)
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_dict_mark_float_keys"], {dict});
+    if (objKeys)
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_dict_mark_obj_keys"], {dict});
 
     for (auto& entry : node.entries) {
         if (!entry.first) {
@@ -221,6 +230,7 @@ void CodeGen::visit(DictExpr& node) {
 
         entry.first->accept(*this);
         llvm::Value* key = impl_->lastValue;
+        if (objKeys) impl_->emitRetainDictObjKey(key, entry.first.get());
 
         entry.second->accept(*this);
         llvm::Value* val = impl_->lastValue;

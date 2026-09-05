@@ -101,6 +101,83 @@ const char* dragon_box_to_str(DragonBox box) {
     }
 }
 
+static const char* dragon_box_type_name(int64_t valueTag, int64_t payload);
+
+static const uint64_t kHashNone = 0x9E3779B97F4A7C15ULL;
+static const uint64_t kHashTupleSeed = 0x345678DEADBEEFULL;
+static const uint64_t kHashTupleMul = 1000003ULL;
+
+static inline uint64_t dragon_mix64(uint64_t z) {
+    z += 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return (z ^ (z >> 31)) | 1ULL;
+}
+
+uint64_t dragon_box_hash(DragonBox b) {
+    switch (b.tag) {
+        case TAG_INT:
+        case TAG_BOOL:
+            return dragon_mix64((uint64_t)b.payload);
+        case TAG_FLOAT: {
+            double d;
+            memcpy(&d, &b.payload, sizeof(double));
+            if (d == 0.0) d = 0.0;
+            if (d != d) return dragon_mix64(kHashNone);
+            uint64_t bits;
+            memcpy(&bits, &d, sizeof(bits));
+            return dragon_mix64(bits);
+        }
+        case TAG_NONE:
+            return dragon_mix64(kHashNone);
+        case TAG_STR:
+            return b.payload
+                ? dragon_str_content_hash((const char*)(uintptr_t)b.payload)
+                : dragon_mix64(0);
+        case TAG_BYTES: {
+            auto* by = (DragonBytes*)(uintptr_t)b.payload;
+            if (!by || by->header.type_tag != DRAGON_TAG_BYTES)
+                return dragon_mix64((uint64_t)b.payload);
+            return dragon_siphash13(by->data, (size_t)by->len,
+                                    __dragon_hash_k0, __dragon_hash_k1) | 1ULL;
+        }
+        case TAG_LIST: {
+            auto* h = (DragonObjectHeader*)(uintptr_t)b.payload;
+            if (!h) return dragon_mix64(0);
+            if (h->type_tag != DRAGON_TAG_TUPLE) {
+                if (h->type_tag == DRAGON_TAG_LIST ||
+                    h->type_tag == DRAGON_TAG_LIST_BOX ||
+                    h->type_tag == DRAGON_TAG_SET) {
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "TypeError: unhashable type: '%s'",
+                             dragon_box_type_name(b.tag, b.payload));
+                    dragon_raise_exc_cstr(80, buf);
+                    return 0;
+                }
+                return dragon_mix64((uint64_t)b.payload);
+            }
+            auto* t = (DragonTuple*)h;
+            uint64_t acc = kHashTupleSeed;
+            for (int64_t i = 0; i < t->length; i++) {
+                DragonBox e;
+                e.tag = t->elem_tags ? (int64_t)t->elem_tags[i] : (int64_t)TAG_INT;
+                e.payload = t->data[i];
+                acc = (acc ^ dragon_box_hash(e)) * kHashTupleMul;
+            }
+            return (acc ^ (uint64_t)t->length) | 1ULL;
+        }
+        case TAG_DICT: {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "TypeError: unhashable type: '%s'",
+                     dragon_box_type_name(b.tag, b.payload));
+            dragon_raise_exc_cstr(80, buf);
+            return 0;
+        }
+        default:
+            return dragon_mix64((uint64_t)b.payload);
+    }
+}
+
 int64_t dragon_box_eq(DragonBox a, DragonBox b) {
     if (a.tag != b.tag) return 0;
     switch (a.tag) {

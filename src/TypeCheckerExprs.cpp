@@ -45,17 +45,57 @@ static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
 }
 
 static const int kOrderNestLimit = 32;
+static const int kClassWalkLimit = 64;
+
+static bool classChainDefines(const ClassType* cls, const char* method) {
+    for (int guard = 0; cls && guard < kClassWalkLimit; ++guard) {
+        if (cls->methods.count(method)) return true;
+        if (!cls->promisedContracts.empty()) return true;
+        cls = (cls->parentClass && cls->parentClass->kind() == Type::Kind::Class)
+                  ? static_cast<const ClassType*>(cls->parentClass.get())
+                  : nullptr;
+    }
+    return false;
+}
+
+static Type::Kind enumValueKind(const ClassType& ct) {
+    if (!ct.isEnum) return Type::Kind::Unknown;
+    if (hasDeclaredBase(ct, "StrEnum")) return Type::Kind::Str;
+    if (hasDeclaredBase(ct, "IntEnum")) return Type::Kind::Int;
+    return Type::Kind::Unknown;
+}
+
+static const ClassType* orderableInstanceClass(const Type* t) {
+    if (!t || t->kind() != Type::Kind::Instance) return nullptr;
+    return static_cast<const InstanceType*>(t)->classType.get();
+}
+
+static Type::Kind orderingKind(const Type* t) {
+    const ClassType* cls = orderableInstanceClass(t);
+    if (!cls) return t->kind();
+    Type::Kind valueKind = enumValueKind(*cls);
+    return valueKind == Type::Kind::Unknown ? Type::Kind::Instance : valueKind;
+}
+
+static bool instanceSupportsOrdering(const Type* t) {
+    const ClassType* cls = orderableInstanceClass(t);
+    if (!cls) return false;
+    return classChainDefines(cls, "__lt__") || classChainDefines(cls, "__gt__");
+}
 
 static bool orderableTogether(const Type* a, const Type* b, int depth) {
     if (!a || !b || depth > kOrderNestLimit) return true;
-    auto ka = a->kind();
-    auto kb = b->kind();
+    auto ka = orderingKind(a);
+    auto kb = orderingKind(b);
+    if (ka == Type::Kind::Instance || kb == Type::Kind::Instance) {
+        if (ka != kb) return false;
+        return instanceSupportsOrdering(a) && instanceSupportsOrdering(b);
+    }
     auto unresolved = [](Type::Kind k) {
         return k == Type::Kind::Boxed || k == Type::Kind::Unknown ||
                k == Type::Kind::TypeVar || k == Type::Kind::Never ||
                k == Type::Kind::Union || k == Type::Kind::Optional ||
-               k == Type::Kind::Instance || k == Type::Kind::Contract ||
-               k == Type::Kind::Class;
+               k == Type::Kind::Contract || k == Type::Kind::Class;
     };
     if (unresolved(ka) || unresolved(kb)) return true;
     auto numeric = [](Type::Kind k) {
@@ -93,8 +133,56 @@ bool orderableTogether(const std::shared_ptr<Type>& a,
     return orderableTogether(a.get(), b.get(), 0);
 }
 
+static bool holdsClassInstance(const Type* t, int depth) {
+    if (!t || depth > kOrderNestLimit) return false;
+    switch (t->kind()) {
+        case Type::Kind::Instance:
+            return true;
+        case Type::Kind::List:
+        case Type::Kind::Deque:
+            return holdsClassInstance(
+                static_cast<const ListType*>(t)->elementType.get(), depth + 1);
+        case Type::Kind::Tuple: {
+            for (const auto& e : static_cast<const TupleType*>(t)->elementTypes)
+                if (holdsClassInstance(e.get(), depth + 1)) return true;
+            return false;
+        }
+        default:
+            return false;
+    }
+}
+
 bool supportsOrdering(const std::shared_ptr<Type>& t) {
+    if (holdsClassInstance(t.get(), 0)) return false;
     return orderableTogether(t.get(), t.get(), 0);
+}
+
+static bool hashableType(const Type* t, int depth) {
+    if (!t || depth > kOrderNestLimit) return true;
+    switch (t->kind()) {
+        case Type::Kind::List:
+        case Type::Kind::Deque:
+        case Type::Kind::Dict:
+        case Type::Kind::Set:
+            return false;
+        case Type::Kind::Tuple: {
+            for (const auto& e : static_cast<const TupleType*>(t)->elementTypes)
+                if (!hashableType(e.get(), depth + 1)) return false;
+            return true;
+        }
+        default:
+            return true;
+    }
+}
+
+bool supportsHashing(const std::shared_ptr<Type>& t) {
+    return hashableType(t.get(), 0);
+}
+
+std::string orderingRejectionHint(const std::shared_ptr<Type>& t) {
+    if (!holdsClassInstance(t.get(), 0)) return "";
+    return "; the runtime cannot reach a class's own ordering, so order a list "
+           "of the field you sort by (for an enum member, its .value)";
 }
 
 bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
@@ -843,7 +931,8 @@ void TypeChecker::visit(CallExpr& node) {
                 if (cn->name == "sorted" && !supportsOrdering(elem)) {
                     error(node.location(), "sorted() needs an orderable element "
                           "type, but list[" + elem->toString() +
-                          "] elements have no ordering");
+                          "] elements have no ordering" +
+                          orderingRejectionHint(elem));
                 }
                 node.type = std::make_shared<ListType>(elem);
                 return;
@@ -1070,7 +1159,8 @@ void TypeChecker::visit(CallExpr& node) {
             if (n == "sorted" && !supportsOrdering(elem)) {
                 error(node.location(), "sorted() needs an orderable element "
                       "type, but list[" + elem->toString() +
-                      "] elements have no ordering");
+                      "] elements have no ordering" +
+                      orderingRejectionHint(elem));
             }
             node.type = std::make_shared<ListType>(elem ? elem : impl_->boxedType);
             return;
@@ -1640,7 +1730,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             if (node.attribute == "sort" && !supportsOrdering(lt.elementType)) {
                 error(node.location(), "sort() needs an orderable element type, "
                       "but list[" + lt.elementType->toString() +
-                      "] elements have no ordering");
+                      "] elements have no ordering" +
+                      orderingRejectionHint(lt.elementType));
             }
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{},

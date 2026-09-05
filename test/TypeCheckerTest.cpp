@@ -2009,3 +2009,21 @@ TEST(TypeCheckerTest, MissingReturnAnnotationIsNone) {
     EXPECT_TRUE(checkHasErrors(code("unannotated_def_passed_to_value_returning_callable_rejected")));
     EXPECT_TRUE(checkOk(code("missing_return_annotation_is_none_accepted")));
 }
+
+TEST(TypeCheckerTest, ClassOrderingNeedsADunderOrAnEnumValue) {
+    EXPECT_TRUE(checkHasErrors(code("sort_of_class_without_ordering_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("class_without_ordering_operator_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("plain_enum_ordering_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("sorted_of_enum_members_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("min_of_class_without_ordering_rejected")));
+    EXPECT_TRUE(checkOk(code("class_with_lt_ordering_operator_accepted")));
+    EXPECT_TRUE(checkOk(code("value_enum_ordering_accepted")));
+}
+
+TEST(TypeCheckerTest, HashedContainersRejectMutableKeys) {
+    EXPECT_TRUE(checkHasErrors(code("mutable_set_element_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("mutable_dict_key_rejected")));
+    EXPECT_TRUE(checkHasErrors(
+        code("tuple_with_mutable_field_as_set_element_rejected")));
+    EXPECT_TRUE(checkOk(code("hashable_container_keys_accepted")));
+}

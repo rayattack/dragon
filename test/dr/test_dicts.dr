@@ -406,6 +406,76 @@ class DictFloatKeyTests(TestCase) {
 }
 
 
+class DictObjectKeyTests(TestCase) {
+    def test_distinct_tuple_keys_stay_distinct() {
+        d: dict[tuple[int, int], str] = {}
+        d[(1, 2)] = "a"
+        d[(3, 4)] = "b"
+        self.assertEqual(len(d), 2)
+        self.assertEqual(d[(1, 2)], "a")
+        self.assertEqual(d[(3, 4)], "b")
+    }
+
+    def test_equal_tuple_keys_are_one_key() {
+        d: dict[tuple[int, int], str] = {}
+        a: tuple[int, int] = (1, 2)
+        b: tuple[int, int] = (1, 2)
+        d[a] = "x"
+        d[b] = "y"
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[(1, 2)], "y")
+    }
+
+    def test_literal_and_membership() {
+        d: dict[tuple[str, int], int] = {("a", 1): 10, ("b", 2): 20}
+        self.assertEqual(len(d), 2)
+        self.assertEqual(d[("a", 1)], 10)
+        self.assertTrue(("b", 2) in d)
+        self.assertFalse(("c", 3) in d)
+    }
+
+    def test_nested_tuple_key() {
+        d: dict[tuple[int, tuple[int, int]], str] = {}
+        d[(1, (2, 3))] = "deep"
+        self.assertEqual(d[(1, (2, 3))], "deep")
+        self.assertFalse((1, (2, 4)) in d)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_keys_and_items_read_back() {
+        d: dict[tuple[int, int], int] = {}
+        d[(1, 2)] = 7
+        const ks: list[tuple[int, int]] = d.keys()
+        self.assertEqual(len(ks), 1)
+        self.assertEqual(ks[0][0], 1)
+        self.assertEqual(ks[0][1], 2)
+    }
+
+    def test_copy_and_delete() {
+        d: dict[tuple[int, int], str] = {}
+        d[(1, 2)] = "a"
+        d[(3, 4)] = "b"
+        const c: dict[tuple[int, int], str] = d.copy()
+        self.assertEqual(len(c), 2)
+        self.assertEqual(c[(3, 4)], "b")
+        del d[(1, 2)]
+        self.assertEqual(len(d), 1)
+        self.assertEqual(len(c), 2)
+    }
+
+    def test_bytes_keys() {
+        d: dict[bytes, int] = {}
+        d[b"xx"] = 1
+        d[b"yy"] = 2
+        d[b"xx"] = 3
+        self.assertEqual(len(d), 2)
+        self.assertEqual(d[b"xx"], 3)
+        self.assertTrue(b"yy" in d)
+        self.assertFalse(b"zz" in d)
+    }
+}
+
+
 class DictSpreadTests(TestCase) {
     """Dict construction via `**` spread - literal `{...}` and `dict(...)` forms.
 
@@ -633,4 +703,5 @@ class TestBoxDomains(TestCase) {
 
 
 main([DictGetOptionalTests(), DictIntIterationTests(), DictFloatKeyTests(),
-      DictSpreadTests(), TestTypedReads(), TestLifetimes(), TestBoxDomains()])
+      DictObjectKeyTests(), DictSpreadTests(), TestTypedReads(), TestLifetimes(),
+      TestBoxDomains()])

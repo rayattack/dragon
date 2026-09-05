@@ -1153,10 +1153,16 @@ void CodeGen::visit(DeleteStmt& node) {
             } else {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_dict_del"], {dict, key});
-                if (impl_->options.gcMode == GCMode::RC &&
-                    impl_->isOwnedStrResult(key)) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_decref_str"], {key});
+                if (impl_->options.gcMode == GCMode::RC) {
+                    if (impl_->dictKeyUsesObjEngine(sub->object.get())) {
+                        Impl::VarKind dk =
+                            impl_->ownedTempDrainKind(sub->index.get(), key);
+                        if (dk != Impl::VarKind::Other)
+                            impl_->emitDecrefByKind(key, dk);
+                    } else if (impl_->isOwnedStrResult(key)) {
+                        impl_->builder->CreateCall(
+                            impl_->runtimeFuncs["dragon_decref_str"], {key});
+                    }
                 }
             }
         }

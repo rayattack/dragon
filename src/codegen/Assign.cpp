@@ -186,17 +186,21 @@ bool CodeGen::tryEmitDictSubscriptStore(SubscriptExpr& sub, AssignStmt& node,
     if (impl_->options.gcMode == GCMode::RC && key &&
         key->getType()->isPointerTy()) {
         Expr* keyExpr = sub.index.get();
-        bool keyIsLiteral =
-            dynamic_cast<StringLiteral*>(keyExpr) ||
-            (dynamic_cast<NameExpr*>(keyExpr) &&
-             impl_->lookupVarKind(
-                 static_cast<NameExpr*>(keyExpr)->name)
-                 == Impl::VarKind::StrLiteral);
-        if (keyIsLiteral) {
-            key = impl_->ensureHeapString(key, keyExpr);
-        } else if (Impl::isBorrowedHeapExpr(keyExpr)) {
-            impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_incref_str"], {key});
+        if (impl_->dictKeyUsesObjEngine(sub.object.get())) {
+            impl_->emitRetainDictObjKey(key, keyExpr);
+        } else {
+            bool keyIsLiteral =
+                dynamic_cast<StringLiteral*>(keyExpr) ||
+                (dynamic_cast<NameExpr*>(keyExpr) &&
+                 impl_->lookupVarKind(
+                     static_cast<NameExpr*>(keyExpr)->name)
+                     == Impl::VarKind::StrLiteral);
+            if (keyIsLiteral) {
+                key = impl_->ensureHeapString(key, keyExpr);
+            } else if (Impl::isBorrowedHeapExpr(keyExpr)) {
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_incref_str"], {key});
+            }
         }
     }
 

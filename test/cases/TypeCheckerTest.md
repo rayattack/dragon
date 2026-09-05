@@ -3101,3 +3101,135 @@ s: dict[str, Payload] = {}
 v: list[Payload] = ["a", "b"]
 s["r"] = v
 ```
+
+#### :sort_of_class_without_ordering_rejected
+
+The sort runs inside the runtime, which has no way to call a Dragon `__lt__`,
+so a list of class instances has no ordering the compiler can promise.
+
+```dr
+class Plain {
+    v: int
+    def (v: int) { self.v = v }
+}
+ps: list[Plain] = [Plain(3), Plain(1)]
+ps.sort()
+```
+
+#### :class_without_ordering_operator_rejected
+
+```dr
+class Plain {
+    v: int
+    def (v: int) { self.v = v }
+}
+print(Plain(1) < Plain(2))
+```
+
+#### :plain_enum_ordering_rejected
+
+A bare `Enum` member carries no ordered value, only an identity.
+
+```dr
+from enum import Enum
+
+class Color(Enum) {
+    RED: int = 1
+    BLUE: int = 2
+}
+print(Color.RED < Color.BLUE)
+```
+
+#### :sorted_of_enum_members_rejected
+
+```dr
+from enum import IntEnum
+
+class Rank(IntEnum) {
+    LOW: int = 1
+    HIGH: int = 9
+}
+rs: list[Rank] = [Rank.HIGH, Rank.LOW]
+ys: list[Rank] = sorted(rs)
+```
+
+#### :min_of_class_without_ordering_rejected
+
+```dr
+class Plain {
+    v: int
+    def (v: int) { self.v = v }
+}
+ps: list[Plain] = [Plain(3), Plain(1)]
+m: Plain = min(ps)
+```
+
+#### :class_with_lt_ordering_operator_accepted
+
+```dr
+class Ranked {
+    v: int
+    def (v: int) { self.v = v }
+    def __lt__(other: Ranked) -> bool { return self.v < other.v }
+}
+print(Ranked(1) < Ranked(2))
+print(Ranked(2) >= Ranked(1))
+```
+
+#### :value_enum_ordering_accepted
+
+```dr
+from enum import IntEnum, StrEnum
+
+class Rank(IntEnum) {
+    LOW: int = 1
+    HIGH: int = 9
+}
+
+class Mode(StrEnum) {
+    READ: str = "r"
+    WRITE: str = "w"
+}
+print(Rank.LOW < Rank.HIGH)
+print(Mode.READ < Mode.WRITE)
+print(Rank.LOW < 5)
+```
+
+#### :mutable_set_element_rejected
+
+A list's hash would change the moment someone appends to it, so the entry
+would become unfindable in the set that holds it.
+
+```dr
+s: set[list[int]] = set()
+s.add([1, 2])
+```
+
+#### :mutable_dict_key_rejected
+
+```dr
+d: dict[list[int], int] = {}
+d[[1, 2]] = 1
+```
+
+#### :tuple_with_mutable_field_as_set_element_rejected
+
+```dr
+s: set[tuple[int, list[int]]] = set()
+```
+
+#### :hashable_container_keys_accepted
+
+```dr
+s: set[tuple[int, str]] = set()
+s.add((1, "a"))
+b: set[bytes] = set()
+b.add(b"aa")
+d: dict[tuple[int, int], str] = {}
+d[(1, 2)] = "x"
+e: dict[bytes, int] = {}
+e[b"k"] = 1
+v: dict[str, list[int]] = {"a": [1]}
+c: set[Callable[[], int]] = set()
+print(len(s) + len(b) + len(d) + len(e) + len(v) + len(c))
+```

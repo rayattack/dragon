@@ -24,6 +24,8 @@ bool hasDataclassDecorator(const ClassType& ct);
 bool orderableTogether(const std::shared_ptr<Type>& a,
                        const std::shared_ptr<Type>& b);
 bool supportsOrdering(const std::shared_ptr<Type>& t);
+std::string orderingRejectionHint(const std::shared_ptr<Type>& t);
+bool supportsHashing(const std::shared_ptr<Type>& t);
 
 struct TypeChecker::Impl {
     std::vector<TypeDiagnostic> diagnostics;

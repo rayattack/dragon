@@ -466,6 +466,48 @@ class SetMembership(TestCase) {
         self.assertTrue("x" in lit)
         self.assertTrue("z" in lit)
     }
+
+    def test_tuple_elements_hash_by_value() {
+        s: set[tuple[int, int]] = set()
+        s.add((1, 2))
+        s.add((1, 2))
+        self.assertEqual(len(s), 1)
+        self.assertTrue((1, 2) in s)
+        self.assertFalse((1, 3) in s)
+        s.add((1, 3))
+        self.assertEqual(len(s), 2)
+    }
+
+    def test_tuple_elements_named_and_inline_agree() {
+        s: set[tuple[str, int]] = set()
+        k: tuple[str, int] = ("a", 1)
+        s.add(k)
+        self.assertTrue(("a", 1) in s)
+        s.add(("a", 1))
+        self.assertEqual(len(s), 1)
+        s.discard(("a", 1))
+        self.assertEqual(len(s), 0)
+    }
+
+    def test_nested_tuple_elements() {
+        s: set[tuple[int, tuple[int, int]]] = set()
+        s.add((1, (2, 3)))
+        s.add((1, (2, 3)))
+        self.assertEqual(len(s), 1)
+        self.assertTrue((1, (2, 3)) in s)
+        self.assertFalse((1, (2, 4)) in s)
+    }
+
+    def test_bytes_elements_hash_by_value() {
+        s: set[bytes] = set()
+        s.add(b"aa")
+        s.add(b"aa")
+        self.assertEqual(len(s), 1)
+        self.assertTrue(b"aa" in s)
+        self.assertFalse(b"bb" in s)
+        lit: set[bytes] = {b"aa", b"bb", b"aa"}
+        self.assertEqual(len(lit), 2)
+    }
 }
 
 
@@ -584,6 +626,34 @@ class TupleOrderingTests(TestCase) {
 }
 
 
+class Ranked {
+    v: int
+    def (v: int) { self.v = v }
+    def __lt__(other: Ranked) -> bool { return self.v < other.v }
+    def __eq__(other: Ranked) -> bool { return self.v == other.v }
+}
+
+
+class ClassOrderingTests(TestCase) {
+    def test_class_with_lt_orders() {
+        a: Ranked = Ranked(1)
+        b: Ranked = Ranked(2)
+        self.assertTrue(a < b)
+        self.assertFalse(b < a)
+        self.assertTrue(b > a)
+        self.assertTrue(a <= b)
+        self.assertFalse(a >= b)
+    }
+
+    def test_class_equality_still_uses_eq() {
+        a: Ranked = Ranked(3)
+        b: Ranked = Ranked(3)
+        self.assertTrue(a == b)
+        self.assertFalse(a != b)
+    }
+}
+
+
 class InlineSetMethodTests(TestCase) {
     def test_len_of_inline_result() {
         a: set[int] = {1, 2}
@@ -601,4 +671,5 @@ class InlineSetMethodTests(TestCase) {
 
 main([AndOrValueTests(), TruthinessContextTests(), FloorDivModTests(),
       SetOperatorTests(), ListMembership(), SetMembership(),
-      SetOrderingTests(), TupleOrderingTests(), InlineSetMethodTests()])
+      SetOrderingTests(), TupleOrderingTests(), ClassOrderingTests(),
+      InlineSetMethodTests()])

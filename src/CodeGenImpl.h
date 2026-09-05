@@ -803,6 +803,23 @@ struct CodeGen::Impl {
         return k == Type::Kind::Int || k == Type::Kind::Float;
     }
 
+    static bool dictKeyKindUsesObjEngine(Type::Kind k) {
+        return k == Type::Kind::Tuple || k == Type::Kind::Bytes;
+    }
+
+    bool dictKeyUsesObjEngine(Expr* expr) {
+        return dictKeyKindUsesObjEngine(resolveDictKeyKind(expr));
+    }
+
+    void emitRetainDictObjKey(llvm::Value* key, Expr* keyExpr) {
+        if (options.gcMode != GCMode::RC) return;
+        if (!keyExpr || !isBorrowedHeapExpr(keyExpr)) return;
+        builder->CreateCall(
+            getOrDeclareRuntime("dragon_obj_retain",
+                llvm::FunctionType::get(i8PtrType, {i8PtrType}, false)),
+            {key});
+    }
+
     llvm::Value* emitFloatDictKeyBits(llvm::Value* key) {
         if (key->getType() == i64Type)
             key = builder->CreateSIToFP(key, f64Type, "fkey.widen");

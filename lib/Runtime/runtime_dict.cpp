@@ -13,8 +13,29 @@ static const int64_t DICT_TOMBSTONE = -2;
 
 
 
-static uint64_t dict_hash(const char* key) {
+int64_t dragon_box_eq(DragonBox a, DragonBox b);
+
+static inline DragonBox dict_obj_key_box(const char* key) {
+    DragonBox b;
+    b.payload = (int64_t)(uintptr_t)key;
+    auto* h = (DragonObjectHeader*)(uintptr_t)key;
+    b.tag = (h && h->type_tag == DRAGON_TAG_BYTES) ? TAG_BYTES : TAG_LIST;
+    return b;
+}
+
+static uint64_t dict_hash(const DragonDict* d, const char* key) {
+    if (d->key_kind == DRAGON_DICT_KEY_OBJ)
+        return dragon_box_hash(dict_obj_key_box(key));
     return dragon_str_content_hash(key);
+}
+
+static inline bool dict_key_equal(const DragonDict* d, const char* a,
+                                  const char* b) {
+    if (d->key_kind == DRAGON_DICT_KEY_OBJ)
+        return dragon_box_eq(dict_obj_key_box(a), dict_obj_key_box(b)) != 0;
+    int64_t la = dragon_str_total_bytes(a);
+    int64_t lb = dragon_str_total_bytes(b);
+    return la == lb && (la == 0 || memcmp(a, b, (size_t)la) == 0);
 }
 
 static int64_t next_power_of_2(int64_t n) {
@@ -40,12 +61,9 @@ static int64_t dict_probe(DragonDict* d, const char* key, uint64_t h) {
         if (idx == DICT_TOMBSTONE) {
             if (first_tombstone < 0) first_tombstone = slot;
         } else {
-            if (d->entries[idx].hash == h) {
-                int64_t la = dragon_str_total_bytes(d->entries[idx].key);
-                int64_t lb = dragon_str_total_bytes(key);
-                if (la == lb && (la == 0 || memcmp(d->entries[idx].key, key, (size_t)la) == 0)) {
-                    return slot;
-                }
+            if (d->entries[idx].hash == h &&
+                dict_key_equal(d, d->entries[idx].key, key)) {
+                return slot;
             }
         }
         slot = (slot + 1) & mask;
@@ -128,24 +146,43 @@ DragonDict* dragon_dict_new(int64_t cap) {
 }
 
 static inline void dragon_dict_release_key(const DragonDict* d, const char* key) {
+    if (!key) return;
+    if (d->key_kind == DRAGON_DICT_KEY_OBJ) {
+        dragon_decref_dispatch((void*)(uintptr_t)key);
+        return;
+    }
     if (d->key_kind != DRAGON_DICT_KEY_STR) return;
-    if (key) dragon_decref_str_dispatch(key);
+    dragon_decref_str_dispatch(key);
+}
+
+static inline void dragon_dict_retain_key(const DragonDict* d, const char* key) {
+    if (!key) return;
+    if (d->key_kind == DRAGON_DICT_KEY_OBJ) {
+        dragon_incref((void*)(uintptr_t)key);
+        return;
+    }
+    if (d->key_kind == DRAGON_DICT_KEY_STR) dragon_incref_str(key);
 }
 
 void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64_t tag) {
     bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
-    d->key_kind = DRAGON_DICT_KEY_STR;
+    if (d->key_kind != DRAGON_DICT_KEY_OBJ) d->key_kind = DRAGON_DICT_KEY_STR;
     if (value && dragon_value_tag_is_traceable((int8_t)tag) &&
         !(d->header.gc_flags & GC_FLAG_TRACKED)) {
         dragon_gc_track(d);
     }
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
 
     bool dict_shared = (d->header.gc_flags & GC_FLAG_SHARED) != 0;
     if (dict_shared) {
-        if (key) dragon_mark_shared_str(key);
+        if (key) {
+            if (d->key_kind == DRAGON_DICT_KEY_OBJ)
+                dragon_mark_shared_deep((void*)(uintptr_t)key);
+            else
+                dragon_mark_shared_str(key);
+        }
         if (value) {
             if (tag == TAG_STR)
                 dragon_mark_shared_str((const char*)(uintptr_t)value);
@@ -206,7 +243,7 @@ static void dragon_raise_keyerror_int(int64_t key) {
 }
 
 int64_t dragon_dict_get(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) return d->entries[idx].value;
@@ -219,7 +256,7 @@ const char* dragon_string_alloc(const char* src, int64_t byte_len);
 // Str-valued get(key, default) returns an OWNED reference (incref'd stored
 // value or a fresh default copy); the generic BORROW variant double-freed here (registry CSRF/login form UAF).
 const char* dragon_dict_get_str_or_null(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) return nullptr;
@@ -229,7 +266,7 @@ const char* dragon_dict_get_str_or_null(DragonDict* d, const char* key) {
 }
 
 const char* dragon_dict_get_str_default(DragonDict* d, const char* key, const char* def) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) {
@@ -241,7 +278,7 @@ const char* dragon_dict_get_str_default(DragonDict* d, const char* key, const ch
 }
 
 int64_t dragon_dict_get_tag(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) return d->entries[idx].tag;
@@ -250,7 +287,7 @@ int64_t dragon_dict_get_tag(DragonDict* d, const char* key) {
 
 DragonBox dragon_dict_get_box_default(DragonDict* d, const char* key,
                                       DragonBox def) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     DragonBox box = def;
@@ -263,7 +300,7 @@ DragonBox dragon_dict_get_box_default(DragonDict* d, const char* key,
 }
 
 DragonBox dragon_dict_get_box_or_none(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     DragonBox box;
@@ -278,7 +315,7 @@ DragonBox dragon_dict_get_box_or_none(DragonDict* d, const char* key) {
 }
 
 DragonBox dragon_dict_get_box(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
@@ -312,7 +349,7 @@ static const char* tag_name(int64_t tag) {
 }
 
 int64_t dragon_dict_get_checked(DragonDict* d, const char* key, int64_t expected_tag) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
@@ -335,7 +372,7 @@ int64_t dragon_dict_len(DragonDict* d) {
 }
 
 int64_t dragon_dict_has_key(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     return d->indices[slot] >= 0 ? 1 : 0;
 }
@@ -362,7 +399,7 @@ void dragon_dict_reject_unknown_keys(DragonDict* d, const char** allowed,
 
 int64_t dragon_dict_str_iaug_i64(DragonDict* d, const char* key,
                                  int64_t operand, int64_t op) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
@@ -402,7 +439,7 @@ int64_t dragon_dict_str_iaug_i64(DragonDict* d, const char* key,
 }
 
 int64_t dragon_dict_get_default(DragonDict* d, const char* key, int64_t def) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) return d->entries[idx].value;
@@ -412,7 +449,7 @@ int64_t dragon_dict_get_default(DragonDict* d, const char* key, int64_t def) {
 // Owned-returning getters for heap-valued dicts: the generic i64 getters
 // return a BORROW, so `g = d.get(k)` decref'd at scope exit frees the dict's value (UAF); these incref what they return.
 void* dragon_dict_get_ptr(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) {
@@ -425,7 +462,7 @@ void* dragon_dict_get_ptr(DragonDict* d, const char* key) {
 }
 
 void* dragon_dict_get_ptr_or_null(DragonDict* d, const char* key) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) return nullptr;
@@ -435,7 +472,7 @@ void* dragon_dict_get_ptr_or_null(DragonDict* d, const char* key) {
 }
 
 void* dragon_dict_get_ptr_default(DragonDict* d, const char* key, void* def) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     void* v = (idx >= 0) ? (void*)(uintptr_t)d->entries[idx].value : def;
@@ -447,7 +484,20 @@ void dragon_dict_mark_float_keys(DragonDict* d) {
     if (d) d->key_kind = DRAGON_DICT_KEY_FLOAT;
 }
 
+void dragon_dict_mark_obj_keys(DragonDict* d) {
+    if (d) d->key_kind = DRAGON_DICT_KEY_OBJ;
+}
+
 DragonList* dragon_dict_keys(DragonDict* d) {
+    if (d && d->key_kind == DRAGON_DICT_KEY_OBJ) {
+        DragonList* l = dragon_list_new_tagged(d->used, TAG_LIST);
+        for (int64_t i = 0; i < d->size; i++) {
+            if (d->entries[i].dead) continue;
+            dragon_incref((void*)(uintptr_t)d->entries[i].key);
+            dragon_list_append(l, (int64_t)d->entries[i].key);
+        }
+        return l;
+    }
     if (d && d->key_kind == DRAGON_DICT_KEY_STR) {
         DragonList* l = dragon_list_new_tagged(d->used, TAG_STR);
         for (int64_t i = 0; i < d->size; i++) {
@@ -585,7 +635,10 @@ DragonList* dragon_dict_items(DragonDict* d) {
         for (int64_t i = 0; i < d->size; i++) {
             if (d->entries[i].dead) continue;
             DragonTuple* t = dragon_tuple_new(2);
-            if (d->key_kind == DRAGON_DICT_KEY_STR) {
+            if (d->key_kind == DRAGON_DICT_KEY_OBJ) {
+                dragon_incref((void*)(uintptr_t)d->entries[i].key);
+                dragon_tuple_set_tagged(t, 0, (int64_t)d->entries[i].key, TAG_LIST);
+            } else if (d->key_kind == DRAGON_DICT_KEY_STR) {
                 dragon_incref_str(d->entries[i].key);
                 dragon_tuple_set_tagged(t, 0, (int64_t)d->entries[i].key, TAG_STR);
             } else if (d->key_kind == DRAGON_DICT_KEY_FLOAT) {
@@ -625,7 +678,9 @@ int64_t dragon_dict_popitem(DragonDict* d) {
     while (lastIdx >= 0 && d->entries[lastIdx].dead) lastIdx--;
     DictEntry e = d->entries[lastIdx];
     DragonTuple* t = dragon_tuple_new(2);
-    if (d->key_kind == DRAGON_DICT_KEY_STR) {
+    if (d->key_kind == DRAGON_DICT_KEY_OBJ) {
+        dragon_tuple_set_tagged(t, 0, (int64_t)e.key, TAG_LIST);
+    } else if (d->key_kind == DRAGON_DICT_KEY_STR) {
         dragon_tuple_set_tagged(t, 0, (int64_t)e.key, TAG_STR);
     } else if (d->key_kind == DRAGON_DICT_KEY_FLOAT) {
         dragon_tuple_set_tagged(t, 0, (int64_t)e.key, TAG_FLOAT);
@@ -633,8 +688,10 @@ int64_t dragon_dict_popitem(DragonDict* d) {
         dragon_tuple_set(t, 0, (int64_t)e.key);
     }
     dragon_tuple_set_tagged(t, 1, e.value, e.tag);
-    int64_t slot = d->key_kind == DRAGON_DICT_KEY_STR ? dict_probe(d, e.key, e.hash)
-                                   : dict_probe_i64(d, (int64_t)(uintptr_t)e.key, e.hash);
+    bool keyIsPtr = d->key_kind == DRAGON_DICT_KEY_STR ||
+                    d->key_kind == DRAGON_DICT_KEY_OBJ;
+    int64_t slot = keyIsPtr ? dict_probe(d, e.key, e.hash)
+                            : dict_probe_i64(d, (int64_t)(uintptr_t)e.key, e.hash);
     d->indices[slot] = DICT_TOMBSTONE;
     d->entries[lastIdx].dead = 1;
     d->entries[lastIdx].key = nullptr;
@@ -650,7 +707,7 @@ int64_t dragon_dict_popitem(DragonDict* d) {
 
 int64_t dragon_dict_pop(DragonDict* d, const char* key) {
     bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
@@ -672,7 +729,7 @@ int64_t dragon_dict_pop(DragonDict* d, const char* key) {
 
 int64_t dragon_dict_pop_default(DragonDict* d, const char* key, int64_t def) {
     bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
@@ -693,7 +750,7 @@ int64_t dragon_dict_pop_default(DragonDict* d, const char* key, int64_t def) {
 
 void dragon_dict_del(DragonDict* d, const char* key) {
     bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
@@ -753,7 +810,12 @@ void dragon_dict_update(DragonDict* d, DragonDict* other) {
     for (int64_t i = 0; i < other->size; i++) {
         if (other->entries[i].dead) continue;
         dragon_incref_tagged(other->entries[i].value, other->entries[i].tag);
-        if (other->key_kind == DRAGON_DICT_KEY_STR) {
+        if (other->key_kind == DRAGON_DICT_KEY_OBJ) {
+            d->key_kind = DRAGON_DICT_KEY_OBJ;
+            dragon_dict_retain_key(d, other->entries[i].key);
+            dragon_dict_set_tagged(d, other->entries[i].key,
+                                   other->entries[i].value, other->entries[i].tag);
+        } else if (other->key_kind == DRAGON_DICT_KEY_STR) {
             // d takes its own ref to each str key; without it, d's keys
             // would dangle when `other` dies and d's destroy would double-free.
             dragon_incref_str(other->entries[i].key);
@@ -769,7 +831,7 @@ void dragon_dict_update(DragonDict* d, DragonDict* other) {
 }
 
 int64_t dragon_dict_setdefault(DragonDict* d, const char* key, int64_t def) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) {
@@ -781,7 +843,7 @@ int64_t dragon_dict_setdefault(DragonDict* d, const char* key, int64_t def) {
 }
 
 void* dragon_dict_setdefault_ptr(DragonDict* d, const char* key, void* def, int64_t tag) {
-    uint64_t h = dict_hash(key);
+    uint64_t h = dict_hash(d, key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx >= 0) {
@@ -817,8 +879,9 @@ DragonDict* dragon_dict_copy_excluding(DragonDict* d, const char** names,
         // dragon_incref_tagged covers closures too; the old chain missed
         // them, so copying dict[str, Callable] double-freed the closure on destroy.
         if (val) dragon_incref_tagged(val, tag);
-        if (d->key_kind == DRAGON_DICT_KEY_STR) {
-            dragon_incref_str(d->entries[i].key);
+        if (d->key_kind == DRAGON_DICT_KEY_STR ||
+            d->key_kind == DRAGON_DICT_KEY_OBJ) {
+            dragon_dict_retain_key(copy, d->entries[i].key);
             dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
         } else {
             dragon_dict_int_set_tagged(copy, (int64_t)(uintptr_t)d->entries[i].key,
@@ -836,8 +899,9 @@ DragonDict* dragon_dict_deep_copy(DragonDict* d) {
             if (d->entries[i].dead) continue;
             int64_t val = dragon_deep_copy_tagged(d->entries[i].value,
                                                   d->entries[i].tag);
-            if (d->key_kind == DRAGON_DICT_KEY_STR) {
-                dragon_incref_str(d->entries[i].key);
+            if (d->key_kind == DRAGON_DICT_KEY_STR ||
+                d->key_kind == DRAGON_DICT_KEY_OBJ) {
+                dragon_dict_retain_key(copy, d->entries[i].key);
                 dragon_dict_set_tagged(copy, d->entries[i].key, val,
                                        d->entries[i].tag);
             } else {
@@ -861,8 +925,9 @@ DragonDict* dragon_dict_copy(DragonDict* d) {
             // dragon_incref_tagged covers closures too; the old chain missed
             // them (dict[str, Callable].copy() double-freed closures).
             if (val) dragon_incref_tagged(val, tag);
-            if (d->key_kind == DRAGON_DICT_KEY_STR) {
-                dragon_incref_str(d->entries[i].key);
+            if (d->key_kind == DRAGON_DICT_KEY_STR ||
+                d->key_kind == DRAGON_DICT_KEY_OBJ) {
+                dragon_dict_retain_key(copy, d->entries[i].key);
                 dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
             } else {
                 dragon_dict_int_set_tagged(copy,
@@ -1250,9 +1315,6 @@ DragonList* dragon_dict_int_keys(DragonDict* d) {
     return l;
 }
 
-struct DragonBoxAbi { int64_t tag; int64_t payload; };
-extern int64_t dragon_box_eq(DragonBoxAbi a, DragonBoxAbi b);
-
 int64_t dragon_dict_eq(DragonDict* a, DragonDict* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
@@ -1264,10 +1326,10 @@ int64_t dragon_dict_eq(DragonDict* a, DragonDict* b) {
         int64_t bslot = dict_probe(b, k, h);
         int64_t bidx = b->indices[bslot];
         if (bidx < 0) return 0;
-        DragonBoxAbi av;
+        DragonBox av;
         av.tag = (int64_t)a->entries[i].tag;
         av.payload = a->entries[i].value;
-        DragonBoxAbi bv;
+        DragonBox bv;
         bv.tag = (int64_t)b->entries[bidx].tag;
         bv.payload = b->entries[bidx].value;
         if (!dragon_box_eq(av, bv)) return 0;
@@ -1286,10 +1348,10 @@ int64_t dragon_dict_int_eq(DragonDict* a, DragonDict* b) {
         int64_t bslot = dict_probe_i64(b, k, h);
         int64_t bidx = b->indices[bslot];
         if (bidx < 0) return 0;
-        DragonBoxAbi av;
+        DragonBox av;
         av.tag = (int64_t)a->entries[i].tag;
         av.payload = a->entries[i].value;
-        DragonBoxAbi bv;
+        DragonBox bv;
         bv.tag = (int64_t)b->entries[bidx].tag;
         bv.payload = b->entries[bidx].value;
         if (!dragon_box_eq(av, bv)) return 0;

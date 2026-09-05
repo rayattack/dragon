@@ -1908,6 +1908,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (method == "add" && node.args.size() == 1) {
             llvm::Value* v;
             llvm::Value* ownedStrArg = nullptr;
+            llvm::Value* ownedObjArg = nullptr;
             node.args[0]->accept(*this);
             Type::Kind addKind = Impl::arrivalKind(node.args[0].get());
             v = impl_->narrowBoxForExpr(node.args[0].get(), impl_->lastValue);
@@ -1923,14 +1924,22 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     addKind = want;
                 }
             }
+            auto* addLit = dynamic_cast<StringLiteral*>(node.args[0].get());
+            bool addIsBytes = addKind == Type::Kind::Bytes ||
+                              (addLit && addLit->isBytes);
             if (v->getType()->isPointerTy()) {
-                v = impl_->ensureHeapString(v, node.args[0].get());
-                bool argIsStr =
-                    addKind == Type::Kind::Str ||
-                    dynamic_cast<StringLiteral*>(node.args[0].get());
+                if (!addIsBytes)
+                    v = impl_->ensureHeapString(v, node.args[0].get());
+                bool argIsStr = !addIsBytes &&
+                    (addKind == Type::Kind::Str || addLit != nullptr);
                 if (impl_->options.gcMode == GCMode::RC && argIsStr &&
-                    impl_->isOwnedStrResult(v))
+                    impl_->isOwnedStrResult(v)) {
                     ownedStrArg = v;
+                } else if (impl_->options.gcMode == GCMode::RC && !argIsStr &&
+                           impl_->ownedTempDrainKind(node.args[0].get(), v) !=
+                               Impl::VarKind::Other) {
+                    ownedObjArg = v;
+                }
                 v = impl_->builder->CreatePtrToInt(v, impl_->i64Type);
             } else if (v->getType() == impl_->i1Type) {
                 v = impl_->builder->CreateZExt(v, impl_->i64Type);
@@ -1939,8 +1948,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             }
             {
                 int64_t addTag = impl_->typeKindToElemTag(addKind);
-                if (addTag == 0 && dynamic_cast<StringLiteral*>(node.args[0].get()))
-                    addTag = TAG_STR;
+                if (addTag == 0 && addLit)
+                    addTag = addLit->isBytes ? TAG_BYTES : TAG_STR;
                 if (addTag != 0) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_set_adopt_tag"],
@@ -1952,6 +1961,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (ownedStrArg)
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_decref_str"], {ownedStrArg});
+            if (ownedObjArg)
+                impl_->emitDecrefByKind(ownedObjArg, Impl::VarKind::List);
             impl_->lastValue = llvm::ConstantPointerNull::get(
                 llvm::cast<llvm::PointerType>(impl_->i8PtrType));
             return true;
