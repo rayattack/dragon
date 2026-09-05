@@ -202,6 +202,16 @@ foreach(_guard import_missing_guard from_import_missing_guard)
         PASS_REGULAR_EXPRESSION "cannot find module 'zzz_no_such_module'")
 endforeach()
 
+add_test(NAME dr_reactive_local_guard
+    COMMAND $<TARGET_FILE:dragon> check ${CMAKE_CURRENT_SOURCE_DIR}/dr/reactive_local_guard.dr)
+set_tests_properties(dr_reactive_local_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "may reference only module-global names")
+
+add_test(NAME dr_reactive_global_guard
+    COMMAND $<TARGET_FILE:dragon> run ${CMAKE_CURRENT_SOURCE_DIR}/dr/reactive_global_guard.dr)
+set_tests_properties(dr_reactive_global_guard PROPERTIES
+    PASS_REGULAR_EXPRESSION "reactive global ok")
+
 add_test(NAME dr_alias_import_guard
     COMMAND $<TARGET_FILE:dragon> run ${CMAKE_CURRENT_SOURCE_DIR}/dr/alias_import_guard.dr)
 set_tests_properties(dr_alias_import_guard PROPERTIES

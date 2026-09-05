@@ -173,10 +173,6 @@ void CodeGen::visit(StringLiteral& node) {
     impl_->lastValue = impl_->emitStringLiteralBytes(processed);
 }
 
-static constexpr char kSignalTemplateKey[] = "ui.Signal";
-static constexpr char kSignalCallDunder[] = "__call__";
-static constexpr char kSignalGetMethod[] = "get";
-
 static std::string spliceSite(const std::string& exprText) {
     return "template splice `!{" + exprText + "}`";
 }
@@ -731,6 +727,7 @@ llvm::Value* CodeGen::emitTemplateJoin(TemplateExpr& node, const TemplatePart& p
 void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType) {
     const std::string& val = node.body;
 
+    TemplateIncludeContext sqlIncludes;
     llvm::Value* params = impl_->builder->CreateCall(
         impl_->runtimeFuncs["dragon_list_box_new"],
         {llvm::ConstantInt::get(impl_->i64Type, 0)}, "sql.params");
@@ -765,12 +762,25 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
             std::string exprText = val.substr(start, j - start);
             i = j + 1;
 
-            LexerOptions fLexOpts; fLexOpts.filename = "<sql-template>";
+            LexerOptions fLexOpts;
+            fLexOpts.filename = node.location().filename;
             Lexer fLexer(exprText, fLexOpts);
             auto fTokens = fLexer.tokenize();
-            ParserOptions fOpts; fOpts.isDragonFile = true;
+            ParserOptions fOpts;
+            fOpts.isDragonFile = true;
+            fOpts.filename = node.location().filename;
+            fOpts.templateIncludes = &sqlIncludes;
             Parser fParser(std::move(fTokens), fOpts);
             auto fExpr = fParser.parseExpression();
+            for (auto& includeError : sqlIncludes.errors)
+                impl_->addError("template[" + contentType + "]: " + includeError,
+                                node.location());
+            const bool sqlIncludeFailed = !sqlIncludes.errors.empty();
+            sqlIncludes.errors.clear();
+            if (sqlIncludeFailed) {
+                canonical += "$$" + std::to_string(paramIndex++);
+                continue;
+            }
             if (!fExpr || fParser.hasErrors()) {
                 impl_->addError("template[" + contentType + "]: each !{...} must be "
                                 "a single bound expression (block interpolation in "

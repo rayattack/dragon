@@ -1,0 +1,13 @@
+import ui
+from html import HTML
+from ui import Signal
+
+
+def render() -> str {
+    local: Signal[int] = Signal(0)
+    page: HTML = template[HTML] {<p>!{local()}</p>}
+    return page.to_str()
+}
+
+
+print(render())

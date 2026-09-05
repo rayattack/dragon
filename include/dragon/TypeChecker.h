@@ -437,6 +437,19 @@ private:
 
     void checkTemplateFilter(TemplatePart& part);
 
+    bool spliceIsRegistrableHandler(const Expr* expr) const;
+
+    bool uiModuleIsLinked() const;
+
+    bool isSignalRead(const Expr* expr) const;
+
+    void analyzeReactiveSplice(const Expr* expr, bool& readsSignal,
+                               bool& readsLocal) const;
+
+    bool nameIsModuleGlobal(const std::string& name) const;
+
+    void checkReactiveSplice(const TemplatePart& part, const TemplateExpr& node);
+
     void visitClassDeclBody(ClassDecl& node);
 
     void collectGenericTemplates(Module& module);

@@ -1,0 +1,20 @@
+import ui
+from html import HTML
+from ui import Signal
+
+count: Signal[int] = Signal(7)
+
+
+def render() -> str {
+    page: HTML = template[HTML] {<p>!{count()}</p>}
+    return page.to_str()
+}
+
+
+def label() -> str {
+    page: HTML = template[HTML] {<button onclick=!{render}>go</button>}
+    return page.to_str()
+}
+
+
+print("reactive global ok" if "7" in render() and "window.dr.invoke" in label() else "BAD")

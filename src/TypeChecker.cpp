@@ -1392,6 +1392,97 @@ void TypeChecker::checkTemplateFilter(TemplatePart& part) {
           "escaped exactly like an unfiltered one.");
 }
 
+bool TypeChecker::spliceIsRegistrableHandler(const Expr* expr) const {
+    if (dynamic_cast<const LambdaExpr*>(expr)) return true;
+    auto* name = dynamic_cast<const NameExpr*>(expr);
+    return name && impl_->plainFunctionSymbols.count(name->name) > 0;
+}
+
+bool TypeChecker::uiModuleIsLinked() const {
+    return impl_->moduleTypes.count(kUiModuleName) > 0;
+}
+
+bool TypeChecker::isSignalRead(const Expr* expr) const {
+    if (!expr || !expr->type) return false;
+    auto* instance = dynamic_cast<const InstanceType*>(expr->type.get());
+    if (!instance || !instance->classType) return false;
+    const ClassType& cls = *instance->classType;
+    if (cls.genericOrigin != kSignalTemplateKey) return false;
+    return cls.methods.count(kSignalCallDunder) > 0 ||
+           cls.methods.count(kSignalGetMethod) > 0;
+}
+
+bool TypeChecker::nameIsModuleGlobal(const std::string& name) const {
+    for (int i = static_cast<int>(impl_->scopes.size()) - 1; i > 0; --i)
+        if (impl_->scopes[i].bindings.count(name) > 0) return false;
+    return true;
+}
+
+void TypeChecker::analyzeReactiveSplice(const Expr* expr, bool& readsSignal,
+                                        bool& readsLocal) const {
+    if (!expr) return;
+    if (auto* name = dynamic_cast<const NameExpr*>(expr)) {
+        if (!nameIsModuleGlobal(name->name)) readsLocal = true;
+        return;
+    }
+    if (auto* call = dynamic_cast<const CallExpr*>(expr)) {
+        if (call->args.empty()) {
+            if (isSignalRead(call->callee.get())) readsSignal = true;
+            if (auto* attr = dynamic_cast<const AttributeExpr*>(call->callee.get()))
+                if ((attr->attribute == kSignalGetMethod ||
+                     attr->attribute == kSignalCallDunder) &&
+                    isSignalRead(attr->object.get()))
+                    readsSignal = true;
+        }
+        analyzeReactiveSplice(call->callee.get(), readsSignal, readsLocal);
+        for (auto& a : call->args)
+            analyzeReactiveSplice(a.get(), readsSignal, readsLocal);
+        for (auto& kw : call->kwArgs)
+            analyzeReactiveSplice(kw.second.get(), readsSignal, readsLocal);
+        return;
+    }
+    if (auto* bin = dynamic_cast<const BinaryExpr*>(expr)) {
+        analyzeReactiveSplice(bin->left.get(), readsSignal, readsLocal);
+        analyzeReactiveSplice(bin->right.get(), readsSignal, readsLocal);
+        return;
+    }
+    if (auto* un = dynamic_cast<const UnaryExpr*>(expr)) {
+        analyzeReactiveSplice(un->operand.get(), readsSignal, readsLocal);
+        return;
+    }
+    if (auto* attr = dynamic_cast<const AttributeExpr*>(expr)) {
+        analyzeReactiveSplice(attr->object.get(), readsSignal, readsLocal);
+        return;
+    }
+    if (auto* sub = dynamic_cast<const SubscriptExpr*>(expr)) {
+        analyzeReactiveSplice(sub->object.get(), readsSignal, readsLocal);
+        analyzeReactiveSplice(sub->index.get(), readsSignal, readsLocal);
+        return;
+    }
+}
+
+void TypeChecker::checkReactiveSplice(const TemplatePart& part,
+                                      const TemplateExpr& node) {
+    if (!precedingAttrName(node.body, part.bangPos).empty()) return;
+    bool readsSignal = false;
+    bool readsLocal = false;
+    analyzeReactiveSplice(part.expr.get(), readsSignal, readsLocal);
+    if (!readsSignal) return;
+    if (!uiModuleIsLinked()) {
+        error(part.expr->location(),
+              "reactive interpolation (e.g. `!{count()}` over a Signal) "
+              "requires `import ui`");
+        return;
+    }
+    if (readsLocal) {
+        error(part.expr->location(),
+              "reactive interpolation `!{" + part.exprText + "}` may reference "
+              "only module-global names in this release; it reads a local. Move "
+              "the Signal (and anything it derives from) to module scope, or use "
+              "an explicit `effect()`.");
+    }
+}
+
 void TypeChecker::checkTemplateSplice(TemplatePart& part,
                                       const TemplateExpr& node) {
     const bool isJoin = part.filterName == "join" ||
@@ -1399,8 +1490,15 @@ void TypeChecker::checkTemplateSplice(TemplatePart& part,
     const std::string site = "template splice `!{" + part.exprText + "}`";
     if (!part.isSpread && !isJoin) {
         if (isEventAttrContext(node.body, part.bangPos) && part.expr->type &&
-            part.expr->type->kind() == Type::Kind::Function)
+            part.expr->type->kind() == Type::Kind::Function &&
+            spliceIsRegistrableHandler(part.expr.get())) {
+            if (!uiModuleIsLinked())
+                error(part.expr->location(),
+                      "event-handler interpolation (e.g. `onclick=!{...}`) "
+                      "requires `import ui`");
             return;
+        }
+        checkReactiveSplice(part, node);
         checkRenderable(part.expr.get(), site);
         return;
     }
@@ -1483,6 +1581,21 @@ std::shared_ptr<Type> TypeChecker::resolveTemplateContentType(
         error(loc, "template[" + contentType + "]: '" + contentType +
               "' must extend Template");
         return std::make_shared<InstanceType>(cls);
+    }
+
+    if (findMethodOwner(cls.get(), "build")) {
+        auto ctorIt = cls->methods.find("__init__");
+        auto* ctor = ctorIt == cls->methods.end()
+                         ? nullptr
+                         : dynamic_cast<FunctionType*>(ctorIt->second.get());
+        if (!ctor || ctor->paramTypes.size() != kBoundStatementCtorArity) {
+            error(loc, "template[" + contentType + "]: a content type with a "
+                  "`build` method lowers to a parameterized statement, so " +
+                  contentType + " must declare its own three-parameter "
+                  "constructor `def(canonical: str, hash: int, params: "
+                  "list[...])`; the splices become bound parameters and are "
+                  "passed to it");
+        }
     }
 
     return std::make_shared<InstanceType>(cls);

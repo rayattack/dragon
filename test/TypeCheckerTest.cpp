@@ -1021,6 +1021,25 @@ TEST(TypeCheckerTest, TemplateFilterStrAndContentTypeAccepted) {
     EXPECT_TRUE(checkOk(code("template_filter_str_and_content_type_accepted")));
 }
 
+TEST(TypeCheckerTest, TemplateEventHandlerRequiresUi) {
+    EXPECT_TRUE(checkHasErrors(code("template_event_handler_requires_ui")));
+}
+
+TEST(TypeCheckerTest, TemplateEventHandlerCallableVariableRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        code("template_event_handler_callable_variable_rejected")));
+}
+
+TEST(TypeCheckerTest, BoundStatementContentTypeNeedsThreeParameterCtor) {
+    EXPECT_TRUE(checkHasErrors(
+        code("bound_statement_content_type_needs_three_parameter_ctor")));
+}
+
+TEST(TypeCheckerTest, BoundStatementContentTypeWithThreeParameterCtorAccepted) {
+    EXPECT_TRUE(checkOk(
+        code("bound_statement_content_type_with_three_parameter_ctor_accepted")));
+}
+
 TEST(TypeCheckerTest, UntypedTemplateUnchangedStillStr) {
     auto module = parse("y: str = template {hello}\n");
     ASSERT_NE(module, nullptr);

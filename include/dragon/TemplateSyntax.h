@@ -1,9 +1,16 @@
 #ifndef DRAGON_TEMPLATE_SYNTAX_H
 #define DRAGON_TEMPLATE_SYNTAX_H
 
+#include <cstddef>
 #include <string>
 
 namespace dragon {
+
+inline constexpr char kSignalTemplateKey[] = "ui.Signal";
+inline constexpr char kSignalCallDunder[] = "__call__";
+inline constexpr char kSignalGetMethod[] = "get";
+inline constexpr char kUiModuleName[] = "ui";
+inline constexpr size_t kBoundStatementCtorArity = 3;
 
 inline std::string precedingAttrName(const std::string& body, size_t bangPos) {
     auto isNameChar = [](char c) {

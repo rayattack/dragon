@@ -3542,3 +3542,89 @@ class H {
 h: H = H()
 h.f = Thing(3)
 ```
+
+#### :template_event_handler_requires_ui
+
+An `onclick=!{fn}` splice lowers to a registered callback, which only exists when
+the program links `ui`. Without it the splice has nothing to register with.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+def go() -> None { print("x") }
+page: HTML = template[HTML] {<button onclick=!{go}>go</button>}
+```
+
+#### :bound_statement_content_type_needs_three_parameter_ctor
+
+A content type with a `build` method lowers to a parameterized statement: the
+splices become bound parameters and the canonical text, its hash and the
+parameter list are passed to the constructor.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class MYSQL(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+    def build() -> str { return self._inner }
+}
+n: int = 1
+q: MYSQL = template[MYSQL] {SELECT !{n}}
+```
+
+#### :bound_statement_content_type_with_three_parameter_ctor_accepted
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class MYSQL(Template) {
+    def(canonical: str, phash: int, params: list[int]) {
+        self.canonical = canonical
+        self.hash = phash
+        self.params = params
+    }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+    def build() -> str { return self.canonical }
+}
+n: int = 1
+q: MYSQL = template[MYSQL] {SELECT !{n}}
+```
+
+#### :template_event_handler_callable_variable_rejected
+
+The handler splice registers a named function or a lambda written in place. A
+value holding one is not registrable, so it falls through to the ordinary splice
+rule and has no text form.
+
+```dr
+class Template {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s }
+}
+class HTML(Template) {
+    def(inner: str) { self._inner = inner }
+    @staticmethod
+    def escape(s: str) -> str { return s.replace("<", "&lt;") }
+}
+def go() -> None { print("x") }
+handler: Callable[[], None] = go
+page: HTML = template[HTML] {<button onclick=!{handler}>go</button>}
+```
