@@ -2257,6 +2257,8 @@ void TypeChecker::visit(GeneratorExpr& node) {
 }
 
 void TypeChecker::visit(LambdaExpr& node) {
+    if (!impl_->checkedLambdaBodies.insert(&node).second && node.type) return;
+
     std::vector<std::shared_ptr<Type>> paramTypes;
     for (auto& p : node.params) {
         auto pType = resolveType(p.type.get());
@@ -2264,9 +2266,7 @@ void TypeChecker::visit(LambdaExpr& node) {
     }
     auto retType = node.body ? resolveType(node.returnType.get())
                              : resolveReturnType(node.returnType.get());
-    node.type = std::make_shared<FunctionType>(paramTypes, retType);
-
-    if (!impl_->checkedLambdaBodies.insert(&node).second) return;
+    const bool inferReturn = node.body != nullptr && node.returnType == nullptr;
 
     impl_->pushScope();
     impl_->returnTypeStack.push_back(retType);

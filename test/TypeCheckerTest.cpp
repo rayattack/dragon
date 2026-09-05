@@ -1007,6 +1007,16 @@ TEST(TypeCheckerTest, TemplateSpreadWithUserFilterRejected) {
     EXPECT_TRUE(checkHasErrors(code("template_spread_with_user_filter_rejected")));
 }
 
+TEST(TypeCheckerTest, BracedLambdaWithoutReturnAnnotationReturnsNone) {
+    EXPECT_TRUE(checkHasErrors(
+        code("braced_lambda_without_return_annotation_returns_none")));
+}
+
+TEST(TypeCheckerTest, AnnotatedBracedLambdaReturningFloatAccepted) {
+    EXPECT_TRUE(checkOk(
+        code("annotated_braced_lambda_returning_float_accepted")));
+}
+
 TEST(TypeCheckerTest, TemplateFilterStrAndContentTypeAccepted) {
     EXPECT_TRUE(checkOk(code("template_filter_str_and_content_type_accepted")));
 }

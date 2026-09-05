@@ -164,7 +164,6 @@ struct TypeChecker::Impl {
     std::unordered_set<std::string> plainFunctionSymbols;
 
     std::unordered_map<std::string, ClassDecl*> genericClasses;
-
     std::unordered_map<std::string, FunctionDecl*> genericFunctions;
 
     std::unordered_set<const FunctionDecl*> schemaDecodeFns;

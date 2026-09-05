@@ -3044,6 +3044,23 @@ def page(title: str) -> str {
 }
 ```
 
+#### :braced_lambda_without_return_annotation_returns_none
+
+A braced lambda with no `->` returns None, exactly like a `def` with no return
+annotation, so returning a value from one names the annotation to add.
+
+```dr
+x: float = 2.5
+out: float = (lambda () { return x * 2.0 })()
+```
+
+#### :annotated_braced_lambda_returning_float_accepted
+
+```dr
+x: float = 2.5
+out: float = (lambda () -> float { return x * 2.0 })()
+```
+
 #### :named_mono_list_into_union_slot_rejected
 
 A named `list[str]` and a `list[Payload]` have different element layouts, so
