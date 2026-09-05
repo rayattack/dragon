@@ -43,6 +43,7 @@ public:
 
 private:
     void addTypeAnnotations(Module& module);
+    void reportUnannotatedParams(Module& module);
     void convertBlocksToBraces(Module& module);
     void validateDragonCompatibility(Module& module);
 

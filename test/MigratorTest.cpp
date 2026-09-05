@@ -122,13 +122,48 @@ TEST(MigratorTest, FunctionWithIndent) {
 
 TEST(MigratorTest, FunctionGetsReturnType) {
     auto result = migrate("def add(x, y):\n    return x + y\n");
-    EXPECT_NE(result.find("def add("), std::string::npos);
-    EXPECT_NE(result.find(":"), std::string::npos);
+    EXPECT_NE(result.find("def add("), std::string::npos) << result;
+    EXPECT_NE(result.find("->"), std::string::npos) << result;
 }
 
-TEST(MigratorTest, FunctionParamsGetTypes) {
+TEST(MigratorTest, FunctionParamsGetInferredTypes) {
+    auto result = migrate("def foo(x=5):\n    return x\n");
+    EXPECT_NE(result.find("x: int"), std::string::npos) << result;
+}
+
+TEST(MigratorTest, UnresolvableParamIsLeftBlankNotAny) {
     auto result = migrate("def greet(name):\n    print(name)\n");
-    EXPECT_NE(result.find("name: "), std::string::npos);
+    EXPECT_EQ(result.find(": Any"), std::string::npos) << result;
+    EXPECT_NE(result.find("def greet(name)"), std::string::npos) << result;
+}
+
+TEST(MigratorTest, UnresolvableParamIsReportedWithAPosition) {
+    MigrationOptions opts;
+    opts.useBraces = true;
+    opts.addTypes = true;
+    PythonMigrator migrator(opts);
+    migrator.migrateSource("def greet(name):\n    print(name)\n");
+    bool found = false;
+    for (const auto& d : migrator.diagnostics()) {
+        if (d.message.find("parameter 'name' of 'greet'") == std::string::npos)
+            continue;
+        found = true;
+        EXPECT_EQ(d.level, MigrationDiagnostic::Level::Warning);
+        EXPECT_GT(d.location.line, 0u) << d.message;
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(MigratorTest, TypedInputMigratesToCompilableSource) {
+    auto result = migrate(
+        "def add(a: int, b: int) -> int:\n    return a + b\n\nprint(add(1, 2))\n");
+    EXPECT_EQ(result.find(": Any"), std::string::npos) << result;
+    auto module = parse(result);
+    ASSERT_NE(module, nullptr);
+    Sema sema;
+    ASSERT_TRUE(sema.analyze(*module));
+    TypeChecker tc;
+    EXPECT_TRUE(tc.check(*module));
 }
 
 TEST(MigratorTest, FunctionWithDefaultGetsType) {

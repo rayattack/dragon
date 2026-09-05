@@ -265,9 +265,6 @@ void TypeInference::applyInferredTypes(Module& module) {
                     }
                     if (!p.type) {
                         impl_->unresolvedNames.push_back(func->name + "." + p.name);
-                        auto n = std::make_unique<NamedTypeExpr>();
-                        n->name = "Any";
-                        p.type = std::move(n);
                     }
                 }
             }

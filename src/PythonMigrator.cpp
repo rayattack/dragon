@@ -1,6 +1,7 @@
 #include "dragon/PythonMigrator.h"
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
+#include <functional>
 #include <fstream>
 #include <sstream>
 
@@ -9,6 +10,7 @@ namespace dragon {
 struct PythonMigrator::Impl {
     MigrationOptions options;
     std::vector<MigrationDiagnostic> diagnostics;
+    std::string sourceName;
     std::vector<std::string> incompatibilities;
     TypeInference typeInference;
 };
@@ -35,7 +37,9 @@ bool PythonMigrator::migrate(const std::string& inputFile,
     buffer << in.rdbuf();
     std::string source = buffer.str();
 
+    impl_->sourceName = inputFile;
     std::string result = migrateSource(source);
+    impl_->sourceName.clear();
     if (hasErrors()) return false;
 
     std::ofstream out(outputFile);
@@ -53,12 +57,14 @@ bool PythonMigrator::migrate(const std::string& inputFile,
 std::string PythonMigrator::migrateSource(const std::string& source) {
     LexerOptions lexOpts;
     lexOpts.useBraceBlocks = false;
+    if (!impl_->sourceName.empty()) lexOpts.filename = impl_->sourceName;
     Lexer lexer(source, lexOpts);
     auto tokens = lexer.tokenize();
 
     ParserOptions parseOpts;
     parseOpts.isDragonFile = false;
     parseOpts.requireTypes = false;
+    if (!impl_->sourceName.empty()) parseOpts.filename = impl_->sourceName;
     Parser parser(std::move(tokens), parseOpts);
     auto module = parser.parseModule();
 
@@ -102,6 +108,33 @@ std::vector<std::string> PythonMigrator::incompatibilities() const {
 
 void PythonMigrator::addTypeAnnotations(Module& module) {
     impl_->typeInference.infer(module);
+    reportUnannotatedParams(module);
+}
+
+void PythonMigrator::reportUnannotatedParams(Module& module) {
+    std::function<void(const std::vector<std::unique_ptr<Stmt>>&,
+                       const std::string&)> walk =
+        [&](const std::vector<std::unique_ptr<Stmt>>& body,
+            const std::string& owner) {
+        for (const auto& stmt : body) {
+            if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get())) {
+                for (const auto& p : func->params) {
+                    if (p.type || p.name.empty() || p.name == "self") continue;
+                    impl_->diagnostics.push_back({
+                        MigrationDiagnostic::Level::Warning,
+                        func->location(),
+                        "parameter '" + p.name + "' of '" + owner + func->name +
+                        "' has no type in the source and none could be "
+                        "inferred; annotate it in the draft before building"
+                    });
+                }
+                walk(func->body, owner);
+            } else if (auto* cls = dynamic_cast<ClassDecl*>(stmt.get())) {
+                walk(cls->body, cls->name + ".");
+            }
+        }
+    };
+    walk(module.body, "");
 }
 
 void PythonMigrator::convertBlocksToBraces(Module&) {
