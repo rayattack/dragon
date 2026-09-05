@@ -964,6 +964,21 @@ void TypeChecker::visit(ForStmt& node) {
         } else if (iterType->kind() == Type::Kind::Dict) {
             auto keyT = static_cast<DictType&>(*iterType).keyType;
             impl_->define(name->name, keyT ? keyT : impl_->unknownType);
+        } else if (iterType->kind() == Type::Kind::Tuple) {
+            const auto& slots = static_cast<TupleType&>(*iterType).elementTypes;
+            std::shared_ptr<Type> slotT =
+                slots.empty() ? impl_->unknownType : slots[0];
+            for (size_t si = 1; si < slots.size(); ++si) {
+                if (slots[si] && slotT && slots[si]->equals(*slotT)) continue;
+                error(node.iterable->location(),
+                      "cannot iterate a tuple whose slots differ in type ('" +
+                      (slotT ? slotT->toString() : std::string("?")) + "' and '" +
+                      (slots[si] ? slots[si]->toString() : std::string("?")) +
+                      "'); the loop variable would need two types at once");
+                slotT = impl_->unknownType;
+                break;
+            }
+            impl_->define(name->name, slotT ? slotT : impl_->unknownType);
         } else if (iterType->kind() == Type::Kind::Bytes) {
             impl_->define(name->name, impl_->intType);
         } else if (iterType->kind() == Type::Kind::Str) {

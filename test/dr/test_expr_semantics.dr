@@ -302,6 +302,30 @@ class SetOperatorTests(TestCase) {
         self.assertTrue(3 in c)
     }
 
+    def test_inline_set_expression_compares_as_a_set() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        self.assertTrue(a < (a | b))
+        self.assertFalse((a | b) <= a)
+        self.assertTrue((a | b) > a)
+        self.assertTrue(a <= (a | b))
+        self.assertFalse(a == (a | b))
+        self.assertTrue(a != (a | b))
+    }
+
+    def test_set_equality_is_by_value() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = {1, 2}
+        self.assertTrue(a == c)
+        self.assertFalse(a == b)
+        self.assertTrue(a != b)
+        self.assertFalse(a != c)
+        d: set[str] = {"x", "y"}
+        e: set[str] = {"y", "x"}
+        self.assertTrue(d == e)
+    }
+
     def test_intersection() {
         a: set[int] = {1, 2, 4}
         b: set[int] = {2, 4, 8}
@@ -458,6 +482,62 @@ class SetMembership(TestCase) {
         self.assertEqual(len(fl), 3)
         self.assertTrue("a" in fl)
         self.assertFalse("z" in fl)
+    }
+
+    def test_iterating_a_set_visits_every_live_element() {
+        si: set[int] = {5, 6, 7}
+        n: int = 0
+        total: int = 0
+        consistent: bool = true
+        for x in si {
+            n = n + 1
+            total = total + x
+            if not (x in si) { consistent = false }
+        }
+        self.assertEqual(n, 3)
+        self.assertEqual(total, 18)
+        self.assertTrue(consistent)
+    }
+
+    def test_iterating_a_str_set() {
+        ss: set[str] = {"a", "bb", "ccc"}
+        lens: int = 0
+        count: int = 0
+        for w in ss {
+            lens = lens + len(w)
+            count = count + 1
+        }
+        self.assertEqual(count, 3)
+        self.assertEqual(lens, 6)
+    }
+
+    def test_iterating_a_tuple_set() {
+        ts: set[tuple[int, int]] = set()
+        ts.add((1, 2))
+        ts.add((3, 4))
+        ts.add((1, 2))
+        sum: int = 0
+        count: int = 0
+        for t in ts {
+            sum = sum + t[0] + t[1]
+            count = count + 1
+        }
+        self.assertEqual(count, 2)
+        self.assertEqual(sum, 10)
+    }
+
+    def test_iterating_a_bytes_set() {
+        bs: set[bytes] = {b"aa", b"bbb"}
+        lens: int = 0
+        for b in bs { lens = lens + len(b) }
+        self.assertEqual(lens, 5)
+    }
+
+    def test_iterating_an_empty_set() {
+        es: set[int] = set()
+        n: int = 0
+        for x in es { n = n + 1 }
+        self.assertEqual(n, 0)
     }
 
     def test_set_literal_add() {

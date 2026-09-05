@@ -360,11 +360,7 @@ void CodeGen::visit(BinaryExpr& node) {
 
     {
         auto isSetOperand = [&](Expr* e) -> bool {
-            if (!e) return false;
-            if (dynamic_cast<SetExpr*>(e) || dynamic_cast<SetCompExpr*>(e)) return true;
-            if (auto* ne = dynamic_cast<NameExpr*>(e))
-                return impl_->lookupVarKind(ne->name) == Impl::VarKind::Set;
-            return impl_->resolveExprVarKind(e) == Impl::VarKind::Set;
+            return impl_->exprIsSetValued(e);
         };
         bool isOrdering = op == TokenType::LESS || op == TokenType::LESS_EQUAL ||
                           op == TokenType::GREATER || op == TokenType::GREATER_EQUAL;
@@ -663,6 +659,18 @@ void CodeGen::visit(BinaryExpr& node) {
 
     if ((op == TokenType::EQUAL_EQUAL || op == TokenType::NOT_EQUAL) &&
         lhs->getType()->isPointerTy() && rhs->getType()->isPointerTy()) {
+        if (impl_->exprIsSetValued(node.left.get()) &&
+            impl_->exprIsSetValued(node.right.get())) {
+            auto* eqI64 = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_set_eq"], {lhs, rhs}, "set.eq");
+            auto* eqBool = impl_->builder->CreateICmpNE(
+                eqI64, llvm::ConstantInt::get(impl_->i64Type, 0), "set.eq.bool");
+            releaseOwnedComparisonOperands(node, lhs, rhs);
+            impl_->lastValue = (op == TokenType::EQUAL_EQUAL)
+                ? eqBool
+                : impl_->builder->CreateNot(eqBool, "set.ne");
+            return;
+        }
         auto isTupleLike = [&](Expr* e) -> bool {
             if (!e) return false;
             if (dynamic_cast<TupleExpr*>(e)) return true;
@@ -1261,12 +1269,7 @@ void CodeGen::visit(ChainedCompExpr& node) {
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, "chain.end", func);
 
     auto isSetOperand = [&](Expr* e) -> bool {
-        if (!e) return false;
-        if (dynamic_cast<SetExpr*>(e) || dynamic_cast<SetCompExpr*>(e)) return true;
-        if (auto* ne = dynamic_cast<NameExpr*>(e))
-            return impl_->lookupVarKind(ne->name) == Impl::VarKind::Set;
-        if (e->type && e->type->kind() == Type::Kind::Set) return true;
-        return false;
+        return impl_->exprIsSetValued(e);
     };
     auto isListOperand = [&](Expr* e) -> bool {
         if (!e) return false;

@@ -1128,6 +1128,11 @@ std::shared_ptr<Type> TypeChecker::resolveTypeUncached(TypeExpr* typeExpr) {
         }
         if (baseName->name == "dict" && generic->typeArgs.size() == 2) {
             auto keyType = resolveType(generic->typeArgs[0].get());
+            if (supportsHashing(keyType) && !dictKeyKindIsClassified(keyType)) {
+                error(generic->location(), "'" + keyType->toString() +
+                      "' cannot be a dict key: the dict has no hash for it; "
+                      "key on a str, int, float, bytes or tuple instead");
+            }
             if (!supportsHashing(keyType)) {
                 error(generic->location(), "'" + keyType->toString() +
                       "' cannot be a dict key: it is mutable, so its hash would "

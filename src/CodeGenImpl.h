@@ -1743,6 +1743,7 @@ struct CodeGen::Impl {
         return VarKind::Other;
     }
 
+    bool exprIsSetValued(Expr* expr);
     bool exprIsBytes(Expr* expr);
 
     std::string resolveGlobalKey(const std::string& name) const {

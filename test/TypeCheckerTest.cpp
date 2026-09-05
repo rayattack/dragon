@@ -2165,3 +2165,15 @@ TEST(TypeCheckerTest, BytesOfAStrIsRefusedWithTheEncodeHint) {
     }
     EXPECT_TRUE(found);
 }
+
+TEST(TypeCheckerTest, TupleIterationNeedsUniformSlots) {
+    EXPECT_TRUE(checkHasErrors(code("mixed_slot_tuple_iteration_rejected")));
+    EXPECT_TRUE(checkOk(code("uniform_tuple_iteration_accepted")));
+}
+
+TEST(TypeCheckerTest, DictKeyMustBeAClassifiedKind) {
+    EXPECT_TRUE(checkHasErrors(code("unclassified_dict_key_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("callable_dict_key_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("bool_dict_key_rejected")));
+    EXPECT_TRUE(checkOk(code("classified_dict_keys_accepted")));
+}

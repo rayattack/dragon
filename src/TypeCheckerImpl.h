@@ -26,6 +26,7 @@ bool orderableTogether(const std::shared_ptr<Type>& a,
 bool supportsOrdering(const std::shared_ptr<Type>& t);
 std::string orderingRejectionHint(const std::shared_ptr<Type>& t);
 bool supportsHashing(const std::shared_ptr<Type>& t);
+bool dictKeyKindIsClassified(const std::shared_ptr<Type>& t);
 
 struct TypeChecker::Impl {
     std::vector<TypeDiagnostic> diagnostics;

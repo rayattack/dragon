@@ -709,8 +709,22 @@ void CodeGen::visit(ForStmt& node) {
         dictKeysAreFloat = kk == Type::Kind::Float;
     }
 
+    bool isSetIterable = node.iterable->type &&
+                         node.iterable->type->kind() == Type::Kind::Set;
+    bool isTupleIterable = node.iterable->type &&
+                           node.iterable->type->kind() == Type::Kind::Tuple;
+
     llvm::Value* iterableVal;
-    if (isDictKeysIterable) {
+    if (isSetIterable || isTupleIterable) {
+        node.iterable->accept(*this);
+        llvm::Value* srcVal = impl_->lastValue;
+        iterableVal = impl_->builder->CreateCall(
+            impl_->runtimeFuncs[isSetIterable ? "dragon_set_to_list"
+                                              : "dragon_tuple_to_list"],
+            {srcVal}, "iterlist");
+        Impl::VarKind rd = impl_->ownedTempDrainKind(node.iterable.get(), srcVal);
+        if (rd != Impl::VarKind::Other) impl_->emitDecrefByKind(srcVal, rd);
+    } else if (isDictKeysIterable) {
         if (auto* iterCall = dynamic_cast<CallExpr*>(node.iterable.get())) {
             node.iterable->accept(*this);
             iterableVal = impl_->lastValue;
@@ -735,13 +749,12 @@ void CodeGen::visit(ForStmt& node) {
     auto* iterAlloca = impl_->createEntryAlloca(func, iterName, impl_->i8PtrType);
     impl_->builder->CreateStore(iterableVal, iterAlloca);
     bool ownedContainerIter =
-        !isDictKeysIterable && !isDictItemsIterable &&
-        node.iterable && !Impl::isBorrowedHeapExpr(node.iterable.get()) &&
-        node.iterable->type &&
-        (node.iterable->type->kind() == Type::Kind::List ||
-         node.iterable->type->kind() == Type::Kind::Set ||
-         node.iterable->type->kind() == Type::Kind::Tuple ||
-         node.iterable->type->kind() == Type::Kind::Bytes);
+        isSetIterable || isTupleIterable ||
+        (!isDictKeysIterable && !isDictItemsIterable &&
+         node.iterable && !Impl::isBorrowedHeapExpr(node.iterable.get()) &&
+         node.iterable->type &&
+         (node.iterable->type->kind() == Type::Kind::List ||
+          node.iterable->type->kind() == Type::Kind::Bytes));
     if (isDictKeysIterable || isDictItemsIterable || ownedContainerIter) {
         impl_->setVar(iterName, iterAlloca, Impl::VarKind::List);
         impl_->emitCleanupPush(iterName, iterableVal,
@@ -1038,6 +1051,32 @@ void CodeGen::visit(ForStmt& node) {
         }
 
         if (elemTypeKind == Type::Kind::Int && node.iterable->type) {
+            std::shared_ptr<Type> viaContainer;
+            if (isSetIterable)
+                viaContainer =
+                    static_cast<SetType&>(*node.iterable->type).elementType;
+            else if (isTupleIterable) {
+                const auto& slots =
+                    static_cast<TupleType&>(*node.iterable->type).elementTypes;
+                if (!slots.empty()) viaContainer = slots[0];
+            }
+            if (viaContainer) {
+                switch (viaContainer->kind()) {
+                    case Type::Kind::Str:
+                    case Type::Kind::Bytes:
+                    case Type::Kind::Float:
+                    case Type::Kind::Bool:
+                    case Type::Kind::List:
+                    case Type::Kind::Dict:
+                    case Type::Kind::Set:
+                    case Type::Kind::Tuple:
+                    case Type::Kind::Instance:
+                        elemTypeKind = viaContainer->kind();
+                        break;
+                    default:
+                        break;
+                }
+            }
             if (auto* lt = dynamic_cast<ListType*>(node.iterable->type.get())) {
                 if (lt->elementType) {
                     switch (lt->elementType->kind()) {

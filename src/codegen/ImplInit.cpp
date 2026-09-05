@@ -443,6 +443,12 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {}, false));
     getOrDeclareRuntime("dragon_set_new_tagged",
         llvm::FunctionType::get(i8PtrType, {i64Type}, false));
+    getOrDeclareRuntime("dragon_set_eq",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_set_to_list",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_tuple_to_list",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_set_from_list",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_set_adopt_tag",

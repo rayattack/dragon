@@ -486,6 +486,24 @@ void CodeGen::Impl::setVar(const std::string& name, llvm::AllocaInst* alloca,
         scopes.back().varKinds[name] = kind;
     }
 
+bool CodeGen::Impl::exprIsSetValued(Expr* expr) {
+        if (!expr) return false;
+        if (expr->type && expr->type->kind() == Type::Kind::Set) return true;
+        if (dynamic_cast<SetExpr*>(expr) || dynamic_cast<SetCompExpr*>(expr))
+            return true;
+        if (auto* ne = dynamic_cast<NameExpr*>(expr))
+            return lookupVarKind(ne->name) == VarKind::Set;
+        if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
+            TokenType bop = bin->op.type();
+            if (bop == TokenType::PIPE || bop == TokenType::AMPERSAND ||
+                bop == TokenType::CARET || bop == TokenType::MINUS)
+                return exprIsSetValued(bin->left.get()) &&
+                       exprIsSetValued(bin->right.get());
+            return false;
+        }
+        return resolveExprVarKind(expr) == VarKind::Set;
+}
+
 bool CodeGen::Impl::exprIsBytes(Expr* expr) {
         if (expr && expr->type && expr->type->kind() == Type::Kind::Bytes)
             return true;

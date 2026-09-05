@@ -176,6 +176,26 @@ static bool hashableType(const Type* t, int depth) {
     }
 }
 
+bool dictKeyKindIsClassified(const std::shared_ptr<Type>& t) {
+    if (!t) return true;
+    switch (t->kind()) {
+        case Type::Kind::Str:
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bytes:
+        case Type::Kind::Tuple:
+        case Type::Kind::Boxed:
+        case Type::Kind::Unknown:
+        case Type::Kind::TypeVar:
+        case Type::Kind::Union:
+        case Type::Kind::Optional:
+        case Type::Kind::Never:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool supportsHashing(const std::shared_ptr<Type>& t) {
     return hashableType(t.get(), 0);
 }

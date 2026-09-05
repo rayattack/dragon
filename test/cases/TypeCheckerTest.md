@@ -3740,3 +3740,62 @@ fromList: bytes = bytes(octets)
 encoded: bytes = "text".encode("utf-8")
 print(len(empty) + len(sized) + len(fromList) + len(encoded))
 ```
+
+#### :mixed_slot_tuple_iteration_rejected
+
+The loop variable would have to be an int on the first slot and a str on the
+second, so there is no honest type to bind it at.
+
+```dr
+t: tuple[int, str] = (3, "a")
+for x in t {
+    print(str(x))
+}
+```
+
+#### :unclassified_dict_key_rejected
+
+The dict has a hash for a str, int, float, bytes or tuple key and nothing else.
+An unclassified key used to fall through to the string engine silently.
+
+```dr
+class P {
+    v: int
+    def (v: int) { self.v = v }
+}
+d: dict[P, int] = {}
+```
+
+#### :callable_dict_key_rejected
+
+```dr
+d: dict[Callable[[], int], int] = {}
+```
+
+#### :bool_dict_key_rejected
+
+```dr
+d: dict[bool, int] = {}
+```
+
+#### :uniform_tuple_iteration_accepted
+
+```dr
+t: tuple[int, int, int] = (7, 8, 9)
+total: int = 0
+for v in t { total = total + v }
+print(total)
+s: tuple[str, str] = ("a", "b")
+for w in s { print(w) }
+```
+
+#### :classified_dict_keys_accepted
+
+```dr
+a: dict[str, int] = {}
+b: dict[int, str] = {}
+c: dict[float, int] = {}
+d: dict[bytes, int] = {}
+e: dict[tuple[int, str], int] = {}
+print(len(a) + len(b) + len(c) + len(d) + len(e))
+```

@@ -682,6 +682,9 @@ void dragon_tuple_set_tagged(DragonTuple* t, int64_t index, int64_t val, int64_t
 int64_t dragon_tuple_get(DragonTuple* t, int64_t index);
 int64_t dragon_tuple_len(DragonTuple* t);
 uint64_t dragon_box_hash(struct DragonBox b);
+struct DragonList* dragon_tuple_to_list(DragonTuple* t);
+struct DragonList* dragon_set_to_list(struct DragonSet* s);
+int64_t dragon_set_eq(struct DragonSet* a, struct DragonSet* b);
 int64_t dragon_tuple_eq(void* a, void* b);
 int64_t dragon_tuple_cmp(void* a, void* b);
 

@@ -635,6 +635,19 @@ int64_t dragon_tuple_cmp(void* a, void* b) {
     return (ta->length < tb->length) ? -1 : (ta->length > tb->length) ? 1 : 0;
 }
 
+DragonList* dragon_tuple_to_list(DragonTuple* t) {
+    int64_t n = t ? t->length : 0;
+    int64_t tag = TAG_INT;
+    if (t && t->elem_tags && n > 0) tag = (int64_t)t->elem_tags[0];
+    DragonList* l = dragon_list_new_tagged(n > 0 ? n : 8, tag);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = t->data[i];
+        dragon_incref_tagged(v, (uint8_t)tag);
+        dragon_list_append(l, v);
+    }
+    return l;
+}
+
 DragonTuple* dragon_tuple_from_list(DragonList* l) {
     if (!l) return dragon_tuple_new(0);
     int64_t n = l->size;
@@ -768,6 +781,19 @@ void dragon_set_adopt_tag(DragonSet* s, int64_t tag) {
     if (s && s->count == 0 && s->elem_tag == 0 && tag != 0) {
         s->elem_tag = (uint8_t)tag;
     }
+}
+
+DragonList* dragon_set_to_list(DragonSet* s) {
+    if (!s) return dragon_list_new(0);
+    DragonList* l = dragon_list_new_tagged(s->count > 0 ? s->count : 8,
+                                           (int64_t)s->elem_tag);
+    for (int64_t i = 0; i < s->capacity; i++) {
+        if (s->states[i] != 1) continue;
+        int64_t v = s->buckets[i];
+        dragon_incref_tagged(v, s->elem_tag);
+        dragon_list_append(l, v);
+    }
+    return l;
 }
 
 DragonSet* dragon_set_from_list(DragonList* list) {
@@ -998,6 +1024,17 @@ DragonSet* dragon_set_symmetric_difference(DragonSet* a, DragonSet* b) {
         }
     }
     return r;
+}
+
+int64_t dragon_set_eq(DragonSet* a, DragonSet* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->count != b->count) return 0;
+    for (int64_t i = 0; i < a->capacity; i++) {
+        if (a->states[i] == 1 && !dragon_set_contains(b, a->buckets[i]))
+            return 0;
+    }
+    return 1;
 }
 
 int64_t dragon_set_issubset(DragonSet* a, DragonSet* b) {

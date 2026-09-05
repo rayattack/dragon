@@ -545,6 +545,32 @@ class TupleBuiltinType(TestCase) {
         self.assertEqual(t[1], 2)
     }
 
+    def test_iterating_a_tuple_reads_each_slot() {
+        t: tuple[int, int] = (3, 4)
+        seen: list[int] = []
+        for v in t { seen.append(v) }
+        self.assertEqual(seen, [3, 4])
+    }
+
+    def test_iterating_a_str_tuple() {
+        st: tuple[str, str] = ("x", "yz")
+        joined: str = ""
+        for v in st { joined = joined + v }
+        self.assertEqual(joined, "xyz")
+    }
+
+    def test_iterating_a_three_slot_tuple() {
+        t: tuple[int, int, int] = (7, 8, 9)
+        total: int = 0
+        n: int = 0
+        for v in t {
+            total = total + v
+            n = n + 1
+        }
+        self.assertEqual(n, 3)
+        self.assertEqual(total, 24)
+    }
+
     def test_str_of_tuple_builtin() {
         self.assertEqual(str(tuple([1, 2])), "(1, 2)")
     }
