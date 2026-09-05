@@ -389,6 +389,64 @@ void CodeGen::visit(WhileStmt& node) {
     impl_->builder->SetInsertPoint(endBB);
 }
 
+CodeGen::Impl::VarKind CodeGen::Impl::declaredFieldKind(AttributeExpr* attrExpr) {
+    auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get());
+    if (!objName) return VarKind::Other;
+    if (lookupVarKind(objName->name) != VarKind::ClassInstance)
+        return VarKind::Other;
+    std::string className = currentClassName;
+    if (objName->name != "self" || className.empty()) {
+        auto it = varClassNames.find(objName->name);
+        className = it != varClassNames.end() ? it->second : std::string();
+    }
+    for (std::string cls = className; !cls.empty(); ) {
+        auto fkIt = classFieldKindsBySym.find(classSym(cls));
+        if (fkIt != classFieldKindsBySym.end()) {
+            auto fieldIt = fkIt->second.find(attrExpr->attribute);
+            if (fieldIt != fkIt->second.end()) return fieldIt->second;
+        }
+        auto parentIt = classParentNamesBySym.find(classSym(cls));
+        if (parentIt == classParentNamesBySym.end()) break;
+        cls = parentIt->second;
+    }
+    return VarKind::Other;
+}
+
+void CodeGen::emitReturnBorrowIncref(Expr* value, llvm::Value* retVal) {
+    if (impl_->options.gcMode != GCMode::RC) return;
+    if (Impl::producesOwnedCopy(value)) return;
+    Expr* retSrc = value;
+    while (auto* castExpr = dynamic_cast<AsCastExpr*>(retSrc))
+        retSrc = castExpr->operand.get();
+    auto increfIfHeap = [&](Impl::VarKind kind) {
+        if (Impl::isHeapKind(kind)) impl_->emitIncrefByKind(retVal, kind);
+    };
+    if (auto* nameExpr = dynamic_cast<NameExpr*>(retSrc)) {
+        increfIfHeap(impl_->lookupVarKind(nameExpr->name));
+        return;
+    }
+    if (auto* attrExpr = dynamic_cast<AttributeExpr*>(retSrc)) {
+        Impl::VarKind fieldKind = impl_->declaredFieldKind(attrExpr);
+        if (Impl::isHeapKind(fieldKind)) {
+            impl_->emitIncrefByKind(retVal, fieldKind);
+            return;
+        }
+        if (!retSrc->type) return;
+        Impl::VarKind borrowedKind =
+            Impl::typeKindToVarKind(retSrc->type->kind());
+        if (impl_->isOwnedResultByKind(retVal, borrowedKind)) return;
+        increfIfHeap(borrowedKind);
+        return;
+    }
+    auto* subExpr = dynamic_cast<SubscriptExpr*>(retSrc);
+    if (!subExpr) return;
+    if (dynamic_cast<SliceExpr*>(subExpr->index.get()) != nullptr) return;
+    if (subExpr->object && subExpr->object->type &&
+        subExpr->object->type->kind() == Type::Kind::Str) return;
+    if (!value->type) return;
+    increfIfHeap(Impl::typeKindToVarKind(value->type->kind()));
+}
+
 void CodeGen::visit(ReturnStmt& node) {
     if (impl_->generatorPtr) {
         impl_->emitExcFramePops(impl_->currentFnTryFrames());
@@ -453,69 +511,8 @@ void CodeGen::visit(ReturnStmt& node) {
             retBoxWrapped = true;
         } else if (retVal->getType() != retType)
             retVal = impl_->coerceArg(retVal, retType);
-        if (impl_->options.gcMode == GCMode::RC && !retBoxWrapped) {
-            auto increfIfHeap = [&](Impl::VarKind kind) {
-                if (Impl::isHeapKind(kind)) {
-                    impl_->emitIncrefByKind(retVal, kind);
-                }
-            };
-            Expr* retSrc = node.value.get();
-            while (auto* castExpr = dynamic_cast<AsCastExpr*>(retSrc))
-                retSrc = castExpr->operand.get();
-            if (auto* nameExpr = dynamic_cast<NameExpr*>(retSrc)) {
-                increfIfHeap(impl_->lookupVarKind(nameExpr->name));
-            } else if (auto* attrExpr = dynamic_cast<AttributeExpr*>(retSrc)) {
-                Impl::VarKind fieldKind = Impl::VarKind::Other;
-                if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get())) {
-                    auto objKind = impl_->lookupVarKind(objName->name);
-                    if (objKind == Impl::VarKind::ClassInstance) {
-                        std::string className;
-                        if (objName->name == "self" && !impl_->currentClassName.empty()) {
-                            className = impl_->currentClassName;
-                        } else {
-                            auto it = impl_->varClassNames.find(objName->name);
-                            if (it != impl_->varClassNames.end()) className = it->second;
-                        }
-                        for (std::string cls = className; !cls.empty(); ) {
-                            auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(cls));
-                            if (fkIt != impl_->classFieldKindsBySym.end()) {
-                                auto fieldIt = fkIt->second.find(attrExpr->attribute);
-                                if (fieldIt != fkIt->second.end()) {
-                                    fieldKind = fieldIt->second;
-                                    break;
-                                }
-                            }
-                            auto parentIt = impl_->classParentNamesBySym.find(impl_->classSym(cls));
-                            if (parentIt != impl_->classParentNamesBySym.end())
-                                cls = parentIt->second;
-                            else
-                                break;
-                        }
-                    }
-                }
-                if (!Impl::isHeapKind(fieldKind) && retSrc->type) {
-                    auto borrowedKind =
-                        Impl::typeKindToVarKind(retSrc->type->kind());
-                    if (Impl::isHeapKind(borrowedKind) &&
-                        !impl_->isOwnedResultByKind(retVal, borrowedKind))
-                        fieldKind = borrowedKind;
-                }
-                if (Impl::isHeapKind(fieldKind)) {
-                    impl_->emitIncrefByKind(retVal, fieldKind);
-                }
-            } else if (auto* subExpr = dynamic_cast<SubscriptExpr*>(retSrc)) {
-                bool ownedStrElem = subExpr->object && subExpr->object->type &&
-                    subExpr->object->type->kind() == Type::Kind::Str;
-                if (dynamic_cast<SliceExpr*>(subExpr->index.get()) == nullptr &&
-                    !ownedStrElem) {
-                    Impl::VarKind kind = Impl::VarKind::Other;
-                    if (node.value->type)
-                        kind = Impl::typeKindToVarKind(node.value->type->kind());
-                    if (Impl::isHeapKind(kind))
-                        impl_->emitIncrefByKind(retVal, kind);
-                }
-            }
-        }
+        if (!retBoxWrapped)
+            emitReturnBorrowIncref(node.value.get(), retVal);
         impl_->emitExcFramePops(impl_->currentFnTryFrames());
         impl_->emitEarlyExitCleanups(*this, 0,
                                      impl_->currentFnExitCleanupBase());

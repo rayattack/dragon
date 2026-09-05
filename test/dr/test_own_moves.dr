@@ -393,10 +393,49 @@ class DubTests(TestCase) {
 class Registry {
     names: list[str]
     tags: dict[str, str]
+    slots: dict[int, bool]
+    spare: dict[int, bool]
 
     def() {
         self.names = ["a", "tmp1", "tmp2", "b"]
         self.tags = {"k": "v"}
+        self.slots = {}
+        self.spare = {}
+        i: int = 0
+        while i < 4 {
+            self.slots[i] = True
+            i = i + 1
+        }
+    }
+
+    def count_slots() -> int {
+        n: int = 0
+        for s in dub self.slots { n = n + s }
+        return n
+    }
+
+    def first_slot() -> int {
+        for s in dub self.slots { return s }
+        return -1
+    }
+
+    def slot_until_break() -> int {
+        n: int = 0
+        for s in dub self.slots { n = n + s; break }
+        return n
+    }
+
+    def slot_raise() -> int {
+        for s in dub self.slots { raise ValueError("slot") }
+        return 0
+    }
+
+    def slot_snapshot() -> dict[int, bool] {
+        return dub self.slots
+    }
+
+    def adopt(other: Registry) -> None {
+        self.spare = dub other.slots
     }
 
     def purge() -> None {
@@ -418,6 +457,11 @@ class Registry {
 
 def consumes(own xs: list[str]) -> int {
     return len(xs)
+}
+
+
+def slot_count(d: dict[int, bool]) -> int {
+    return len(d)
 }
 
 class DubFieldTests(TestCase) {
@@ -467,6 +511,102 @@ class DubFieldTests(TestCase) {
         copy["extra"] = "x"
         self.assertEqual(len(r.tags), 1)
         self.assertEqual(len(copy), 2)
+    }
+
+    def test_dub_field_loop_releases_the_snapshot() {
+        r: Registry = Registry()
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + r.count_slots()
+            i = i + 1
+        }
+        self.assertEqual(total, 1800)
+        self.assertEqual(len(r.slots), 4)
+    }
+
+    def test_dub_field_loop_releases_on_early_return() {
+        r: Registry = Registry()
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + r.first_slot()
+            i = i + 1
+        }
+        self.assertEqual(total, 0)
+    }
+
+    def test_dub_field_loop_releases_on_break() {
+        r: Registry = Registry()
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + r.slot_until_break()
+            i = i + 1
+        }
+        self.assertEqual(total, 0)
+    }
+
+    def test_dub_field_loop_releases_when_the_body_raises() {
+        r: Registry = Registry()
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                n: int = r.slot_raise()
+            } except ValueError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_dub_field_argument_releases_the_snapshot() {
+        r: Registry = Registry()
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + slot_count(dub r.slots)
+            i = i + 1
+        }
+        self.assertEqual(total, 1200)
+    }
+
+    def test_dub_field_declaration_releases_the_snapshot() {
+        r: Registry = Registry()
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            snapshot: dict[int, bool] = dub r.slots
+            total = total + len(snapshot)
+            i = i + 1
+        }
+        self.assertEqual(total, 1200)
+    }
+
+    def test_dub_field_stored_into_another_field_releases_the_old_copy() {
+        r: Registry = Registry()
+        other: Registry = Registry()
+        i: int = 0
+        while i < 300 {
+            r.adopt(other)
+            i = i + 1
+        }
+        self.assertEqual(len(r.spare), 4)
+        self.assertEqual(len(other.slots), 4)
+    }
+
+    def test_returned_dub_field_releases_the_snapshot() {
+        r: Registry = Registry()
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            copy: dict[int, bool] = r.slot_snapshot()
+            total = total + len(copy)
+            i = i + 1
+        }
+        self.assertEqual(total, 1200)
     }
 }
 

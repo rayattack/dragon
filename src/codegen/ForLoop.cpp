@@ -744,6 +744,8 @@ void CodeGen::visit(ForStmt& node) {
          node.iterable->type->kind() == Type::Kind::Bytes);
     if (isDictKeysIterable || isDictItemsIterable || ownedContainerIter) {
         impl_->setVar(iterName, iterAlloca, Impl::VarKind::List);
+        impl_->emitCleanupPush(iterName, iterableVal,
+                               impl_->cleanupKindFor(Impl::VarKind::List));
     }
 
     auto* idxVar = impl_->createEntryAlloca(func, "__i", impl_->i64Type);

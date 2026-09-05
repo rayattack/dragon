@@ -165,6 +165,46 @@ def returns_from_try() -> int {
     return 0
 }
 
+def int_slots(n: int) -> dict[int, bool] {
+    d: dict[int, bool] = {}
+    i: int = 0
+    while i < n {
+        d[i] = True
+        i = i + 1
+    }
+    return d
+}
+
+
+def int_items(n: int) -> list[int] {
+    l: list[int] = []
+    i: int = 0
+    while i < n {
+        l.append(i)
+        i = i + 1
+    }
+    return l
+}
+
+
+def raise_in_dict_loop(d: dict[int, bool]) -> int {
+    for k in d { raise UErr(k) }
+    return 0
+}
+
+
+def raise_in_keys_loop(d: dict[int, bool]) -> int {
+    for k in d.keys() { raise UErr(k) }
+    return 0
+}
+
+
+def raise_in_list_temp_loop(n: int) -> int {
+    for e in int_items(n) { raise UErr(e) }
+    return 0
+}
+
+
 def leaf() {
     raise ValueError("deep")
 }
@@ -285,6 +325,66 @@ class ExceptionUnwindCleanupTests(TestCase) {
             caught = 1
         }
         self.assertEqual(caught, 1)
+    }
+
+    def test_dict_loop_keys_released_when_the_body_raises() {
+        d: dict[int, bool] = int_slots(4)
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                n: int = raise_in_dict_loop(d)
+            } except UErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+        self.assertEqual(len(d), 4)
+    }
+
+    def test_dict_keys_loop_released_when_the_body_raises() {
+        d: dict[int, bool] = int_slots(4)
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                n: int = raise_in_keys_loop(d)
+            } except UErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_list_temp_loop_released_when_the_body_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                n: int = raise_in_list_temp_loop(4)
+            } except UErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_dict_loop_keys_released_when_the_same_frame_catches() {
+        d: dict[int, bool] = int_slots(4)
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                for k in d { raise UErr(k) }
+            } except UErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
     }
 }
 

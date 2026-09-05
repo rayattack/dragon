@@ -1206,6 +1206,12 @@ struct CodeGen::Impl {
         }
     }
 
+    static bool producesOwnedCopy(Expr* expr) {
+        if (auto* nm = dynamic_cast<NameExpr*>(expr)) return nm->isDubMarked;
+        if (auto* at = dynamic_cast<AttributeExpr*>(expr)) return at->isDubMarked;
+        return false;
+    }
+
     static bool isBorrowedHeapExpr(Expr* expr) {
         if (auto* cast = dynamic_cast<AsCastExpr*>(expr))
             return isBorrowedHeapExpr(cast->operand.get());
@@ -1235,8 +1241,9 @@ struct CodeGen::Impl {
         // A walrus target adopts its value's +1 (store skips the incref), so it hands the
         // consumer a borrow, like reading the name. Classifying it owned let a call site drain `takes(x := ...)` while x still held the pointer (A/B-proven UAF, test_rc_walrus.dr).
         if (dynamic_cast<WalrusExpr*>(expr) != nullptr) return true;
+        if (producesOwnedCopy(expr)) return false;
         if (auto* nm = dynamic_cast<NameExpr*>(expr)) {
-            return !nm->isMoveMarked && !nm->isDubMarked;
+            return !nm->isMoveMarked;
         }
         if (auto* at = dynamic_cast<AttributeExpr*>(expr)) {
             return !dynamic_cast<CallExpr*>(at->object.get());
@@ -1833,6 +1840,7 @@ struct CodeGen::Impl {
         return {v, llvm::ConstantInt::get(i64Type, tag)};
     }
 
+    VarKind declaredFieldKind(AttributeExpr* attrExpr);
     VarKind inferAssignedVarKind(AssignStmt& node, llvm::Value* rhsVal);
     VarKind inferBoundVarKind(Expr* value, llvm::Value* rhsVal,
                               const std::vector<std::string>& boundNames);

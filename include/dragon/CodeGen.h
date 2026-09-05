@@ -271,6 +271,7 @@ private:
                                   llvm::Value* val);
     void emitLocalSlotStore(NameExpr& name, AssignStmt& node, llvm::Value* val,
                             llvm::AllocaInst* alloca, bool hadExistingSlot);
+    void emitReturnBorrowIncref(Expr* value, llvm::Value* retVal);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
