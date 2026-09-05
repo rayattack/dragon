@@ -298,6 +298,160 @@ def call_m(a: ABase, v: Boxed) -> int {
 }
 
 
+
+def replace_union_param(p: Boxed) -> str {
+    p = "replaced-one"
+    const out: str = p
+    return out
+}
+
+
+def replace_union_param_when(p: Boxed, flag: bool) -> str {
+    if flag {
+        p = "replaced-two"
+    }
+    const out: str = p
+    return out
+}
+
+
+def replace_union_local(seed: str) -> str {
+    v: Boxed = seed
+    v = "local-" + str(3)
+    const out: str = v
+    return out
+}
+
+
+
+def str_param_maybe_replaced(v: str, flag: bool) -> int {
+    if flag {
+        v = "rep-" + str(1)
+    }
+    return len(v)
+}
+
+
+def str_param_both_branches(v: str, flag: bool) -> int {
+    if flag {
+        v = "yes-" + str(1)
+    } else {
+        v = "no-" + str(22)
+    }
+    return len(v)
+}
+
+
+def str_param_replaced_in_loop(v: str, rounds: int) -> int {
+    i: int = 0
+    while i < rounds {
+        v = "iter-" + str(i)
+        i = i + 1
+    }
+    return len(v)
+}
+
+
+def str_param_appended(v: str, flag: bool) -> int {
+    if flag {
+        v += "-tail"
+    }
+    return len(v)
+}
+
+
+def str_param_raises_before_store(v: str, boom: bool) -> int {
+    if boom {
+        raise ValueError("before")
+    }
+    v = "rep-" + str(1)
+    return len(v)
+}
+
+
+def str_param_raises_after_store(v: str, boom: bool) -> int {
+    v = "rep-" + str(2)
+    if boom {
+        raise ValueError("after")
+    }
+    return len(v)
+}
+
+
+def str_param_raises_in_loop(v: str, boom: bool) -> int {
+    i: int = 0
+    while i < 4 {
+        v = "iter-" + str(i)
+        if boom {
+            if i == 2 {
+                raise ValueError("loop")
+            }
+        }
+        i = i + 1
+    }
+    return len(v)
+}
+
+
+def union_param_raises_before_store(p: Boxed, boom: bool) -> int {
+    if boom {
+        raise ValueError("before")
+    }
+    p = "rep-" + str(3)
+    const out: str = p
+    return len(out)
+}
+
+
+def union_param_raises_after_store(p: Boxed, boom: bool) -> int {
+    p = "rep-" + str(4)
+    if boom {
+        raise ValueError("after")
+    }
+    const out: str = p
+    return len(out)
+}
+
+
+def str_param_never_replaced(v: str) -> int {
+    return len(v)
+}
+
+
+def union_param_owned_temp(p: Boxed) -> int {
+    p = "temp-" + str(1)
+    const out: str = p
+    return len(out)
+}
+
+
+
+def temp_dict_elem(n: int) -> int {
+    const m: str = fresh_doc(n)["mrn"]
+    return len(m)
+}
+
+
+def fresh_nested(n: int) -> dict[str, Boxed] {
+    const inner: dict[str, Boxed] = {"mrn": "N" + str(n)}
+    return {"row": inner}
+}
+
+
+def temp_nested_elem(n: int) -> int {
+    const row: dict[str, Boxed] = fresh_nested(n)["row"]
+    const m: str = row["mrn"]
+    return len(m)
+}
+
+
+def plain_dict_elem(n: int) -> int {
+    const d: dict[str, str] = {"mrn": "A" + str(n)}
+    const m: str = d["mrn"]
+    return len(m)
+}
+
+
 class AnyOwnershipTests(TestCase) {
     def test_borrowed_alias_survives_instance_death() {
         p: Boxed = "alias " + str(1)
@@ -394,6 +548,227 @@ class AnyOwnershipTests(TestCase) {
             narrowed = 1
         }
         self.assertEqual(narrowed, 1)
+    }
+
+
+    def test_union_param_assign_keeps_caller_value() {
+        i: int = 0
+        while i < 1000 {
+            held: Boxed = "held-" + str(i)
+            self.assertEqual(replace_union_param(held), "replaced-one")
+            const still: str = held
+            self.assertEqual(still, "held-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_union_param_conditional_assign_not_taken() {
+        i: int = 0
+        while i < 1000 {
+            held: Boxed = "kept-" + str(i)
+            self.assertEqual(replace_union_param_when(held, False),
+                             "kept-" + str(i))
+            const still: str = held
+            self.assertEqual(still, "kept-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_union_param_conditional_assign_taken() {
+        i: int = 0
+        while i < 1000 {
+            held: Boxed = "swap-" + str(i)
+            self.assertEqual(replace_union_param_when(held, True), "replaced-two")
+            const still: str = held
+            self.assertEqual(still, "swap-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_union_local_assign_releases_old() {
+        i: int = 0
+        while i < 1000 {
+            self.assertEqual(replace_union_local("seed-" + str(i)), "local-3")
+            i = i + 1
+        }
+    }
+
+
+    def test_str_param_conditional_replace_not_taken() {
+        i: int = 0
+        while i < 1000 {
+            held: str = "keep-" + str(i)
+            self.assertEqual(str_param_maybe_replaced(held, False), len(held))
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_str_param_conditional_replace_taken() {
+        i: int = 0
+        while i < 1000 {
+            held: str = "keep-" + str(i)
+            self.assertEqual(str_param_maybe_replaced(held, True), 5)
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_str_param_replaced_on_both_branches() {
+        i: int = 0
+        while i < 1000 {
+            held: str = "keep-" + str(i)
+            self.assertEqual(str_param_both_branches(held, True), 5)
+            self.assertEqual(str_param_both_branches(held, False), 5)
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_str_param_replaced_in_loop() {
+        i: int = 0
+        while i < 1000 {
+            held: str = "keep-" + str(i)
+            self.assertEqual(str_param_replaced_in_loop(held, 4), 6)
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+
+    def test_str_param_augmented_append() {
+        i: int = 0
+        while i < 1000 {
+            held: str = "keep-" + str(i)
+            self.assertEqual(str_param_appended(held, False), len(held))
+            self.assertEqual(str_param_appended(held, True), len(held) + 5)
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+
+    def test_str_param_unwind_before_store() {
+        i: int = 0
+        while i < 2000 {
+            held: str = "keep-" + str(i)
+            n: int = 0
+            try {
+                n = str_param_raises_before_store(held, i % 2 == 0)
+            } except ValueError {
+                n = -1
+            }
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_str_param_unwind_after_store() {
+        i: int = 0
+        while i < 2000 {
+            held: str = "keep-" + str(i)
+            n: int = 0
+            try {
+                n = str_param_raises_after_store(held, i % 2 == 0)
+            } except ValueError {
+                n = -1
+            }
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_str_param_unwind_in_loop() {
+        i: int = 0
+        while i < 2000 {
+            held: str = "keep-" + str(i)
+            n: int = 0
+            try {
+                n = str_param_raises_in_loop(held, i % 2 == 0)
+            } except ValueError {
+                n = -1
+            }
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_union_param_unwind_before_store() {
+        i: int = 0
+        while i < 2000 {
+            held: Boxed = "held-" + str(i)
+            n: int = 0
+            try {
+                n = union_param_raises_before_store(held, i % 2 == 0)
+            } except ValueError {
+                n = -1
+            }
+            const still: str = held
+            self.assertEqual(still, "held-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_union_param_unwind_after_store() {
+        i: int = 0
+        while i < 2000 {
+            held: Boxed = "held-" + str(i)
+            n: int = 0
+            try {
+                n = union_param_raises_after_store(held, i % 2 == 0)
+            } except ValueError {
+                n = -1
+            }
+            const still: str = held
+            self.assertEqual(still, "held-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_str_param_never_replaced() {
+        i: int = 0
+        while i < 1000 {
+            held: str = "keep-" + str(i)
+            self.assertEqual(str_param_never_replaced(held), len(held))
+            self.assertEqual(held, "keep-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_union_param_owned_temp_assign() {
+        i: int = 0
+        while i < 1000 {
+            held: Boxed = "held-" + str(i)
+            self.assertEqual(union_param_owned_temp(held), 6)
+            const still: str = held
+            self.assertEqual(still, "held-" + str(i))
+            i = i + 1
+        }
+    }
+
+
+    def test_temp_boxed_dict_elem_read() {
+        i: int = 0
+        while i < 300 {
+            self.assertEqual(temp_dict_elem(i), len("A" + str(i)))
+            i = i + 1
+        }
+    }
+
+    def test_temp_boxed_dict_nested_elem_read() {
+        i: int = 0
+        while i < 300 {
+            self.assertEqual(temp_nested_elem(i), len("N" + str(i)))
+            i = i + 1
+        }
+    }
+
+    def test_temp_plain_dict_elem_read() {
+        i: int = 0
+        while i < 300 {
+            self.assertEqual(plain_dict_elem(i), len("A" + str(i)))
+            i = i + 1
+        }
     }
 
     def test_virtual_override_stores_param() {

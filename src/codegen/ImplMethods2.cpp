@@ -307,20 +307,82 @@ void CodeGen::Impl::emitUnionIncref(llvm::Value* val, llvm::Value* tag) {
         builder->SetInsertPoint(endBB);
     }
 
-bool CodeGen::Impl::consumeBorrowedSlot(const std::string& name) {
-        if (name.empty()) return false;
+void CodeGen::Impl::registerEntryOwnedCleanup(Scope& owner,
+                                              const std::string& name,
+                                              llvm::Value* value, int cleanupKind,
+                                              llvm::Value* tagVal) {
+        auto* func = currentFunction;
+        auto* i32Ty = llvm::Type::getInt32Ty(*context);
+        auto* slotAlloca = createEntryAllocaI32(func, name + ".clslot", -1);
+        owner.cleanupSlots[name] = slotAlloca;
+        if (!owner.cleanupBaseAlloca)
+            owner.cleanupBaseAlloca = createEntryAllocaI32(func, "clbase", -1);
+        auto* baseAlloca = owner.cleanupBaseAlloca;
+        auto* slot = builder->CreateCall(
+            runtimeFuncs["dragon_cleanup_push_if_live"],
+            {value, llvm::ConstantInt::get(i32Ty, cleanupKind), tagVal},
+            name + ".entry.clslot");
+        builder->CreateStore(slot, slotAlloca);
+        auto* pushed = builder->CreateICmpSGE(
+            slot, llvm::ConstantInt::get(i32Ty, 0), name + ".entry.clpushed");
+        auto* curBase = builder->CreateLoad(i32Ty, baseAlloca, "clbase.cur");
+        auto* isFirst = builder->CreateICmpEQ(
+            curBase, llvm::ConstantInt::get(i32Ty, -1), "clbase.first");
+        builder->CreateStore(
+            builder->CreateSelect(builder->CreateAnd(pushed, isFirst),
+                                  slot, curBase, "clbase.new"),
+            baseAlloca);
+    }
+
+bool CodeGen::Impl::takeOwnershipOfBorrowedSlot(const std::string& name,
+                                                llvm::Value* slot,
+                                                VarKind kind) {
+        if (options.gcMode != GCMode::RC || name.empty()) return false;
+        if (!llvm::isa<llvm::AllocaInst>(slot)) return false;
+        Scope* owner = nullptr;
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-            bool hasVar = it->vars.count(name) != 0;
-            bool isBorrowed = it->borrowed.count(name) != 0;
-            if (hasVar || isBorrowed) {
-                if (isBorrowed) {
-                    it->borrowed.erase(name);
-                    return true;
-                }
-                return false;
-            }
+            auto found = it->vars.find(name);
+            bool marked = it->borrowed.count(name) != 0;
+            if (found == it->vars.end() && !marked) continue;
+            bool ownsThisSlot = marked && found != it->vars.end() &&
+                                found->second == slot &&
+                                it->narrowShadowOrigin.count(name) == 0;
+            if (ownsThisSlot) owner = &*it;
+            break;
         }
-        return false;
+        if (!owner) return false;
+        owner->borrowed.erase(name);
+        auto* fn = currentFunction;
+        if (!fn || fn->empty()) return true;
+        auto& entry = fn->getEntryBlock();
+        auto saved = builder->saveIP();
+        if (auto* terminator = entry.getTerminator())
+            builder->SetInsertPoint(terminator);
+        else
+            builder->SetInsertPoint(&entry);
+        llvm::Type* slotType =
+            llvm::cast<llvm::AllocaInst>(slot)->getAllocatedType();
+        auto* entered = builder->CreateLoad(slotType, slot, name + ".entry.own");
+        auto* i32Ty = llvm::Type::getInt32Ty(*context);
+        llvm::Value* cleanupTag = llvm::ConstantInt::get(i32Ty, 0);
+        int cleanupKind = cleanupKindFor(kind);
+        llvm::Value* cleanupVal = nullptr;
+        if (slotType == boxType) {
+            auto* tag = boxTag(entered, name + ".entry.tag");
+            auto* payload = boxPayloadI64(entered, name + ".entry.pay");
+            builder->CreateCall(runtimeFuncs["dragon_incref_boxed"], {tag, payload});
+            cleanupKind = DCLEAN_UNION;
+            cleanupTag = builder->CreateTrunc(tag, i32Ty, name + ".entry.cltag");
+            cleanupVal = payload;
+        } else if (isHeapKind(kind)) {
+            emitIncrefByKind(entered, kind);
+            cleanupVal = cleanupValToI64(entered);
+        }
+        if (cleanupVal && cleanupKind != 0)
+            registerEntryOwnedCleanup(*owner, name, cleanupVal, cleanupKind,
+                                      cleanupTag);
+        builder->restoreIP(saved);
+        return true;
     }
 
 void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotValueType,
@@ -335,11 +397,9 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
             emitIncrefByKind(newVal, newKind);
         }
 
-        bool slotWasBorrowed =
-            (options.gcMode == GCMode::RC && llvm::isa<llvm::AllocaInst>(slotPtr) &&
-             consumeBorrowedSlot(name));
+        takeOwnershipOfBorrowedSlot(name, slotPtr, oldKind);
 
-        if (options.gcMode == GCMode::RC && isHeapKind(oldKind) && !slotWasBorrowed) {
+        if (options.gcMode == GCMode::RC && isHeapKind(oldKind)) {
             auto* oldVal = builder->CreateLoad(
                 slotValueType, slotPtr, name.empty() ? "old.rc" : (name + ".oldrc"));
             llvm::Value* oldToDrop = oldVal;
@@ -364,7 +424,7 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
             isHeapKind(newKind) && newKind != VarKind::Union &&
             llvm::isa<llvm::AllocaInst>(slotPtr)) {
             int ck = cleanupKindFor(newKind);
-            if (isHeapKind(oldKind) && !slotWasBorrowed)
+            if (isHeapKind(oldKind))
                 emitCleanupUpdate(name, newVal);
             else
                 emitCleanupPush(name, newVal, ck);
@@ -373,6 +433,7 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
 
 void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
                           llvm::Value* rhs, const std::string& name) {
+        takeOwnershipOfBorrowedSlot(name, slotPtr, VarKind::Str);
         if (cur->getType() == i64Type) cur = builder->CreateIntToPtr(cur, i8PtrType);
         if (rhs->getType() == i64Type) rhs = builder->CreateIntToPtr(rhs, i8PtrType);
         llvm::Value* result = builder->CreateCall(
@@ -886,7 +947,8 @@ int64_t CodeGen::Impl::listViewWantElemTag(TypeExpr* ann) {
 
 bool CodeGen::Impl::tryNarrowShadowWriteThrough(const std::string& name,
                                                 llvm::Value* val,
-                                                bool rhsBorrowed) {
+                                                bool rhsBorrowed,
+                                                VarKind rhsKind) {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
             auto found = it->vars.find(name);
             if (found == it->vars.end()) continue;
@@ -902,7 +964,10 @@ bool CodeGen::Impl::tryNarrowShadowWriteThrough(const std::string& name,
             // A value that is not of the narrowed kind also ends the narrow;
             // box it so the retire path below stores the binding's real type.
             if (val->getType() != boxType) {
-                int64_t vTag = -1;
+                int64_t vTag = varKindToTag(rhsKind);
+                if (rhsKind == VarKind::Tuple || rhsKind == VarKind::Set ||
+                    rhsKind == VarKind::Deque)
+                    vTag = TAG_LIST;
                 if (val->getType() == i64Type)       vTag = TAG_INT;
                 else if (val->getType() == f64Type)  vTag = TAG_FLOAT;
                 else if (val->getType() == i1Type)   vTag = TAG_BOOL;
@@ -917,32 +982,63 @@ bool CodeGen::Impl::tryNarrowShadowWriteThrough(const std::string& name,
             // retire the shadow. Reading the box's payload at the narrowed kind
             // here (no tag check) is what wrote a scalar into a pointer slot.
             if (val->getType() == boxType) {
-                if (options.gcMode == GCMode::RC) {
-                    if (!isOwnedBoxResult(val))
-                        emitUnionIncref(boxPayloadI64(val, "wt.newpay"),
-                                        boxTag(val, "wt.newtag"));
-                    // No decref of the old box: applying the narrow marked this
-                    // binding BORROWED and handed its slot's cleanup elsewhere,
-                    // so the binding does not own that reference. Releasing it
-                    // here over-releases (it corrupted memory across the suite).
+                const std::string stash = name + ".narrow.stash";
+                auto stashIt = it->vars.find(stash);
+                auto* originAlloca = llvm::dyn_cast<llvm::AllocaInst>(originSlot);
+                const bool ownedByNarrowScope =
+                    stashIt != it->vars.end() && stashIt->second == originSlot;
+
+                const bool searchOuterScopes =
+                    !ownedByNarrowScope && originAlloca != nullptr;
+                auto ownerScope = scopes.rend();
+                for (auto outer = it + 1;
+                     searchOuterScopes && outer != scopes.rend(); ++outer) {
+                    auto ov = outer->vars.find(name);
+                    if (ov == outer->vars.end()) continue;
+                    ownerScope = (ov->second == originSlot) ? outer : scopes.rend();
+                    break;
                 }
-                builder->CreateStore(val, originSlot);
-                if (auto* originAlloca = llvm::dyn_cast<llvm::AllocaInst>(originSlot)) {
+                const bool declaredInNarrowScope =
+                    ownedByNarrowScope ||
+                    (originAlloca && ownerScope == scopes.rend());
+                const bool borrowedBeforeStore =
+                    declaredInNarrowScope
+                        ? !ownedByNarrowScope
+                        : (ownerScope != scopes.rend() &&
+                           ownerScope->borrowed.count(name) != 0);
+                it->vars.erase(name);
+                it->varKinds.erase(name);
+                it->borrowed.erase(name);
+                it->narrowShadowOrigin.erase(name);
+                if (ownedByNarrowScope) {
+                    it->vars.erase(stash);
+                    it->varKinds.erase(stash);
+                }
+                if (declaredInNarrowScope) {
                     it->vars[name] = originAlloca;
                     it->varKinds[name] = VarKind::Union;
-                    it->borrowed.erase(name);
-                    // The narrow parked the real slot under a stash so scope
-                    // cleanup still released it while the shadow stood in.
-                    // Now that the name owns that slot again, drop the stash or
-                    // cleanup releases the same box twice.
-                    const std::string stash = name + ".narrow.stash";
-                    auto st = it->vars.find(stash);
-                    if (st != it->vars.end() && st->second == originAlloca) {
-                        it->vars.erase(st);
-                        it->varKinds.erase(stash);
-                    }
+                    if (!ownedByNarrowScope) it->borrowed.insert(name);
                 }
-                it->narrowShadowOrigin.erase(name);
+
+                const bool originBorrowed =
+                    borrowedBeforeStore &&
+                    !takeOwnershipOfBorrowedSlot(name, originSlot,
+                                                 VarKind::Union);
+                const bool originOwnsItsValue =
+                    options.gcMode == GCMode::RC && !originBorrowed;
+                if (originOwnsItsValue && !isOwnedBoxResult(val))
+                    emitUnionIncref(boxPayloadI64(val, "wt.newpay"),
+                                    boxTag(val, "wt.newtag"));
+                if (originOwnsItsValue) {
+                    auto* oldBox = builder->CreateLoad(
+                        boxType, originSlot, name + ".wt.oldbox");
+                    emitUnionDecref(boxPayloadI64(oldBox, "wt.oldpay"),
+                                    boxTag(oldBox, "wt.oldtag"));
+                }
+                builder->CreateStore(val, originSlot);
+                if (originOwnsItsValue)
+                    emitCleanupUpdate(name, boxPayloadI64(val, "wt.clpay"),
+                                      boxTag(val, "wt.cltag"));
                 return true;
             }
 

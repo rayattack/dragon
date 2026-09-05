@@ -1,7 +1,7 @@
 type Boxed = int | float | bool | str | bytes | list[int] | list[float] | list[bool] | list[str] | list[list[int]] | list[Boxed] | dict[str, int] | dict[str, str] | dict[str, Boxed] | dict[str, list[int]] | dict[str, list[list[int]]] | dict[str, list[str]]
 
 from unittest import TestCase, main
-from json import decode
+from json import decode, Data
 
 const N: int = 3000
 
@@ -578,4 +578,285 @@ class TestAnyTernaryStrUnbox(TestCase) {
 }
 
 
-main([BoxLitArgTests(), BoxSubscriptArgRc(), BoxUnboxSlotRc(), BoxChainSubscriptTests(), BoxOperandDrainRC(), OwnedRecvSubscriptRC(), SubscriptOwnedTempProbe(), TestAnyTernaryStrUnbox()])
+
+def narrow_walk(doc: dict[str, Data], key: str) -> list[Data] {
+    cur: Data = doc
+    if isinstance(cur, dict) {
+        const m: dict[str, Data] = cur
+        cur = m[key]
+    }
+    found: list[Data] = [cur]
+    return found
+}
+
+
+def narrow_walk_guarded(doc: dict[str, Data], segs: list[str]) -> list[Data] {
+    absent: list[Data] = []
+    cur: Data = doc
+    i: int = 0
+    while i < len(segs) {
+        if not isinstance(cur, dict) {
+            return absent
+        }
+        const m: dict[str, Data] = cur
+        if segs[i] not in m {
+            return absent
+        }
+        cur = m[segs[i]]
+        i = i + 1
+    }
+    found: list[Data] = [cur]
+    return found
+}
+
+
+def narrow_str_replaced(doc: dict[str, Data], key: str) -> str {
+    cur: Data = "stale-" + key
+    if isinstance(cur, str) {
+        const seen: str = cur
+        cur = doc[key]
+    }
+    const out: str = cur
+    return out
+}
+
+
+def narrow_str_replaced_after_guard(doc: dict[str, Data], key: str) -> str {
+    cur: Data = "stale-" + key
+    if not isinstance(cur, str) {
+        return ""
+    }
+    cur = doc[key]
+    const out: str = cur
+    return out
+}
+
+
+def narrow_int_replaced(doc: dict[str, Data], key: str) -> str {
+    cur: Data = len(key)
+    if isinstance(cur, int) {
+        const seen: int = cur
+        cur = doc[key]
+    }
+    const out: str = cur
+    return out
+}
+
+
+def narrow_list_replaced(doc: dict[str, Data], key: str) -> str {
+    fresh: list[Data] = ["a" + key, "b" + key]
+    cur: Data = fresh
+    if isinstance(cur, list) {
+        const seen: list[Data] = cur
+        cur = doc[key]
+    }
+    const out: str = cur
+    return out
+}
+
+
+def narrow_written_twice(doc: dict[str, Data], first: str, second: str) -> str {
+    cur: Data = doc
+    if isinstance(cur, dict) {
+        const m: dict[str, Data] = cur
+        cur = m[first]
+        cur = m[second]
+    }
+    const out: str = cur
+    return out
+}
+
+
+def narrow_param_replaced(cur: Data, doc: dict[str, Data], key: str) -> str {
+    if isinstance(cur, str) {
+        const seen: str = cur
+        cur = doc[key]
+    }
+    const out: str = cur
+    return out
+}
+
+
+def fresh_doc(n: int) -> dict[str, Data] {
+    return {"who": "patient-" + str(n), "code": "code-" + str(n), "when": n}
+}
+
+
+
+def local_narrow_str_then_list(xs: list[Data], seed: str) -> str {
+    v: Data = seed
+    if isinstance(v, str) {
+        const seen: str = v
+        v = xs
+    }
+    const out: list[Data] = v
+    const first: str = out[0]
+    return first
+}
+
+
+def local_narrow_list_then_str(xs: list[Data], s: str) -> str {
+    v: Data = xs
+    if isinstance(v, list) {
+        const seen: list[Data] = v
+        v = s
+    }
+    const out: str = v
+    return out
+}
+
+
+def local_narrow_dict_then_str(d: dict[str, Data], s: str) -> str {
+    v: Data = d
+    if isinstance(v, dict) {
+        const seen: dict[str, Data] = v
+        v = s
+    }
+    const out: str = v
+    return out
+}
+
+
+def local_narrow_str_then_dict(d: dict[str, Data], seed: str) -> str {
+    v: Data = seed
+    if isinstance(v, str) {
+        const seen: str = v
+        v = d
+    }
+    const out: dict[str, Data] = v
+    const got: str = out["who"]
+    return got
+}
+
+
+class NarrowWriteThroughRc(TestCase) {
+    def test_narrow_write_through_dict_get() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            const got: list[Data] = narrow_walk(doc, "who")
+            const s: str = got[0]
+            self.assertEqual(s, "patient-" + str(i))
+            const again: list[Data] = narrow_walk(doc, "code")
+            const s2: str = again[0]
+            self.assertEqual(s2, "code-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_loop_guard() {
+        i: int = 0
+        while i < N {
+            const inner: dict[str, Data] = fresh_doc(i)
+            const doc: dict[str, Data] = {"row": inner}
+            const segs: list[str] = ["row", "who"]
+            const got: list[Data] = narrow_walk_guarded(doc, segs)
+            const s: str = got[0]
+            self.assertEqual(s, "patient-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_releases_old_str() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(narrow_str_replaced(doc, "who"), "patient-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_after_return_guard() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(narrow_str_replaced_after_guard(doc, "code"),
+                             "code-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_scalar_arm() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(narrow_int_replaced(doc, "who"), "patient-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_list_arm() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(narrow_list_replaced(doc, "code"), "code-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_twice_in_block() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(narrow_written_twice(doc, "who", "code"),
+                             "code-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_write_through_borrowed_param() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            const held: Data = "held-" + str(i)
+            self.assertEqual(narrow_param_replaced(held, doc, "who"),
+                             "patient-" + str(i))
+            const still: str = held
+            self.assertEqual(still, "held-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_str_replaced_by_list() {
+        i: int = 0
+        while i < N {
+            const xs: list[Data] = ["elem-" + str(i), "tail"]
+            self.assertEqual(local_narrow_str_then_list(xs, "seed-" + str(i)),
+                             "elem-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_list_replaced_by_str() {
+        i: int = 0
+        while i < N {
+            const xs: list[Data] = ["elem-" + str(i)]
+            self.assertEqual(local_narrow_list_then_str(xs, "swap-" + str(i)),
+                             "swap-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_dict_replaced_by_str() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(local_narrow_dict_then_str(doc, "swap-" + str(i)),
+                             "swap-" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_narrow_str_replaced_by_dict() {
+        i: int = 0
+        while i < N {
+            const doc: dict[str, Data] = fresh_doc(i)
+            self.assertEqual(local_narrow_str_then_dict(doc, "seed-" + str(i)),
+                             "patient-" + str(i))
+            i = i + 1
+        }
+    }
+}
+
+
+main([BoxLitArgTests(), BoxSubscriptArgRc(), BoxUnboxSlotRc(), BoxChainSubscriptTests(), BoxOperandDrainRC(), OwnedRecvSubscriptRC(), SubscriptOwnedTempProbe(), TestAnyTernaryStrUnbox(), NarrowWriteThroughRc()])

@@ -1080,6 +1080,19 @@ void dragon_mark_shared_deep(void* obj) {
     shared_worklist_free(&w);
 }
 
+void dragon_incref_boxed(int64_t tag, int64_t payload) {
+    if (!payload) return;
+    if (tag == TAG_STR) {
+        dragon_incref_str((const char*)(uintptr_t)payload);
+        return;
+    }
+    if (tag == TAG_CALLABLE) {
+        dragon_incref_callable((void*)(uintptr_t)payload);
+        return;
+    }
+    if (tag >= TAG_LIST) dragon_incref((void*)(uintptr_t)payload);
+}
+
 void dragon_mark_shared_boxed(int64_t tag, int64_t payload) {
     if (!payload) return;
     if (tag == TAG_STR) {

@@ -291,6 +291,12 @@ DragonBox dragon_dict_get_box(DragonDict* d, const char* key) {
     return box;
 }
 
+DragonBox dragon_dict_get_box_retained(DragonDict* d, const char* key) {
+    DragonBox box = dragon_dict_get_box(d, key);
+    dragon_incref_boxed(box.tag, box.payload);
+    return box;
+}
+
 static const char* tag_name(int64_t tag) {
     switch (tag) {
         case TAG_INT:   return "int";

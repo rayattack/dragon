@@ -868,12 +868,16 @@ void CodeGen::visit(SubscriptExpr& node) {
         }
 
         if (valueIsAny && !intKeyed && checkTag < 0) {
+            bool recvIsOwnedTemp = recvDrain != Impl::VarKind::Other;
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_get_box"], {dict, key},
-                "dictget.box");
+                impl_->runtimeFuncs[recvIsOwnedTemp
+                                        ? "dragon_dict_get_box_retained"
+                                        : "dragon_dict_get_box"],
+                {dict, key}, "dictget.box");
             impl_->pendingDictCheckTag = -1;
             impl_->popArgTempCleanups(subBases);
             releaseOwnedKeyTemp();
+            if (recvIsOwnedTemp) impl_->emitDecrefByKind(dict, recvDrain);
             return;
         }
 

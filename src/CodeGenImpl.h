@@ -1476,9 +1476,14 @@ struct CodeGen::Impl {
                               bool newIsBorrowed,
                               const std::string& name = "");
 
-    bool consumeBorrowedSlot(const std::string& name);
+    void registerEntryOwnedCleanup(Scope& owner, const std::string& name,
+                                   llvm::Value* value, int cleanupKind,
+                                   llvm::Value* tagVal);
 
-    // Non-mutating peek of the mark consumeBorrowedSlot clears: is `name`'s innermost
+    bool takeOwnershipOfBorrowedSlot(const std::string& name, llvm::Value* slot,
+                                     VarKind kind);
+
+    // Non-mutating peek of the borrow mark: is `name`'s innermost
     // binding currently borrowed? Gates the owned-str->StrLiteral downgrade guard: a literal store must keep an owned slot's cleanup kind Str, but never promote a borrowed slot (decref on a not-taken branch would UAF).
     bool isBorrowedSlot(const std::string& name) {
         if (name.empty()) return false;
@@ -2098,7 +2103,7 @@ struct CodeGen::Impl {
     llvm::Value* nicheOptionalTagForValue(Expr* argExpr, llvm::Value* val);
 
     bool tryNarrowShadowWriteThrough(const std::string& name, llvm::Value* val,
-                                     bool rhsBorrowed);
+                                     bool rhsBorrowed, VarKind rhsKind);
 
     void refreshNarrowShadowOrigin(const std::string& name,
                                    llvm::Value* newPayload);

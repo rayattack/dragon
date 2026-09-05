@@ -200,6 +200,11 @@ int32_t dragon_cleanup_push(int64_t val, int32_t kind, int32_t tag) {
     return slot;
 }
 
+int32_t dragon_cleanup_push_if_live(int64_t val, int32_t kind, int32_t tag) {
+    if (!__dragon_active_frames) return -1;
+    return dragon_cleanup_push(val, kind, tag);
+}
+
 void dragon_cleanup_update(int32_t slot, int64_t val, int32_t tag) {
     if (slot < 0) return;
     DragonCleanupStack* cs = dragon_cleanup_active_stack();

@@ -243,6 +243,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_dict_get_box",
         llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_dict_get_box_retained",
+        llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_get_box_or_none",
         llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_int_get_box_or_none",
@@ -539,6 +541,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     auto* i32Ty = llvm::Type::getInt32Ty(*context);
     getOrDeclareRuntime("dragon_cleanup_push",
+        llvm::FunctionType::get(i32Ty, {i64Type, i32Ty, i32Ty}, false));
+    getOrDeclareRuntime("dragon_cleanup_push_if_live",
         llvm::FunctionType::get(i32Ty, {i64Type, i32Ty, i32Ty}, false));
     getOrDeclareRuntime("dragon_cleanup_update",
         llvm::FunctionType::get(voidType, {i32Ty, i64Type, i32Ty}, false));
@@ -903,6 +907,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_class_register_mark_shared",
         llvm::FunctionType::get(i64Type, {i64Type, i8PtrType}, false));
     getOrDeclareRuntime("dragon_mark_shared_boxed",
+        llvm::FunctionType::get(voidType, {i64Type, i64Type}, false));
+    getOrDeclareRuntime("dragon_incref_boxed",
         llvm::FunctionType::get(voidType, {i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_mark_shared_cell",
         llvm::FunctionType::get(voidType, {i8PtrType, i8PtrType}, false));

@@ -563,6 +563,8 @@ void dragon_mark_shared_deep(void* obj);
 
 void dragon_mark_shared_str(const char* s);
 
+void dragon_incref_boxed(int64_t tag, int64_t payload);
+
 void dragon_incref_str(const char* s);
 void dragon_decref_str(const char* s);
 const char* dragon_str_retain(const char* s);

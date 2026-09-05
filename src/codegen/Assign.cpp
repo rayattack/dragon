@@ -738,7 +738,8 @@ void CodeGen::emitTupleUnpackAssign(TupleExpr& tupleTarget, AssignStmt& node,
 }
 
 void CodeGen::Impl::storeUnpackedI64Elem(NameExpr* nameTarget, llvm::Value* elem) {
-    if (tryNarrowShadowWriteThrough(nameTarget->name, elem, true)) return;
+    if (tryNarrowShadowWriteThrough(nameTarget->name, elem, true,
+                                    VarKind::Int)) return;
     auto* alloca = lookupVar(nameTarget->name);
     bool hadSlot = (alloca != nullptr);
     if (!alloca) {
@@ -794,7 +795,7 @@ void CodeGen::Impl::storeUnpackedElemToName(NameExpr* nameTarget, llvm::Value* e
         }
         return;
     }
-    if (tryNarrowShadowWriteThrough(nameTarget->name, elem, true)) {
+    if (tryNarrowShadowWriteThrough(nameTarget->name, elem, true, newKind)) {
         if (!elemClassName.empty())
             varClassNames[nameTarget->name] = elemClassName;
         return;
@@ -817,7 +818,9 @@ void CodeGen::emitNameAssign(NameExpr& name, AssignStmt& node, llvm::Value* val)
     bool rhsBorrowed = (val->getType() == impl_->boxType)
         ? !impl_->isOwnedBoxResult(val)
         : Impl::isBorrowedHeapExpr(node.value.get());
-    if (impl_->tryNarrowShadowWriteThrough(name.name, val, rhsBorrowed)) return;
+    if (impl_->tryNarrowShadowWriteThrough(
+            name.name, val, rhsBorrowed,
+            impl_->inferAssignedVarKind(node, val))) return;
     if (impl_->isCellBacked(name.name)) {
         auto* alloca = impl_->lookupVar(name.name);
         Impl::VarKind cellKind = impl_->lookupVarKind(name.name);
@@ -1070,6 +1073,7 @@ void CodeGen::emitLocalSlotStore(NameExpr& name, AssignStmt& node,
     Impl::VarKind oldKind = hadExistingSlot
         ? impl_->lookupVarKind(name.name)
         : Impl::VarKind::Other;
+    impl_->takeOwnershipOfBorrowedSlot(name.name, alloca, oldKind);
     Impl::VarKind newKind = impl_->inferAssignedVarKind(node, val);
     // A literal store must not downgrade an owned Str slot to StrLiteral
     // (cleanup would skip the decref); a BORROWED slot stays StrLiteral (UAF).
@@ -1090,44 +1094,30 @@ void CodeGen::emitLocalSlotStore(NameExpr& name, AssignStmt& node,
 
     if (oldKind == Impl::VarKind::Union) {
         newKind = Impl::VarKind::Union;
-        if (val->getType() == impl_->boxType) {
-            if (impl_->options.gcMode == GCMode::RC) {
-                auto* oldBox = impl_->builder->CreateLoad(
-                    impl_->boxType, alloca, "old.box");
-                auto* oldTag = impl_->boxTag(oldBox, "old.tag");
-                auto* oldPayload = impl_->boxPayloadI64(oldBox, "old.payload");
-                impl_->emitUnionDecref(oldPayload, oldTag);
-                auto* newTag = impl_->boxTag(val, "new.tag");
-                auto* newPayload = impl_->boxPayloadI64(val, "new.payload");
-                if (!impl_->isOwnedBoxResult(val))
-                    impl_->emitUnionIncref(newPayload, newTag);
-            }
-            impl_->builder->CreateStore(val, alloca);
-            if (impl_->options.gcMode == GCMode::RC) {
-                auto* clTag = impl_->boxTag(val, "cl.tag");
-                auto* clPayload = impl_->boxPayloadI64(val, "cl.payload");
-                impl_->emitCleanupUpdate(name.name, clPayload, clTag);
-            }
-        } else {
-            auto* newTag = impl_->emitTagForExpr(node.value.get(), *this);
-            if (impl_->options.gcMode == GCMode::RC) {
-                auto* oldBox = impl_->builder->CreateLoad(
-                    impl_->boxType, alloca, "old.box");
-                auto* oldTag = impl_->boxTag(oldBox, "old.tag");
-                auto* oldPayload = impl_->boxPayloadI64(oldBox, "old.payload");
-                impl_->emitUnionDecref(oldPayload, oldTag);
-                if (rhsBorrowed) {
-                    auto* newPayloadI64 = impl_->nativeToPayloadI64(val);
-                    impl_->emitUnionIncref(newPayloadI64, newTag);
-                }
-            }
-            llvm::Value* boxVal = impl_->makeBox(newTag, val);
-            impl_->builder->CreateStore(boxVal, alloca);
-            if (impl_->options.gcMode == GCMode::RC) {
-                auto* clPayload = impl_->boxPayloadI64(boxVal, "cl.payload");
-                impl_->emitCleanupUpdate(name.name, clPayload, newTag);
-            }
+        const bool valueIsBox = (val->getType() == impl_->boxType);
+        const bool slotOwnsItsValue = impl_->options.gcMode == GCMode::RC &&
+                                      !impl_->isBorrowedSlot(name.name);
+        llvm::Value* newTag = valueIsBox
+            ? impl_->boxTag(val, "new.tag")
+            : impl_->emitTagForExpr(node.value.get(), *this);
+        const bool retainNew = valueIsBox ? !impl_->isOwnedBoxResult(val)
+                                          : rhsBorrowed;
+        if (slotOwnsItsValue) {
+            auto* oldBox = impl_->builder->CreateLoad(
+                impl_->boxType, alloca, "old.box");
+            impl_->emitUnionDecref(impl_->boxPayloadI64(oldBox, "old.payload"),
+                                   impl_->boxTag(oldBox, "old.tag"));
         }
+        if (slotOwnsItsValue && retainNew)
+            impl_->emitUnionIncref(
+                valueIsBox ? impl_->boxPayloadI64(val, "new.payload")
+                           : impl_->nativeToPayloadI64(val),
+                newTag);
+        llvm::Value* boxVal = valueIsBox ? val : impl_->makeBox(newTag, val);
+        impl_->builder->CreateStore(boxVal, alloca);
+        if (slotOwnsItsValue)
+            impl_->emitCleanupUpdate(
+                name.name, impl_->boxPayloadI64(boxVal, "cl.payload"), newTag);
     } else {
         impl_->storeWithRCOverwrite(
             alloca, allocType, val, oldKind, newKind, rhsBorrowed, name.name);

@@ -45,7 +45,7 @@ void CodeGen::visit(AugAssignStmt& node) {
                 return;
             }
             if (impl_->tryNarrowShadowWriteThrough(name->name, result,
-                                                   newIsBorrowed))
+                                                   newIsBorrowed, newKind))
                 return;
             impl_->storeWithRCOverwrite(storeTarget, loadType, result,
                                         varKind, newKind, newIsBorrowed,
