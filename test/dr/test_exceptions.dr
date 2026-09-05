@@ -162,6 +162,18 @@ class LeafPlainErr(MidErr) {
 }
 
 
+class NoteBase(Exception) {
+    def(m: str) { self.message = m }
+    def note(s: str) -> str { return s }
+}
+
+
+class NoteKid(NoteBase) {
+    def(m: str) { super(m) }
+    def go(n: int) -> str { return super.note("v-" + str(n)) }
+}
+
+
 def _detail_boom() -> None { raise DetailErr("why") }
 
 
@@ -510,6 +522,15 @@ class UserExceptionTextTests(TestCase) {
         self.assertEqual(exact, "lp-a")
         self.assertEqual(mid, "lp-b")
         self.assertEqual(top, "lp-c")
+    }
+
+    def test_repeated_super_method_arg_no_leak() {
+        k: NoteKid = NoteKid("m")
+        i: int = 0
+        while i < 2000 {
+            self.assertEqual(k.go(i), "v-" + str(i))
+            i = i + 1
+        }
     }
 
     def test_repeated_super_concat_message_no_leak() {

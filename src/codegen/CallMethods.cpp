@@ -2121,10 +2121,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         " arguments, but " + std::to_string(node.args.size()) +
                         " were passed");
                 } else {
+                    const std::string parentMethodSym = parentSym + "_" + method;
                     for (size_t i = 0; i < node.args.size(); ++i) {
                         node.args[i]->accept(*this);
+                        llvm::Value* raw = impl_->lastValue;
+                        impl_->collectArgTemp(parentMethodSym, node.args[i].get(),
+                                              raw, (unsigned)(i + 1), argTemps);
                         args.push_back(impl_->coerceArgFromExpr(
-                            node.args[i].get(), impl_->lastValue,
+                            node.args[i].get(), raw,
                             parentMethodType->getParamType((unsigned)(i + 1))));
                     }
                 }
