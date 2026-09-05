@@ -401,6 +401,80 @@ class ExceptAsScopeTests(TestCase) {
 }
 
 
+def label(n: int) -> str {
+    return "L" + str(n)
+}
+
+
+def counted(n: int) -> list[str] {
+    out: list[str] = []
+    i: int = 0
+    while i < n {
+        out.append("c" + str(i))
+        i = i + 1
+    }
+    return out
+}
+
+
+class Point {
+    x: int
+    y: int
+    def(x: int, y: int) {
+        self.x = x
+        self.y = y
+    }
+}
+
+
+def placed(d: int) -> Point {
+    return Point(d, d + 1)
+}
+
+
+class WalrusDecl(TestCase) {
+    def test_declares_from_call_result() {
+        p := placed(3)
+        self.assertEqual(p.x, 3)
+        self.assertEqual(p.y, 4)
+    }
+
+    def test_declares_from_non_call_expression() {
+        n := 2 + 3
+        self.assertEqual(n, 5)
+        joined := "a" + "b"
+        self.assertEqual(joined, "ab")
+    }
+
+    def test_expression_value_matches_binding() {
+        m: int = (k := 6 * 7)
+        self.assertEqual(m, 42)
+        self.assertEqual(k, 42)
+    }
+
+    def test_container_result_keeps_elements() {
+        items := counted(3)
+        self.assertEqual(len(items), 3)
+        self.assertEqual(items[2], "c2")
+    }
+
+    def test_loop_condition_binding_readable_after_loop() {
+        i: int = 0
+        while (w := label(i)) != "L3" {
+            i = i + 1
+        }
+        self.assertEqual(i, 3)
+        self.assertEqual(w, "L3")
+    }
+
+    def test_rebinding_replaces_the_value() {
+        cur: str = "first"
+        cur := label(9)
+        self.assertEqual(cur, "L9")
+    }
+}
+
+
 main([IntKeyedDictAug(), StrKeyedDictAug(), ListElementAug(), FieldAug(),
       Locals(), Fields(), ConstUnpackTests(), ConstUnpackGlobalTests(),
-      ExceptAsScopeTests()])
+      ExceptAsScopeTests(), WalrusDecl()])

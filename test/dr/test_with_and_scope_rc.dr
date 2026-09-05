@@ -282,6 +282,49 @@ def takes(s: str) -> int {
 }
 
 
+class Tokens {
+    parts: list[str]
+    def(parts: list[str]) { self.parts = parts }
+    def size() -> int { return len(self.parts) }
+}
+
+
+def tokenize(text: str) -> Tokens {
+    out: list[str] = []
+    for ch in text { out.append(ch) }
+    return Tokens(out)
+}
+
+
+def make_list(n: int) -> list[str] {
+    out: list[str] = []
+    i: int = 0
+    while i < n {
+        out.append("e" + str(i))
+        i = i + 1
+    }
+    return out
+}
+
+
+def make_table(n: int) -> dict[str, str] {
+    row: dict[str, str] = {}
+    row["k"] = "v" + str(n)
+    return row
+}
+
+
+def make_pair(n: int) -> tuple[int, str] {
+    return (n, "p" + str(n))
+}
+
+
+def next_token(i: int) -> str {
+    if i >= 400 { return "stop" }
+    return "n" + str(i)
+}
+
+
 class WalrusOwnershipTests(TestCase) {
     def test_walrus_arg_then_use() {
         b: str = "bcd"
@@ -314,6 +357,127 @@ class WalrusOwnershipTests(TestCase) {
             i = i + 1
         }
         self.assertEqual(total, 3780)
+    }
+
+    def test_walrus_class_result_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            stream := tokenize("ab")
+            total = total + stream.size()
+            i = i + 1
+        }
+        self.assertEqual(total, 4000)
+    }
+
+    def test_walrus_class_result_wide_chars() {
+        stream := tokenize("深入理解")
+        self.assertEqual(stream.size(), 4)
+        junk: list[str] = []
+        i: int = 0
+        while i < 2000 {
+            junk.append("x" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(len(junk), 2000)
+    }
+
+    def test_walrus_list_result_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            items := make_list(2)
+            total = total + len(items)
+            i = i + 1
+        }
+        self.assertEqual(total, 4000)
+    }
+
+    def test_walrus_dict_result_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            row := make_table(i)
+            total = total + len(row)
+            i = i + 1
+        }
+        self.assertEqual(total, 2000)
+    }
+
+    def test_walrus_tuple_result_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            pair := make_pair(i)
+            total = total + pair[0]
+            i = i + 1
+        }
+        self.assertEqual(total, 1999000)
+    }
+
+    def test_walrus_attribute_value_stays_borrowed() {
+        holder: Tokens = tokenize("abc")
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            parts := holder.parts
+            total = total + len(parts)
+            i = i + 1
+        }
+        self.assertEqual(total, 6000)
+        self.assertEqual(holder.size(), 3)
+    }
+
+    def test_walrus_subscript_value_stays_borrowed() {
+        table: dict[str, list[int]] = {}
+        inner: list[int] = []
+        inner.append(7)
+        table["k"] = inner
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            got := table["k"]
+            total = total + len(got)
+            i = i + 1
+        }
+        self.assertEqual(total, 2000)
+        self.assertEqual(len(inner), 1)
+    }
+
+    def test_walrus_loop_condition_releases_each_value() {
+        i: int = 0
+        seen: int = 0
+        while (w := next_token(i)) != "stop" {
+            seen = seen + len(w)
+            i = i + 1
+        }
+        self.assertEqual(i, 400)
+        self.assertEqual(seen, 1490)
+    }
+
+    def test_walrus_if_condition_list_result() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            if (chunk := make_list(i % 2)) {
+                total = total + len(chunk)
+            }
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_walrus_rebinds_declared_binding() {
+        cur: list[str] = make_list(1)
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            cur := make_list(2)
+            total = total + len(cur)
+            i = i + 1
+        }
+        self.assertEqual(total, 4000)
+        self.assertEqual(len(cur), 2)
     }
 }
 

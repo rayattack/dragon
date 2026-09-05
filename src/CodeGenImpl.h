@@ -111,6 +111,11 @@ struct CodeGen::Impl {
         size_t exitCleanupDepth = 0;
     };
     std::stack<LoopInfo> loopStack;
+
+    bool storeRepeatsWithoutScopeExit() const {
+        return !loopStack.empty() && scopes.size() <= loopStack.top().scopeDepth;
+    }
+
     std::vector<llvm::Function*> tryFrameFuncs;
 
     size_t currentFnTryFrames() {
@@ -1791,6 +1796,8 @@ struct CodeGen::Impl {
     }
 
     VarKind inferAssignedVarKind(AssignStmt& node, llvm::Value* rhsVal);
+    VarKind inferBoundVarKind(Expr* value, llvm::Value* rhsVal,
+                              const std::vector<std::string>& boundNames);
     void recordAssignedCallableType(const std::string& name, llvm::Value* val,
                                     Expr* rhs);
     void storeUnpackedI64Elem(NameExpr* nameTarget, llvm::Value* elem);

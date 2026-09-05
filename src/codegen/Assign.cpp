@@ -1207,82 +1207,89 @@ void CodeGen::emitLocalSlotStore(NameExpr& name, AssignStmt& node,
 
 CodeGen::Impl::VarKind CodeGen::Impl::inferAssignedVarKind(AssignStmt& node,
                                                            llvm::Value* rhsVal) {
-    if (dynamic_cast<ListExpr*>(node.value.get()) || dynamic_cast<ListCompExpr*>(node.value.get()))
+    std::vector<std::string> boundNames;
+    for (auto& t : node.targets)
+        if (auto* tgtName = dynamic_cast<NameExpr*>(t.get()))
+            boundNames.push_back(tgtName->name);
+    return inferBoundVarKind(node.value.get(), rhsVal, boundNames);
+}
+
+CodeGen::Impl::VarKind CodeGen::Impl::inferBoundVarKind(
+        Expr* value, llvm::Value* rhsVal,
+        const std::vector<std::string>& boundNames) {
+    if (dynamic_cast<ListExpr*>(value) || dynamic_cast<ListCompExpr*>(value))
         return VarKind::List;
-    if (dynamic_cast<DictExpr*>(node.value.get()) || dynamic_cast<DictCompExpr*>(node.value.get()))
+    if (dynamic_cast<DictExpr*>(value) || dynamic_cast<DictCompExpr*>(value))
         return VarKind::Dict;
-    if (dynamic_cast<TupleExpr*>(node.value.get()))
+    if (dynamic_cast<TupleExpr*>(value))
         return VarKind::Tuple;
-    if (dynamic_cast<SetExpr*>(node.value.get()) || dynamic_cast<SetCompExpr*>(node.value.get()))
+    if (dynamic_cast<SetExpr*>(value) || dynamic_cast<SetCompExpr*>(value))
         return VarKind::Set;
-    if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
+    if (auto* sl = dynamic_cast<StringLiteral*>(value))
         return sl->isBytes ? VarKind::List : VarKind::StrLiteral;
-    if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
+    if (auto* rhsName = dynamic_cast<NameExpr*>(value)) {
         if (classNames.count(rhsName->name))
             return VarKind::Type;
         return lookupVarKind(rhsName->name);
     }
-    if (auto* callExpr = dynamic_cast<CallExpr*>(node.value.get())) {
+    if (auto* callExpr = dynamic_cast<CallExpr*>(value)) {
         if (auto* calleeName = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
             if (funcReturnsType.count(resolveCalleeSymbol(calleeName->name)))
                 return VarKind::Type;
         }
     }
-    if (auto* sub = dynamic_cast<SubscriptExpr*>(node.value.get())) {
+    if (auto* sub = dynamic_cast<SubscriptExpr*>(value)) {
         if (auto* objName = dynamic_cast<NameExpr*>(sub->object.get())) {
             if (varDictValueIsType.count(objName->name))
                 return VarKind::Type;
         }
     }
-    if (node.value && node.value->type &&
-        node.value->type->kind() == Type::Kind::Function)
+    if (value && value->type &&
+        value->type->kind() == Type::Kind::Function)
         return VarKind::Closure;
     if (rhsVal->getType() == i64Type) return VarKind::Int;
     if (rhsVal->getType() == f64Type) return VarKind::Float;
     if (rhsVal->getType() == i1Type) return VarKind::Bool;
-    if (rhsVal->getType() == i8PtrType &&
-        !dynamic_cast<NoneLiteral*>(node.value.get())) {
-        if (auto* callExpr = dynamic_cast<CallExpr*>(node.value.get())) {
-            if (auto* calleeName = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
-                if (generatorFunctions.count(
-                        resolveCalleeSymbol(calleeName->name)))
-                    return VarKind::Generator;
-                if (typedDictClassesBySym.count(classSym(calleeName->name)))
-                    return VarKind::Dict;
-                if (classNames.count(calleeName->name))
-                    return VarKind::ClassInstance;
-                if (funcReturnsType.count(resolveCalleeSymbol(calleeName->name)))
-                    return VarKind::Type;
-                if (funcReturnsPtr.count(resolveCalleeSymbol(calleeName->name))) {
-                    for (auto& t : node.targets) {
-                        if (auto* tgtName = dynamic_cast<NameExpr*>(t.get()))
-                            varIsPtrCallable.insert(tgtName->name);
-                    }
-                }
-                if (lookupVarKind(calleeName->name) == VarKind::Type)
-                    return VarKind::ClassInstance;
-            }
-        }
-        if (dynamic_cast<FireExpr*>(node.value.get()))
+    if (rhsVal->getType() != i8PtrType || dynamic_cast<NoneLiteral*>(value))
+        return VarKind::Other;
+    auto* callExpr = dynamic_cast<CallExpr*>(value);
+    auto* calleeName = callExpr
+        ? dynamic_cast<NameExpr*>(callExpr->callee.get())
+        : nullptr;
+    if (calleeName) {
+        std::string calleeSym = resolveCalleeSymbol(calleeName->name);
+        if (generatorFunctions.count(calleeSym))
+            return VarKind::Generator;
+        if (typedDictClassesBySym.count(classSym(calleeName->name)))
+            return VarKind::Dict;
+        if (classNames.count(calleeName->name))
             return VarKind::ClassInstance;
-        if (node.value->type) {
-            switch (node.value->type->kind()) {
-                case Type::Kind::Bytes:
-                case Type::Kind::List:
-                case Type::Kind::Deque:
-                case Type::Kind::Dict:
-                case Type::Kind::Tuple:
-                case Type::Kind::Set:
-                case Type::Kind::Instance:
-                    return typeKindToVarKind(node.value->type->kind());
-                case Type::Kind::Ptr:
-                    return VarKind::Other;
-                default: break;
-            }
-        }
-        return VarKind::Str;
+        if (funcReturnsType.count(calleeSym))
+            return VarKind::Type;
+        if (funcReturnsPtr.count(calleeSym))
+            for (auto& boundName : boundNames)
+                varIsPtrCallable.insert(boundName);
+        if (lookupVarKind(calleeName->name) == VarKind::Type)
+            return VarKind::ClassInstance;
     }
-    return VarKind::Other;
+    if (dynamic_cast<FireExpr*>(value))
+        return VarKind::ClassInstance;
+    if (!value->type)
+        return VarKind::Str;
+    switch (value->type->kind()) {
+        case Type::Kind::Bytes:
+        case Type::Kind::List:
+        case Type::Kind::Deque:
+        case Type::Kind::Dict:
+        case Type::Kind::Tuple:
+        case Type::Kind::Set:
+        case Type::Kind::Instance:
+            return typeKindToVarKind(value->type->kind());
+        case Type::Kind::Ptr:
+            return VarKind::Other;
+        default:
+            return VarKind::Str;
+    }
 }
 
 void CodeGen::Impl::recordAssignedCallableType(const std::string& name,

@@ -2,6 +2,20 @@
 
 namespace dragon {
 
+namespace {
+
+class LoopConditionBindings : public DefaultASTVisitor {
+public:
+    std::vector<WalrusExpr*> declared;
+    void visit(WalrusExpr& node) override {
+        declared.push_back(&node);
+        if (node.value) node.value->accept(*this);
+    }
+    void visit(LambdaExpr&) override {}
+};
+
+}
+
 void CodeGen::visit(StarredExpr& node) {
     impl_->addError(
         "internal error: starred expression reached codegen outside a call "
@@ -327,6 +341,22 @@ void CodeGen::visit(WhileStmt& node) {
     llvm::BasicBlock* elseBB = node.elseBody.empty()
         ? endBB
         : llvm::BasicBlock::Create(*impl_->context, "whileelse", func);
+
+    if (impl_->options.gcMode == GCMode::RC && node.condition) {
+        LoopConditionBindings bindings;
+        node.condition->accept(bindings);
+        for (auto* binding : bindings.declared) {
+            if (!binding->type || impl_->lookupVar(binding->name)) continue;
+            int cleanupKind = impl_->cleanupKindFor(
+                Impl::typeKindToVarKind(binding->type->kind()));
+            if (cleanupKind == 0) continue;
+            impl_->emitCleanupPush(
+                binding->name,
+                llvm::ConstantPointerNull::get(
+                    llvm::cast<llvm::PointerType>(impl_->i8PtrType)),
+                cleanupKind);
+        }
+    }
 
     impl_->loopStack.push({endBB, condBB, impl_->scopes.size(), impl_->tryFrameFuncs.size(), impl_->exitCleanupStack.size()});
     impl_->builder->CreateBr(condBB);

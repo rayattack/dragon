@@ -1597,45 +1597,27 @@ void CodeGen::visit(WalrusExpr& node) {
 
     llvm::Type* valType = val->getType();
 
-    Impl::VarKind kind = Impl::VarKind::Other;
-    if (valType == impl_->i64Type) {
-        kind = Impl::VarKind::Int;
-    } else if (valType == impl_->f64Type) {
-        kind = Impl::VarKind::Float;
-    } else if (valType == impl_->i1Type) {
-        kind = Impl::VarKind::Bool;
-    } else if (valType->isPointerTy()) {
-        if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get())) {
-            kind = sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral;
-        } else if (dynamic_cast<ListExpr*>(node.value.get()) ||
-                   dynamic_cast<ListCompExpr*>(node.value.get())) {
-            kind = Impl::VarKind::List;
-        } else if (dynamic_cast<DictExpr*>(node.value.get()) ||
-                   dynamic_cast<DictCompExpr*>(node.value.get())) {
-            kind = Impl::VarKind::Dict;
-        } else if (dynamic_cast<TupleExpr*>(node.value.get())) {
-            kind = Impl::VarKind::Tuple;
-        } else if (dynamic_cast<SetExpr*>(node.value.get()) ||
-                   dynamic_cast<SetCompExpr*>(node.value.get())) {
-            kind = Impl::VarKind::Set;
-        } else if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
-            kind = impl_->lookupVarKind(rhsName->name);
-        } else {
-            kind = Impl::VarKind::Str;
-        }
-    }
+    Impl::VarKind kind =
+        impl_->inferBoundVarKind(node.value.get(), val, {node.name});
 
     auto* alloca = impl_->lookupVar(node.name);
     bool hadExistingSlot = (alloca != nullptr);
     if (!alloca) {
+        std::string boundClass =
+            impl_->recordVarClassFromValue(node.name, node.value.get());
+        if (impl_->options.gcMode == GCMode::RC &&
+            impl_->classNames.count(boundClass))
+            kind = Impl::VarKind::ClassInstance;
         alloca = impl_->createEntryAlloca(
             impl_->currentFunction, node.name, valType);
         impl_->setVar(node.name, alloca, kind);
     }
 
-    Impl::VarKind oldKind = hadExistingSlot
-        ? impl_->lookupVarKind(node.name)
-        : Impl::VarKind::Other;
+    bool freshSlotRebindsInLoop = !hadExistingSlot && Impl::isHeapKind(kind) &&
+                                  impl_->storeRepeatsWithoutScopeExit();
+    Impl::VarKind oldKind = Impl::VarKind::Other;
+    if (hadExistingSlot) oldKind = impl_->lookupVarKind(node.name);
+    else if (freshSlotRebindsInLoop) oldKind = kind;
     bool rhsBorrowed = Impl::isBorrowedHeapExpr(node.value.get());
     impl_->storeWithRCOverwrite(
         alloca, alloca->getAllocatedType(), val, oldKind, kind, rhsBorrowed, node.name);
