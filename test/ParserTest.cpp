@@ -2838,3 +2838,11 @@ TEST(ParserTest, MatchStatementAndTypeAliasStillParse) {
     EXPECT_TRUE(parseErrors(code("match_statement_still_parses")).empty());
     EXPECT_TRUE(parseErrors(code("type_alias_still_parses")).empty());
 }
+
+TEST(ParserTest, TypeCallAtStatementStartIsACall) {
+    EXPECT_TRUE(parseErrors(code("type_call_at_statement_start")).empty());
+}
+
+TEST(ParserTest, TypeAliasAndContractStillParse) {
+    EXPECT_TRUE(parseErrors(code("type_alias_and_contract_still_parse")).empty());
+}

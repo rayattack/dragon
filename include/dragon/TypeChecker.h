@@ -405,6 +405,7 @@ private:
                            const SourceLocation& loc);
     void checkDictMethodArity(const std::string& method, size_t given,
                               const SourceLocation& loc);
+    void checkBuiltinArgTypes(const std::string& name, const CallExpr& node);
     void refuseDequeIteration(Expr* iterable);
     void bindCompLoopVars(const std::vector<std::string>& names,
                           const std::shared_ptr<Type>& iterType);

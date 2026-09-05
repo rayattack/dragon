@@ -120,7 +120,7 @@ std::unique_ptr<Stmt> Parser::statement() {
     }
 
     if (check(TokenType::IDENTIFIER) && peek().lexeme() == "type" &&
-        !nameFollows(peekNext().type())) {
+        peekNext().type() == TokenType::IDENTIFIER) {
         advance();
         auto typeLoc = previous().location();
         std::string typeName = std::string(

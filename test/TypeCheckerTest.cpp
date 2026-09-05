@@ -2116,3 +2116,52 @@ TEST(TypeCheckerTest, DeferRefusalsAreTypeErrorsNotCodegenErrors) {
     EXPECT_TRUE(checkHasErrors(code("defer_with_union_argument_rejected")));
     EXPECT_TRUE(checkOk(code("defer_direct_callees_accepted")));
 }
+
+TEST(TypeCheckerTest, BuiltinArgumentTypesRefusedWhereCodegenCrashes) {
+    EXPECT_TRUE(checkHasErrors(code("sorted_of_a_number_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("dir_of_a_number_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("getattr_on_a_number_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("getattr_with_a_non_str_name_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("hasattr_on_a_number_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("sum_of_a_dict_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("zip_of_numbers_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("pow_of_a_str_rejected")));
+    EXPECT_TRUE(checkOk(code("builtin_argument_types_accepted")));
+}
+
+TEST(TypeCheckerTest, BuiltinArgumentMessageNamesBuiltinAndExpectedType) {
+    auto module = parse(code("sorted_of_a_number_rejected"));
+    ASSERT_NE(module, nullptr);
+    Sema sema;
+    sema.analyze(*module);
+    TypeChecker tc;
+    tc.check(*module);
+    bool found = false;
+    for (const auto& d : tc.diagnostics()) {
+        if (d.message.find("sorted() needs a list or a str") == std::string::npos)
+            continue;
+        found = true;
+        EXPECT_NE(d.message.find("but this is 'int'"), std::string::npos)
+            << d.message;
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(TypeCheckerTest, BytesOfAStrIsRefusedWithTheEncodeHint) {
+    EXPECT_TRUE(checkHasErrors(code("bytes_of_a_str_rejected")));
+    EXPECT_TRUE(checkOk(code("bytes_sources_accepted")));
+    auto module = parse(code("bytes_of_a_str_rejected"));
+    ASSERT_NE(module, nullptr);
+    Sema sema;
+    sema.analyze(*module);
+    TypeChecker tc;
+    tc.check(*module);
+    bool found = false;
+    for (const auto& d : tc.diagnostics()) {
+        if (d.message.find("bytes() needs") == std::string::npos) continue;
+        found = true;
+        EXPECT_NE(d.message.find("\"text\".encode(\"utf-8\")"), std::string::npos)
+            << d.message;
+    }
+    EXPECT_TRUE(found);
+}

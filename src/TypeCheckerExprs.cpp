@@ -304,6 +304,7 @@ void TypeChecker::visit(CallExpr& node) {
         if (builtinCallIsUnshadowed(bn) && node.kwArgs.empty() &&
             !hasStarredArg(node)) {
             checkBuiltinArity(bn, node.args.size(), node.location());
+            checkBuiltinArgTypes(bn, node);
         }
     }
 
@@ -2200,6 +2201,54 @@ const std::map<std::string, std::set<size_t>>& builtinArities() {
     return table;
 }
 
+struct BuiltinParam {
+    std::set<Type::Kind> kinds;
+    const char* expected;
+};
+
+const std::set<Type::Kind>& heapKinds() {
+    static const std::set<Type::Kind> kinds = {
+        Type::Kind::Str,   Type::Kind::Bytes, Type::Kind::List,
+        Type::Kind::Tuple, Type::Kind::Set,   Type::Kind::Dict,
+        Type::Kind::Deque, Type::Kind::Instance, Type::Kind::Class,
+    };
+    return kinds;
+}
+
+const std::map<std::string, std::vector<BuiltinParam>>& builtinParams() {
+    static const std::set<Type::Kind> number = {
+        Type::Kind::Int, Type::Kind::Float, Type::Kind::Bool};
+    static const std::set<Type::Kind> listOrStr = {
+        Type::Kind::Str, Type::Kind::List};
+    static const std::set<Type::Kind> iterable = {
+        Type::Kind::Str, Type::Kind::List, Type::Kind::Dict, Type::Kind::Set};
+    static const std::set<Type::Kind> listOnly = {Type::Kind::List};
+    static const std::set<Type::Kind> text = {Type::Kind::Str};
+    static const std::set<Type::Kind> callable = {Type::Kind::Function};
+    static const std::set<Type::Kind> byteSource = {
+        Type::Kind::Int, Type::Kind::Bool, Type::Kind::List};
+
+    static const std::map<std::string, std::vector<BuiltinParam>> table = {
+        {"sorted",   {{listOrStr, "a list or a str"}}},
+        {"reversed", {{listOrStr, "a list or a str"}}},
+        {"sum",      {{listOrStr, "a list or a str"}}},
+        {"all",      {{iterable, "a list, str, dict or set"}}},
+        {"any",      {{iterable, "a list, str, dict or set"}}},
+        {"dir",      {{heapKinds(), "an object with attributes"}}},
+        {"getattr",  {{heapKinds(), "an object with attributes"},
+                      {text, "a str attribute name"}}},
+        {"hasattr",  {{heapKinds(), "an object with attributes"},
+                      {text, "a str attribute name"}}},
+        {"pow",      {{number, "a number"}, {number, "a number"}}},
+        {"divmod",   {{number, "a number"}, {number, "a number"}}},
+        {"zip",      {{listOnly, "a list"}, {listOnly, "a list"}}},
+        {"map",      {{callable, "a function"}, {listOnly, "a list"}}},
+        {"filter",   {{callable, "a function"}, {listOnly, "a list"}}},
+        {"bytes",    {{byteSource, "an int length or a list of ints"}}},
+    };
+    return table;
+}
+
 const std::map<std::string, std::set<size_t>>& dictMethodArities() {
     static const std::map<std::string, std::set<size_t>> table = {
         {"get", {1, 2}},   {"pop", {1, 2}},   {"setdefault", {2}},
@@ -2235,6 +2284,37 @@ void TypeChecker::checkBuiltinArity(const std::string& name, size_t given,
     if (it->second.count(given)) return;
     error(loc, arityMessage(name + "()", it->second, given) +
                arityHint(name, given));
+}
+
+void TypeChecker::checkBuiltinArgTypes(const std::string& name,
+                                       const CallExpr& node) {
+    auto it = builtinParams().find(name);
+    if (it == builtinParams().end()) return;
+    const auto& params = it->second;
+    for (size_t i = 0; i < node.args.size() && i < params.size(); ++i) {
+        const auto& arg = node.args[i];
+        if (!arg || !arg->type) continue;
+        Type::Kind kind = arg->type->kind();
+        if (kind == Type::Kind::Unknown || kind == Type::Kind::Never ||
+            kind == Type::Kind::TypeVar || kind == Type::Kind::Boxed ||
+            kind == Type::Kind::Union || kind == Type::Kind::Optional ||
+            kind == Type::Kind::Contract) {
+            continue;
+        }
+        if (params[i].kinds.count(kind)) continue;
+        std::string where = params.size() == 1
+            ? std::string("its argument")
+            : "argument " + std::to_string(i + 1);
+        std::string msg = name + "() needs " + params[i].expected + " for " +
+                          where + ", but this is '" + arg->type->toString() +
+                          "'";
+        if (name == "bytes" && kind == Type::Kind::Str) {
+            msg += ". bytes(text) does not encode: call encode on the string "
+                   "instead, \"text\".encode(\"utf-8\")";
+        }
+        error(arg->location(), msg);
+        return;
+    }
 }
 
 void TypeChecker::checkDictMethodArity(const std::string& method, size_t given,

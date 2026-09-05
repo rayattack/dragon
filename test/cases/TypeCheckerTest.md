@@ -3388,7 +3388,7 @@ print(len(b))
 
 ```dr
 empty: bytes = bytes()
-one: bytes = bytes("text")
+one: bytes = bytes(4)
 encoded: bytes = "text".encode("utf-8")
 print(len(empty) + len(one) + len(encoded))
 ```
@@ -3627,4 +3627,116 @@ class HTML(Template) {
 def go() -> None { print("x") }
 handler: Callable[[], None] = go
 page: HTML = template[HTML] {<button onclick=!{handler}>go</button>}
+```
+
+#### :sorted_of_a_number_rejected
+
+`sorted(1)`, `dir(1)`, `getattr(1, 2)` and `hasattr(1, 2)` passed `dragon check`
+and then segfaulted the compiled program: codegen lowered a pointer parameter
+from an i64 value.
+
+```dr
+n: int = 1
+print(sorted(n))
+```
+
+#### :dir_of_a_number_rejected
+
+```dr
+n: int = 1
+print(dir(n))
+```
+
+#### :getattr_on_a_number_rejected
+
+```dr
+n: int = 1
+k: str = "x"
+print(getattr(n, k))
+```
+
+#### :getattr_with_a_non_str_name_rejected
+
+```dr
+class A {
+    f: int
+    def () { self.f = 1 }
+}
+a: A = A()
+print(getattr(a, 5))
+```
+
+#### :hasattr_on_a_number_rejected
+
+```dr
+n: int = 1
+k: str = "x"
+print(hasattr(n, k))
+```
+
+#### :sum_of_a_dict_rejected
+
+```dr
+d: dict[str, int] = {"a": 1}
+print(sum(d))
+```
+
+#### :zip_of_numbers_rejected
+
+```dr
+print(len(zip(1, 2)))
+```
+
+#### :pow_of_a_str_rejected
+
+```dr
+s: str = "a"
+print(pow(s, 2))
+```
+
+#### :builtin_argument_types_accepted
+
+```dr
+class A {
+    f: int
+    def () { self.f = 1 }
+}
+
+xs: list[int] = [3, 1, 2]
+s: str = "ab"
+d: dict[str, int] = {"a": 1}
+a: A = A()
+
+print(sorted(xs))
+print(sorted(s))
+print(reversed(xs))
+print(sum(xs))
+print(all(d))
+print(dir(a))
+print(dir(s))
+print(getattr(a, "f"))
+print(hasattr(a, "f"))
+print(pow(2, 3))
+print(divmod(7, 2))
+print(len(zip(xs, xs)))
+```
+
+#### :bytes_of_a_str_rejected
+
+`bytes("text")` returned an empty bytes instead of encoding or refusing.
+
+```dr
+b: bytes = bytes("text")
+print(len(b))
+```
+
+#### :bytes_sources_accepted
+
+```dr
+octets: list[int] = [104, 105]
+empty: bytes = bytes()
+sized: bytes = bytes(4)
+fromList: bytes = bytes(octets)
+encoded: bytes = "text".encode("utf-8")
+print(len(empty) + len(sized) + len(fromList) + len(encoded))
 ```

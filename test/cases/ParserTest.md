@@ -669,3 +669,27 @@ type Shape = int | str
 s: Shape = 1
 print(s)
 ```
+
+#### :type_call_at_statement_start
+
+`type(x)` at the start of a statement was read as a type alias, so it failed
+with "Expect type name" pointing past the call.
+
+```dr
+x: int = 1
+type(x)
+print("done")
+```
+
+#### :type_alias_and_contract_still_parse
+
+```dr
+type Shape = int | str
+
+type Closer {
+    def close() -> None
+}
+
+s: Shape = 1
+print(s)
+```
