@@ -2,7 +2,7 @@ type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed] |
 
 from json import Data
 from unittest import TestCase, main
-from json import loads
+from json import loads, dumps
 from anybox_src import give_bytes, give_str
 
 
@@ -145,6 +145,39 @@ def mk_dict_of_dict() -> dict[str, dict[str, Boxed]] {
     return {"outer": inner}
 }
 
+def mk_by_subscript() -> dict[str, Boxed] {
+    s: dict[str, Boxed] = {}
+    s["required"] = ["id", "name"]
+    return s
+}
+
+
+def mk_nested_by_subscript() -> dict[str, Boxed] {
+    s: dict[str, Boxed] = {}
+    s["properties"] = {"inner": ["a", "b", "c"]}
+    return s
+}
+
+
+def mk_data_by_subscript() -> dict[str, Data] {
+    s: dict[str, Data] = {}
+    s["required"] = ["key", "n"]
+    return s
+}
+
+
+def data_element(v: Data, i: int) -> str {
+    const l: list[Data] = v
+    return dumps(l[i])
+}
+
+
+def mk_list_slot_by_subscript() -> list[Boxed] {
+    xs: list[Boxed] = [0, 0]
+    xs[0] = ["id", "name"]
+    return xs
+}
+
 
 def count_list(s: dict[str, Boxed], key: str) -> int {
     v: Boxed = s[key]
@@ -186,6 +219,48 @@ class DictAnyListLiteralBornBoxed(TestCase) {
     slot still follows the load-bearing invariance rule (test_named_list_str_stays_
     invariant proves it still raises), never a silent wrong value.
     """
+
+    def test_subscript_store_list_literal_is_born_boxed() -> None {
+        const s: dict[str, Boxed] = mk_by_subscript()
+        self.assertEqual(count_list(s, "required"), 2)
+        const req: Boxed = s["required"]
+        const rl: list[Boxed] = req
+        const first: Boxed = rl[0]
+        const name: str = first
+        self.assertEqual(name, "id")
+    }
+
+    def test_subscript_store_nested_dict_literal_is_born_boxed() -> None {
+        const sch: dict[str, Boxed] = mk_nested_by_subscript()
+        self.assertEqual(count_dict(sch, "properties"), 1)
+        const props: Boxed = sch["properties"]
+        const pd: dict[str, Boxed] = props
+        const inner: Boxed = pd["inner"]
+        const il: list[Boxed] = inner
+        self.assertEqual(len(il), 3)
+    }
+
+    def test_subscript_store_into_a_data_slot() -> None {
+        const s: dict[str, Data] = mk_data_by_subscript()
+        self.assertEqual(data_element(s["required"], 0), "\"key\"")
+        self.assertEqual(data_element(s["required"], 1), "\"n\"")
+    }
+
+    def test_subscript_store_survives_dumps_loads() -> None {
+        const s: dict[str, Data] = mk_data_by_subscript()
+        const text: str = dumps(s)
+        const back: Data = loads(text)
+        const bm: dict[str, Data] = back
+        self.assertEqual(dumps(s), text)
+        self.assertEqual(data_element(bm["required"], 0), "\"key\"")
+    }
+
+    def test_subscript_store_into_a_list_slot() -> None {
+        const xs: list[Boxed] = mk_list_slot_by_subscript()
+        const first: Boxed = xs[0]
+        const fl: list[Boxed] = first
+        self.assertEqual(len(fl), 2)
+    }
 
     def test_str_list_value() -> None {
         self.assertEqual(count_list(mk_str_list(), "required"), 2)

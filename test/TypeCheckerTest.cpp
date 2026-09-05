@@ -1802,6 +1802,18 @@ TEST(TypeCheckerTest, ExceptionSubclassRejectsExtraArgs) {
     EXPECT_TRUE(checkHasErrors(code("exception_subclass_rejects_extra_args")));
 }
 
+TEST(TypeCheckerTest, NamedMonoListIntoUnionSlotRejected) {
+    EXPECT_TRUE(checkHasErrors(code("named_mono_list_into_union_slot_rejected")));
+    EXPECT_TRUE(checkHasErrors(
+        code("named_mono_list_into_union_list_slot_rejected")));
+}
+
+TEST(TypeCheckerTest, LiteralIntoUnionSlotIsBornAtTheSlotLayout) {
+    EXPECT_TRUE(checkOk(code("list_literal_into_union_slot_ok")));
+    EXPECT_TRUE(checkOk(code("nested_literal_into_union_slot_ok")));
+    EXPECT_TRUE(checkOk(code("boxed_list_into_union_slot_ok")));
+}
+
 TEST(TypeCheckerTest, ExceptionMessageFieldMustBeStr) {
     EXPECT_TRUE(checkHasErrors(code("exception_message_field_must_be_str")));
     EXPECT_TRUE(checkHasErrors(

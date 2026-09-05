@@ -405,6 +405,8 @@ private:
     void checkCompExtraClauses(std::vector<CompClause>& clauses);
     void initBuiltinTypes();
     void reportNoConstructorCall(CallExpr& node, const ClassType& ct);
+    void checkSubscriptSlotStore(AssignStmt& node,
+                                 const std::shared_ptr<Type>& slot);
     void error(const SourceLocation& loc, const std::string& message);
     void warning(const SourceLocation& loc, const std::string& message);
 

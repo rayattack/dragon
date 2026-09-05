@@ -3053,3 +3053,51 @@ def page(title: str) -> str {
     return marked.to_str()
 }
 ```
+
+#### :named_mono_list_into_union_slot_rejected
+
+A named `list[str]` and a `list[Payload]` have different element layouts, so
+storing one where the other is expected can only produce a wrong read. The
+literal form is built at the slot's layout instead; a named value has already
+been built and is refused with the copy advice.
+
+```dr
+type Payload = str | int | list[Payload]
+s: dict[str, Payload] = {}
+v: list[str] = ["a", "b"]
+s["r"] = v
+```
+
+#### :named_mono_list_into_union_list_slot_rejected
+
+```dr
+type Payload = str | int | list[Payload]
+xs: list[Payload] = [0, 0]
+v: list[str] = ["a", "b"]
+xs[0] = v
+```
+
+#### :list_literal_into_union_slot_ok
+
+```dr
+type Payload = str | int | list[Payload]
+s: dict[str, Payload] = {}
+s["r"] = ["a", "b"]
+```
+
+#### :nested_literal_into_union_slot_ok
+
+```dr
+type Payload = str | int | list[Payload] | dict[str, Payload]
+s: dict[str, Payload] = {}
+s["r"] = {"inner": ["a", "b"]}
+```
+
+#### :boxed_list_into_union_slot_ok
+
+```dr
+type Payload = str | int | list[Payload]
+s: dict[str, Payload] = {}
+v: list[Payload] = ["a", "b"]
+s["r"] = v
+```

@@ -78,6 +78,26 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
     return false;
 }
 
+void TypeChecker::checkSubscriptSlotStore(AssignStmt& node,
+                                          const std::shared_ptr<Type>& slot) {
+    if (!node.value || !slot) return;
+    if (slot->kind() == Type::Kind::Boxed) {
+        boxNestedContainerLiteralForAny(node.value.get());
+        return;
+    }
+    if (slot->kind() != Type::Kind::Union) return;
+    propagateAnnotationToEmptyLiteral(node.value.get(), slot);
+    auto valueType = inferType(node.value.get());
+    if (tryExpectedTypeLiteral(node.value.get(), slot)) return;
+    if (!valueType || valueType->kind() == Type::Kind::Unknown) return;
+    if (valueType->isAssignableTo(*slot)) return;
+    const std::string hint = listReprMismatchHint(*valueType, *slot);
+    if (hint.empty()) return;
+    error(node.location(),
+          "cannot store '" + valueType->toString() + "' into a slot of type '" +
+          slot->toString() + "'" + hint);
+}
+
 void TypeChecker::markNarrowTarget(Expr& value,
                                    const std::shared_ptr<Type>& want) {
     if (!want || !value.type || value.type->kind() != Type::Kind::Boxed) return;
@@ -292,6 +312,14 @@ bool TypeChecker::coerceLiteralToUnion(Expr* value,
 }
 
 std::string TypeChecker::listReprMismatchHint(const Type& from, const Type& to) {
+    if (auto* ut = dynamic_cast<const UnionType*>(&to)) {
+        for (auto& arm : ut->types) {
+            if (!arm || arm->kind() != Type::Kind::List) continue;
+            std::string hint = listReprMismatchHint(from, *arm);
+            if (!hint.empty()) return hint;
+        }
+        return "";
+    }
     auto* fl = dynamic_cast<const ListType*>(&from);
     auto* tl = dynamic_cast<const ListType*>(&to);
     if (!fl || !tl || !fl->elementType || !tl->elementType) return "";
@@ -463,15 +491,12 @@ void TypeChecker::visit(AssignStmt& node) {
                 }
             } else if (auto* sub = dynamic_cast<SubscriptExpr*>(target.get())) {
                 auto contType = inferType(sub->object.get());
-                bool slotIsAny = false;
+                std::shared_ptr<Type> slotType;
                 if (auto* dt = dynamic_cast<DictType*>(contType.get()))
-                    slotIsAny = dt->valueType &&
-                                dt->valueType->kind() == Type::Kind::Boxed;
+                    slotType = dt->valueType;
                 else if (auto* lt = dynamic_cast<ListType*>(contType.get()))
-                    slotIsAny = lt->elementType &&
-                                lt->elementType->kind() == Type::Kind::Boxed;
-                if (slotIsAny)
-                    boxNestedContainerLiteralForAny(node.value.get());
+                    slotType = lt->elementType;
+                checkSubscriptSlotStore(node, slotType);
             }
             inferType(target.get());
         }
