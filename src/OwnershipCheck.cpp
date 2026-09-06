@@ -1,4 +1,5 @@
 #include "dragon/OwnershipCheck.h"
+#include "dragon/Dubable.h"
 #include "dragon/TypeChecker.h"
 
 #include <unordered_map>
@@ -66,7 +67,10 @@ struct OwnershipCheck::Impl {
     std::unordered_map<int, std::string> slotNames;
     std::unordered_set<std::string> e15Reported;
     std::unordered_set<std::string> lockGuardedClasses;
+    std::unordered_set<std::string> unguardedClassNames;
     std::unordered_map<std::string, FunctionDecl*> funcsByName;
+    std::unordered_map<std::string, Module*> externalModules;
+    std::unordered_map<std::string, Module*> moduleAliases;
 
     std::unordered_map<std::string, bool> funcReturnOwned;
     std::string currentFnKey;
@@ -242,13 +246,68 @@ struct OwnershipCheck::Impl {
                   "resource in a class with an own field");
     }
 
+    static FunctionDecl* topLevelFunction(Module& module,
+                                          const std::string& name) {
+        for (auto& s : module.body)
+            if (auto* fn = dynamic_cast<FunctionDecl*>(s.get()))
+                if (fn->name == name && !fn->isExtern && !fn->isMethod)
+                    return fn;
+        return nullptr;
+    }
+
+    static std::string boundName(const ImportStmt::Alias& alias) {
+        return alias.asName.empty() ? alias.name : alias.asName;
+    }
+
+    void bindEveryFunction(Module& source) {
+        for (auto& s : source.body) {
+            auto* fn = dynamic_cast<FunctionDecl*>(s.get());
+            if (fn && !fn->isExtern && !fn->isMethod)
+                funcsByName.emplace(fn->name, fn);
+        }
+    }
+
+    void bindImportedFunctions(FromImportStmt& fi, Module& source) {
+        for (auto& alias : fi.names) {
+            if (alias.name == "*") {
+                bindEveryFunction(source);
+                continue;
+            }
+            if (FunctionDecl* fn = topLevelFunction(source, alias.name))
+                funcsByName.emplace(boundName(alias), fn);
+        }
+    }
+
+    void bindImportedModules(ImportStmt& im) {
+        for (auto& alias : im.names) {
+            auto mit = externalModules.find(alias.name);
+            if (mit != externalModules.end())
+                moduleAliases[boundName(alias)] = mit->second;
+        }
+    }
+
     void collectFunctions(Module& module) {
         for (auto& s : module.body) {
-            if (auto* fn = dynamic_cast<FunctionDecl*>(s.get())) {
-                if (!fn->isExtern && !fn->isMethod)
-                    funcsByName[fn->name] = fn;
-            }
+            auto* fn = dynamic_cast<FunctionDecl*>(s.get());
+            if (fn && !fn->isExtern && !fn->isMethod)
+                funcsByName[fn->name] = fn;
         }
+        for (auto& s : module.body) {
+            if (auto* im = dynamic_cast<ImportStmt*>(s.get()))
+                bindImportedModules(*im);
+            auto* fi = dynamic_cast<FromImportStmt*>(s.get());
+            if (!fi) continue;
+            auto mit = externalModules.find(fi->module);
+            if (mit != externalModules.end())
+                bindImportedFunctions(*fi, *mit->second);
+        }
+    }
+
+    static int paramIndexOf(FunctionDecl* fn, const std::string& name) {
+        if (!fn) return -1;
+        for (size_t i = 0; i < fn->params.size(); ++i)
+            if (fn->params[i].name == name) return (int)i;
+        return -1;
     }
 
     static std::string methodKey(const std::string& cls,
@@ -340,6 +399,30 @@ struct OwnershipCheck::Impl {
         if (p.isOwn || p.isVarArg || p.isKwArg || p.name.empty()) return false;
         SourceLocation where; std::string how;
         return !bodyMutatesBinding(fn->body, p.name, where, how);
+    }
+
+    static bool classHasOwnLock(ClassDecl* cd) {
+        for (auto& member : cd->body) {
+            auto* ann = dynamic_cast<AnnAssignStmt*>(member.get());
+            if (!ann || !ann->isOwn) continue;
+            auto* named = dynamic_cast<NamedTypeExpr*>(ann->annotation.get());
+            if (named && named->name == "Lock") return true;
+        }
+        return false;
+    }
+
+    void collectLockGuards(Module& module) {
+        for (auto& s : module.body) {
+            auto* cd = dynamic_cast<ClassDecl*>(s.get());
+            if (!cd) continue;
+            if (classHasOwnLock(cd)) lockGuardedClasses.insert(cd->name);
+            else unguardedClassNames.insert(cd->name);
+        }
+    }
+
+    bool isLockGuarded(const std::string& className) const {
+        return lockGuardedClasses.count(className) &&
+               !unguardedClassNames.count(className);
     }
 
     void collectOwnFields(Module& module) {
@@ -881,10 +964,10 @@ struct OwnershipCheck::Impl {
         if (nm->type->kind() == Type::Kind::Lock) return;
         if (nm->type->kind() == Type::Kind::Instance) {
             auto& inst = static_cast<InstanceType&>(*nm->type);
-            if (inst.classType && lockGuardedClasses.count(inst.classType->name))
+            if (inst.classType && isLockGuarded(inst.classType->name))
                 return;
         }
-        if (nm->name == "self" && lockGuardedClasses.count(currentClassName))
+        if (nm->name == "self" && isLockGuarded(currentClassName))
             return;
         if (immediateAwait) return;
         if (calleeFn && paramIdx >= 0 &&
@@ -916,9 +999,54 @@ struct OwnershipCheck::Impl {
                              " - another reference could race the thread"
                        : "'" + nm->name + "' is a borrow, not the sole owner");
         error(nm->location(),
-              "'" + nm->name + "' crosses a thread boundary; move it (own " +
-                  nm->name + "), copy it (dub " + nm->name +
-                  "), or make it a locked type (" + why + ")");
+              "'" + nm->name + "' crosses a thread boundary; " +
+                  spawnCrossingFixes(nm, calleeFn, paramIdx) + " (" +
+                  spawnCrossingWhy(why, nm, calleeFn, paramIdx) + ")");
+    }
+
+    static const Parameter* spawnParam(FunctionDecl* fn, int idx) {
+        if (!fn || idx < 0 || (size_t)idx >= fn->params.size()) return nullptr;
+        return &fn->params[idx];
+    }
+
+    std::string spawnCrossingFixes(NameExpr* nm, FunctionDecl* calleeFn,
+                                   int paramIdx) {
+        const Parameter* p = spawnParam(calleeFn, paramIdx);
+        std::vector<std::string> fixes;
+        std::string dubWhy;
+        if (typeIsDubable(nm->type.get(), dubWhy))
+            fixes.push_back("copy it (dub " + nm->name + ")");
+        if (!p || p->isOwn)
+            fixes.push_back("move it (own " + nm->name + ")");
+        else
+            fixes.push_back("declare '" + p->name + "' own in '" +
+                            calleeFn->name + "' and move it (own " +
+                            nm->name + ")");
+        fixes.push_back("make it a locked type");
+        std::string out = fixes[0];
+        for (size_t i = 1; i < fixes.size(); ++i) {
+            const bool last = i + 1 == fixes.size();
+            out += last ? (fixes.size() == 2 ? " or " : ", or ") : ", ";
+            out += fixes[i];
+        }
+        return out;
+    }
+
+    std::string spawnCrossingWhy(const std::string& fallback, NameExpr* nm,
+                                 FunctionDecl* calleeFn, int paramIdx) {
+        std::string why = fallback;
+        const Parameter* p = spawnParam(calleeFn, paramIdx);
+        SourceLocation where;
+        std::string how;
+        if (p && !p->isOwn &&
+            bodyMutatesBinding(calleeFn->body, p->name, where, how))
+            why = "'" + calleeFn->name + "' writes '" + p->name + "' (" + how +
+                  " at " + lineRef(where) +
+                  "), so the thread cannot share it read-only; " + fallback;
+        std::string dubWhy;
+        if (!typeIsDubable(nm->type.get(), dubWhy))
+            why += "; dub does not apply: " + dubWhy;
+        return why;
     }
 
     void processFire(FireExpr* fire, Flow& flow, const std::string& taskName,
@@ -938,16 +1066,21 @@ struct OwnershipCheck::Impl {
             auto fit = funcsByName.find(cn->name);
             if (fit != funcsByName.end()) calleeFn = fit->second;
         }
-        if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get()))
+        if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get())) {
+            auto mit = moduleAliases.find(exprPath(at->object.get()));
+            if (mit != moduleAliases.end())
+                calleeFn = topLevelFunction(*mit->second, at->attribute);
             checkSpawnCrossing(at->object.get(), flow, taskName,
                                immediateAwait, fire->location());
+        }
         for (size_t ai = 0; ai < call->args.size(); ++ai)
             checkSpawnCrossing(call->args[ai].get(), flow, taskName,
                                immediateAwait, fire->location(), calleeFn,
                                (int)ai);
         for (auto& kw : call->kwArgs)
             checkSpawnCrossing(kw.second.get(), flow, taskName,
-                               immediateAwait, fire->location());
+                               immediateAwait, fire->location(), calleeFn,
+                               paramIndexOf(calleeFn, kw.first));
     }
 
     void processDefer(DeferStmt* d, Flow& flow) {
@@ -1832,6 +1965,10 @@ struct OwnershipCheck::Impl {
 OwnershipCheck::OwnershipCheck() : impl_(std::make_unique<Impl>()) {}
 OwnershipCheck::~OwnershipCheck() = default;
 
+void OwnershipCheck::registerExternalModule(Module& module) {
+    impl_->externalModules[module.moduleName] = &module;
+}
+
 bool OwnershipCheck::analyze(Module& module) {
     impl_->diags.clear();
     impl_->scopes.clear();
@@ -1844,10 +1981,15 @@ bool OwnershipCheck::analyze(Module& module) {
     impl_->classOwnFields.clear();
     impl_->currentClassName.clear();
     impl_->funcsByName.clear();
+    impl_->moduleAliases.clear();
     impl_->funcReturnOwned.clear();
     impl_->e15Reported.clear();
     impl_->lockGuardedClasses.clear();
+    impl_->unguardedClassNames.clear();
     impl_->collectOwnFields(module);
+    impl_->collectLockGuards(module);
+    for (auto& [name, external] : impl_->externalModules)
+        impl_->collectLockGuards(*external);
     impl_->collectFunctions(module);
     impl_->seedReturnModes(module);
 

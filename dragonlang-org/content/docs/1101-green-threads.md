@@ -91,7 +91,8 @@ data, then join them all. The rule reads cleanly in reverse: **a plain
 `fire f(x)` that compiles is proof that `f` only reads `x`.** The day you need to
 write it, the compiler makes you say so - `dub x` for a private copy, `own x` to
 hand it over - so a `dub` at a fire site is always a visible admission that a
-copy was needed.
+copy was needed. The proof is a property of the callee's body, so it travels
+with the function: an imported `f` shares exactly as a same-file one does.
 
 ```dragon
 def total_price(items: list[Item]) -> int { ... }   # reads items, never writes

@@ -380,6 +380,7 @@ int typeCheckModuleGraph(Module& entryModule,
 
         {
             OwnershipCheck modOwn;
+            for (auto* prior : depModules) modOwn.registerExternalModule(*prior);
             if (!modOwn.analyze(*mod.ast)) {
                 for (const auto& diag : modOwn.diagnostics()) {
                     std::cerr << formatter.format(
@@ -434,6 +435,7 @@ int typeCheckModuleGraph(Module& entryModule,
 
     {
         OwnershipCheck entryOwn;
+        for (auto* dep : depModules) entryOwn.registerExternalModule(*dep);
         if (!entryOwn.analyze(entryModule)) {
             for (const auto& diag : entryOwn.diagnostics()) {
                 std::cerr << formatter.format(

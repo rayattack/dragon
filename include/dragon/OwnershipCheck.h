@@ -18,6 +18,8 @@ public:
     OwnershipCheck();
     ~OwnershipCheck();
 
+    void registerExternalModule(Module& module);
+
     bool analyze(Module& module);
 
     const std::vector<OwnDiagnostic>& diagnostics() const;

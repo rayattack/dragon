@@ -26,6 +26,30 @@ std::string ownError(const std::string& src) {
 
 bool ownAccepts(const std::string& src) { return ownError(src).empty(); }
 
+std::string ownErrorWithModule(const std::string& moduleName,
+                               const std::string& moduleSrc,
+                               const std::string& src,
+                               bool ownershipSeesModule = true) {
+    auto dep = parse(moduleSrc, true);
+    dep->moduleName = moduleName;
+    Sema depSema;
+    depSema.analyze(*dep);
+    TypeChecker depTc;
+    depTc.check(*dep);
+    auto mod = parse(src, true);
+    Sema sema;
+    sema.analyze(*mod);
+    TypeChecker tc;
+    tc.registerExternalModule(moduleName, depTc.getExports(), "",
+                              depTc.getTypeExports());
+    tc.check(*mod);
+    OwnershipCheck oc;
+    if (ownershipSeesModule) oc.registerExternalModule(*dep);
+    if (oc.analyze(*mod)) return "";
+    return oc.diagnostics().empty() ? "<no message>"
+                                    : oc.diagnostics()[0].message;
+}
+
 }
 
 TEST(OwnershipCheckTest, DelAfterContainerStoreErrors) {
@@ -224,6 +248,81 @@ TEST(OwnershipCheckTest, FireReadOnlyDiscardedHandleAccepted) {
 TEST(OwnershipCheckTest, FireMutatingWorkerInLoopRejected) {
     std::string e = ownError(code("fire_mutating_worker_in_loop_rejected"));
     EXPECT_FALSE(e.empty()) << "mutating worker fan-out must be refused";
+}
+
+TEST(OwnershipCheckTest, FireBorrowingWriterRejectedNamesTheWrite) {
+    std::string e = ownError(code("fire_borrowing_writer_rejected"));
+    EXPECT_NE(e.find("crosses a thread boundary"), std::string::npos) << e;
+    EXPECT_NE(e.find("'mutate' writes 's' ('s.append()' at line 2)"),
+              std::string::npos) << e;
+    EXPECT_NE(e.find("copy it (dub shared)"), std::string::npos) << e;
+    EXPECT_NE(e.find("declare 's' own in 'mutate' and move it (own shared)"),
+              std::string::npos) << e;
+    EXPECT_EQ(e.find("move it (own shared), copy it"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, FireKeywordArgumentReadOnlyAccepted) {
+    EXPECT_TRUE(ownAccepts(code("fire_keyword_argument_read_only_accepted")));
+}
+
+TEST(OwnershipCheckTest, FireNonDubableWriterOmitsDubHint) {
+    std::string e = ownError(code("fire_non_dubable_writer_rejected"));
+    EXPECT_NE(e.find("'fill' writes 'b'"), std::string::npos) << e;
+    EXPECT_EQ(e.find("(dub b)"), std::string::npos) << e;
+    EXPECT_NE(e.find("dub does not apply"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, FireImportedReadOnlyAccepted) {
+    const std::string readers = code("fire_readers_module");
+    EXPECT_EQ(ownErrorWithModule("readers", readers,
+                                 code("fire_imported_read_only_accepted")), "");
+    EXPECT_EQ(ownErrorWithModule("readers", readers,
+                                 code("fire_imported_aliased_read_only_accepted")), "");
+    EXPECT_EQ(ownErrorWithModule("readers", readers,
+                                 code("fire_imported_qualified_read_only_accepted")), "");
+}
+
+TEST(OwnershipCheckTest, FireImportedWriterRejectedNamesTheWrite) {
+    std::string e = ownErrorWithModule("readers", code("fire_readers_module"),
+                                       code("fire_imported_writer_rejected"));
+    EXPECT_NE(e.find("crosses a thread boundary"), std::string::npos) << e;
+    EXPECT_NE(e.find("'writer' writes 'd' (a subscript store on 'd' at line 3)"),
+              std::string::npos) << e;
+    EXPECT_NE(e.find("copy it (dub doc)"), std::string::npos) << e;
+    EXPECT_NE(e.find("declare 'd' own in 'writer' and move it (own doc)"),
+              std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, FireImportedOwnTakerSuggestsMove) {
+    std::string e = ownErrorWithModule("readers", code("fire_readers_module"),
+                                       code("fire_imported_own_taker_rejected"));
+    EXPECT_NE(e.find("move it (own doc)"), std::string::npos) << e;
+    EXPECT_EQ(e.find("declare"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, FireUnregisteredImportStaysRefused) {
+    std::string e = ownErrorWithModule("readers", code("fire_readers_module"),
+                                       code("fire_imported_read_only_accepted"),
+                                       false);
+    EXPECT_NE(e.find("crosses a thread boundary"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, FireImportedLockedTypeAccepted) {
+    EXPECT_EQ(ownErrorWithModule("guarded", code("fire_locked_module"),
+                                 code("fire_imported_locked_type_accepted")), "");
+}
+
+TEST(OwnershipCheckTest, FireImportedLockedTypeUnseenStaysRefused) {
+    std::string e = ownErrorWithModule("guarded", code("fire_locked_module"),
+                                       code("fire_imported_locked_type_accepted"),
+                                       false);
+    EXPECT_NE(e.find("crosses a thread boundary"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, FireShadowedLockedNameRefused) {
+    std::string e = ownErrorWithModule("guarded", code("fire_locked_module"),
+                                       code("fire_shadowed_locked_name_refused"));
+    EXPECT_NE(e.find("crosses a thread boundary"), std::string::npos) << e;
 }
 
 TEST(OwnershipCheckTest, DelAfterReadOnlyShareRejected) {

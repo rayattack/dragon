@@ -471,6 +471,116 @@ def run() -> int {
 }
 ```
 
+A borrowing callee that writes its parameter closes door 5. The refusal must
+say which write closed it, offer `dub` only when the type is dubable, and never
+offer a bare `own` at the call site: `own` on a borrowing parameter is E14, so
+the honest fix is to declare the parameter own in the callee first.
+
+#### :fire_borrowing_writer_rejected
+
+```dr
+def mutate(s: list[int]) -> int {
+    s.append(1)
+    return len(s)
+}
+def run() -> None {
+    shared: list[int] = [1, 2, 3]
+    fire mutate(shared)
+}
+```
+
+#### :fire_keyword_argument_read_only_accepted
+
+```dr
+def worker(s: list[str]) -> int { return len(s) }
+def run() -> None {
+    shared: list[str] = ["a", "b"]
+    fire worker(s=shared)
+}
+```
+
+#### :fire_non_dubable_writer_rejected
+
+```dr
+class Box {
+    items: list[int]
+    def() { self.items = [] }
+}
+def fill(b: Box) -> int {
+    b.items = [1]
+    return len(b.items)
+}
+def run() -> None {
+    b: Box = Box()
+    fire fill(b)
+}
+```
+
+The read-only proof is a property of the callee body, so it must travel with an
+imported function exactly as it does for a same-file one. These cases share one
+external module, registered under the name `readers`.
+
+#### :fire_readers_module
+
+```dr
+def read_only(d: dict[str, int]) -> int { return len(d) }
+def writer(d: dict[str, int]) -> int {
+    d["x"] = 1
+    return len(d)
+}
+def taker(own d: dict[str, int]) -> int { return len(d) }
+```
+
+#### :fire_imported_read_only_accepted
+
+```dr
+from readers import read_only
+def run() -> None {
+    doc: dict[str, int] = {"a": 1}
+    fire read_only(doc)
+}
+```
+
+#### :fire_imported_aliased_read_only_accepted
+
+```dr
+from readers import read_only as ro
+def run() -> None {
+    doc: dict[str, int] = {"a": 1}
+    fire ro(doc)
+}
+```
+
+#### :fire_imported_qualified_read_only_accepted
+
+```dr
+import readers
+def run() -> None {
+    doc: dict[str, int] = {"a": 1}
+    fire readers.read_only(doc)
+}
+```
+
+#### :fire_imported_writer_rejected
+
+```dr
+from readers import writer
+def run() -> None {
+    doc: dict[str, int] = {"a": 1}
+    fire writer(doc)
+}
+```
+
+#### :fire_imported_own_taker_rejected
+
+```dr
+from readers import taker
+def run() -> None {
+    doc: dict[str, int] = {"a": 1}
+    fire taker(doc)
+}
+```
+
 #### :use_after_defer_own_move_errors
 
 ```dr
@@ -881,5 +991,54 @@ class Config {
     headers: dict[str, str]
     def() { self.headers = {"Accept": "text/html"} }
     def get_headers() -> dict[str, str] { return self.headers }
+}
+```
+
+Door 4 (an internally locked type) is a property of the class, so it must hold
+wherever the class was declared. The shadowed case keeps the rule conservative:
+when two classes share a bare name and only one carries the lock, neither is
+admitted through door 4.
+
+#### :fire_locked_module
+
+```dr
+class Guarded {
+    own lock: Lock
+    hits: int
+    def() {
+        self.lock = Lock()
+        self.hits = 0
+    }
+}
+```
+
+#### :fire_imported_locked_type_accepted
+
+```dr
+from guarded import Guarded
+def bump(g: Guarded) -> None {
+    with g.lock {
+        g.hits = g.hits + 1
+    }
+}
+def run() -> None {
+    g: Guarded = Guarded()
+    fire bump(g)
+}
+```
+
+#### :fire_shadowed_locked_name_refused
+
+```dr
+class Guarded {
+    hits: int
+    def() { self.hits = 0 }
+}
+def bump(g: Guarded) -> None {
+    g.hits = g.hits + 1
+}
+def run() -> None {
+    g: Guarded = Guarded()
+    fire bump(g)
 }
 ```

@@ -1,0 +1,37 @@
+from json import Data
+
+
+def count_keys(d: dict[str, Data]) -> int {
+    return len(d)
+}
+
+
+def count_items(items: list[Data]) -> int {
+    return len(items)
+}
+
+
+def longest_key(d: dict[str, Data]) -> int {
+    best: int = 0
+    for k in d {
+        if len(k) > best {
+            best = len(k)
+        }
+    }
+    return best
+}
+
+
+def count_with_bonus(d: dict[str, Data], bonus: int = 5) -> int {
+    return len(d) + bonus
+}
+
+
+def count_with_tags(d: dict[str, Data], tags: list[str] = []) -> int {
+    return len(d) + len(tags)
+}
+
+
+def make_items() -> list[Data] {
+    return [1, "two", [3]]
+}

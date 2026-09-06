@@ -1,6 +1,9 @@
 from unittest import TestCase, main
 from time import sleep_ms
 from threading import Lock
+from json import Data
+from fire_readers.reader import count_keys, count_items, longest_key
+from fire_readers.reader import count_with_bonus, count_with_tags, make_items
 
 const SUM_OF_SQUARES_1_TO_50: int = 42925
 
@@ -387,6 +390,71 @@ class FireReadOnlyShareTests(TestCase) {
             total = total + t.join()
         }
         self.assertEqual(total, 300)
+    }
+
+    def test_imported_reader_shares_dict_of_data() {
+        doc: dict[str, Data] = {"name": "auth-api", "replicas": 3, "tags": ["a", "b"]}
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 6 {
+            t: Task[int] = fire count_keys(doc)
+            tasks.append(t)
+            w = w + 1
+        }
+        total: int = 0
+        for t in tasks {
+            total = total + t.join()
+        }
+        self.assertEqual(total, 18)
+        self.assertEqual(len(doc), 3)
+    }
+
+    def test_imported_reader_shares_list_of_data() {
+        items: list[Data] = [1, "two", 3.5, [4], {"five": 5}]
+        t: Task[int] = fire count_items(items)
+        self.assertEqual(t.join(), 5)
+        self.assertEqual(len(items), 5)
+    }
+
+    def test_imported_reader_keyword_argument_shares() {
+        doc: dict[str, Data] = {"name": "auth-api", "replicas": 3}
+        t: Task[int] = fire longest_key(d=doc)
+        self.assertEqual(t.join(), 8)
+    }
+
+    def test_dub_of_dict_of_data_crosses_fire() {
+        doc: dict[str, Data] = {"name": "auth-api", "replicas": 3}
+        t: Task[int] = fire count_keys(dub doc)
+        doc["mine"] = "kept"
+        self.assertEqual(t.join(), 2)
+        self.assertEqual(len(doc), 3)
+    }
+
+    def test_imported_reader_omitted_default_shares() {
+        doc: dict[str, Data] = {"name": "auth-api", "replicas": 3}
+        t: Task[int] = fire count_with_bonus(doc)
+        self.assertEqual(t.join(), 7)
+        u: Task[int] = fire count_with_bonus(doc, bonus=1)
+        self.assertEqual(u.join(), 3)
+    }
+
+    def test_default_container_is_fresh_per_fire() {
+        doc: dict[str, Data] = {"name": "auth-api"}
+        i: int = 0
+        while i < 500 {
+            t: Task[int] = fire count_with_tags(doc)
+            self.assertEqual(t.join(), 1)
+            i = i + 1
+        }
+    }
+
+    def test_fresh_result_crosses_fire() {
+        i: int = 0
+        while i < 500 {
+            t: Task[int] = fire count_items(make_items())
+            self.assertEqual(t.join(), 3)
+            i = i + 1
+        }
     }
 }
 
