@@ -1,4 +1,5 @@
 #include "../CodeGenImpl.h"
+#include "BytesInline.h"
 
 namespace dragon {
 
@@ -382,8 +383,7 @@ bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_deque_len"], {arg}, "len");
     } else if (isBytes) {
-        impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_bytes_len"], {arg}, "len");
+        impl_->lastValue = emitBytesFieldsOrEmpty(*impl_, arg, false).len;
     } else if (isTuple) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_tuple_len"], {arg}, "len");

@@ -1,4 +1,5 @@
 #include "../CodeGenImpl.h"
+#include "BytesInline.h"
 
 namespace dragon {
 
@@ -1258,8 +1259,8 @@ void CodeGen::visit(SubscriptExpr& node) {
             subRecvDrain != Impl::VarKind::Other)
             impl_->emitDecrefByKind(obj, subRecvDrain);
     } else if (isBytes) {
-        impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_bytes_get"], {obj, idx}, "bytesget");
+        impl_->lastValue = emitBytesIndexRead(*impl_, obj, idx,
+            impl_->isExprDefinitelyNonNeg(node.index.get()));
         impl_->popArgTempCleanups(subBases);
         if (subRecvDrain != Impl::VarKind::Other)
             impl_->emitDecrefByKind(obj, subRecvDrain);

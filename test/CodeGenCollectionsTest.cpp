@@ -912,3 +912,33 @@ TEST(CodeGenE2E, PrintAnyContainerMatchesStr) {
     auto output = compileAndRun(code("print_any_container_matches_str"));
     EXPECT_EQ(output, "[1, {'a': 2}]\n[1, {'a': 2}]\n");
 }
+
+TEST(CodeGenTest, BytesIndexIsAnInlineLoad) {
+    auto ir = generateIR(code("bytes_index_inline"));
+    EXPECT_EQ(ir.find("call i64 @dragon_bytes_get"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.len"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.idx.inbounds"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.elem"), std::string::npos);
+    EXPECT_NE(ir.find("call void @dragon_bytes_index_error"), std::string::npos);
+}
+
+TEST(CodeGenTest, BytesLenIsAnInlineLoad) {
+    auto ir = generateIR(code("bytes_len_inline"));
+    EXPECT_EQ(ir.find("call i64 @dragon_bytes_len"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.len.safe"), std::string::npos);
+}
+
+TEST(CodeGenTest, BytesForeachHoldsNoRuntimeCall) {
+    auto ir = generateIR(code("bytes_foreach_inline"));
+    EXPECT_EQ(ir.find("call i64 @dragon_bytes_get"), std::string::npos);
+    EXPECT_EQ(ir.find("call i64 @dragon_bytes_len"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.len.safe"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.data.safe"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.elem"), std::string::npos);
+}
+
+TEST(CodeGenTest, BytesThroughAUnionKeepsTheRuntimeCall) {
+    auto ir = generateIR(code("bytes_through_a_union_calls_the_runtime"));
+    EXPECT_NE(ir.find("@dragon_box_subscript"), std::string::npos);
+    EXPECT_EQ(ir.find("bytes.elem"), std::string::npos);
+}

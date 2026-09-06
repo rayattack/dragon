@@ -1,4 +1,5 @@
 #include "../CodeGenImpl.h"
+#include "BytesInline.h"
 
 namespace dragon {
 
@@ -764,6 +765,10 @@ void CodeGen::visit(ForStmt& node) {
     auto* idxVar = impl_->createEntryAlloca(func, "__i", impl_->i64Type);
     impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxVar);
 
+    BytesInlineFields bytesFields{nullptr, nullptr};
+    if (isBytesIterable)
+        bytesFields = emitBytesFieldsOrEmpty(*impl_, iterableVal, true);
+
     auto* condBB = llvm::BasicBlock::Create(*impl_->context, "forcond", func);
     auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "forbody", func);
     auto* incBB = llvm::BasicBlock::Create(*impl_->context, "forinc", func);
@@ -783,8 +788,7 @@ void CodeGen::visit(ForStmt& node) {
         lenVal = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_len"], {iterLoaded}, "len");
     } else if (isBytesIterable) {
-        lenVal = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_bytes_len"], {iterLoaded}, "len");
+        lenVal = bytesFields.len;
     } else {
         lenVal = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_list_len"], {iterLoaded}, "len");
@@ -980,8 +984,7 @@ void CodeGen::visit(ForStmt& node) {
             impl_->scopes.back().borrowed.insert(targetName->name);
         }
     } else if (isBytesIterable) {
-        llvm::Value* elem = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_bytes_get"], {iterLoaded, currentIdx}, "byte");
+        llvm::Value* elem = emitBytesByte(*impl_, bytesFields.data, currentIdx);
         auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->i64Type);
         impl_->builder->CreateStore(elem, targetAlloca);
         impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Int);

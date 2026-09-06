@@ -688,6 +688,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_bytes_get",
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
+    auto* bytesIndexError = getOrDeclareRuntime("dragon_bytes_index_error",
+        llvm::FunctionType::get(voidType, {}, false));
+    bytesIndexError->addFnAttr(llvm::Attribute::NoReturn);
+    bytesIndexError->addFnAttr(llvm::Attribute::Cold);
     getOrDeclareRuntime("dragon_bytes_slice",
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i64Type, i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_bytes_contains",

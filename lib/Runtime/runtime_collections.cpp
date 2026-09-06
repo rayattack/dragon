@@ -1235,6 +1235,15 @@ int64_t dragon_bytes_get(DragonBytes* b, int64_t index) {
     return (int64_t)b->data[index];
 }
 
+static_assert(offsetof(DragonBytes, len) == 16,
+              "inline bytes codegen loads the length from i64 slot 2");
+static_assert(offsetof(DragonBytes, data) == 24,
+              "inline bytes codegen loads the buffer from i64 slot 3");
+
+void dragon_bytes_index_error() {
+    dragon_raise_exc_cstr(41, "IndexError: bytes index out of range");
+}
+
 DragonBytes* dragon_bytes_slice(DragonBytes* b, int64_t start, int64_t stop, int64_t step) {
     if (!b) return dragon_bytes_new(nullptr, 0);
     if (step == 0) {

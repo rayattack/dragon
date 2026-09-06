@@ -1530,3 +1530,56 @@ v: Boxed = [1, {"a": 2}]
 print(v)
 print(str(v))
 ```
+
+#### :bytes_index_inline
+
+A `bytes` subscript reads the DragonBytes header and buffer in place: a length
+load, the negative-index adjust, an unsigned bounds compare, and a one-byte
+load. Only the failing edge leaves the function, into the cold raise helper.
+
+```dr
+def read_at(buf: bytes, i: int) -> int {
+    return buf[i]
+}
+print(read_at(b"abc", 1))
+```
+
+#### :bytes_len_inline
+
+`len()` on bytes is the length field load, NULL-guarded to the 0 the runtime
+call returned.
+
+```dr
+def size_of(buf: bytes) -> int {
+    return len(buf)
+}
+print(size_of(b"abc"))
+```
+
+#### :bytes_foreach_inline
+
+A `for` over bytes hoists the length and the buffer once and loads each byte
+in place, so the loop body holds no call at all.
+
+```dr
+def sum_bytes(buf: bytes) -> int {
+    total: int = 0
+    for b in buf {
+        total = total + b
+    }
+    return total
+}
+print(sum_bytes(b"abc"))
+```
+
+#### :bytes_through_a_union_calls_the_runtime
+
+A bytes value reaching the subscript as a box has no static element type, so it
+keeps the runtime call that reads the tag.
+
+```dr
+type Payload = int | bytes
+
+p: Payload = b"abc"
+print(p[1])
+```

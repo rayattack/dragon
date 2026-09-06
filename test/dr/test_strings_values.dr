@@ -494,6 +494,41 @@ class ByteHolder {
 }
 
 
+class ByteWindow {
+    data: bytes
+    depth: int
+
+    def(data: bytes) {
+        self.data = data
+        self.depth = 0
+    }
+
+    def __enter__() -> ByteWindow {
+        self.depth = self.depth + 1
+        return self
+    }
+
+    def __exit__() -> int {
+        self.depth = self.depth - 1
+        return 0
+    }
+
+    def first() -> int {
+        return self.data[0]
+    }
+}
+
+
+def _first_high_byte(buf: bytes) -> int {
+    for b in buf {
+        if b > 127 {
+            return b
+        }
+    }
+    return -1
+}
+
+
 class BytesIterationTests(TestCase) {
     """A for loop over bytes yields each byte as an int (DRG-84).
     Pre-fix: a bytes iterable took the list lane, so dragon_list_len walked a
@@ -559,9 +594,164 @@ class BytesIterationTests(TestCase) {
         per_pass: int = ord("l") + ord("e") + ord("a") + ord("k") + ord(" ") + ord("p") + ord("r") + ord("o") + ord("b") + ord("e")
         self.assertEqual(grand, 2000 * per_pass)
     }
+
+    def test_break_leaves_the_loop_at_the_right_byte() {
+        seen: list[int] = []
+        for b in b"abcd" {
+            if b == ord("c") {
+                break
+            }
+            seen.append(b)
+        }
+        self.assertEqual(seen, [ord("a"), ord("b")])
+    }
+
+    def test_early_return_out_of_a_bytes_loop() {
+        self.assertEqual(_first_high_byte(b"\x01\x02\xfe\x03"), 254)
+        self.assertEqual(_first_high_byte(b"\x01\x02"), -1)
+        self.assertEqual(_first_high_byte("".encode("utf-8")), -1)
+    }
+
+    def test_for_over_a_full_page() {
+        page: bytes = ("abcd" * 1023).encode("utf-8")
+        total: int = 0
+        for b in page {
+            total = total + b
+        }
+        self.assertEqual(total, 1023 * (ord("a") + ord("b") + ord("c") + ord("d")))
+    }
+}
+
+
+class BytesElementAccessTests(TestCase) {
+    """b[i] and len(b) read the DragonBytes header and buffer inline (DRG-187).
+    The bounds check, the negative-index adjust, the IndexError and the empty
+    and NULL cases must land exactly where the runtime call put them."""
+
+    def test_positive_indices_at_both_ends() {
+        buf: bytes = b"abcd"
+        self.assertEqual(buf[0], ord("a"))
+        self.assertEqual(buf[3], ord("d"))
+        self.assertEqual(buf[len(buf) - 1], ord("d"))
+    }
+
+    def test_negative_indices_at_both_ends() {
+        buf: bytes = b"abcd"
+        self.assertEqual(buf[-1], ord("d"))
+        self.assertEqual(buf[-4], ord("a"))
+        self.assertEqual(buf[-len(buf)], ord("a"))
+    }
+
+    def test_bytes_are_unsigned() {
+        buf: bytes = b"\x00\x7f\x80\xff"
+        self.assertEqual(buf[0], 0)
+        self.assertEqual(buf[1], 127)
+        self.assertEqual(buf[2], 128)
+        self.assertEqual(buf[3], 255)
+    }
+
+    def test_index_at_len_raises() {
+        buf: bytes = b"abcd"
+        caught: str = ""
+        try {
+            const x: int = buf[len(buf)]
+        } except IndexError {
+            caught = "index"
+        }
+        self.assertEqual(caught, "index")
+    }
+
+    def test_index_below_negative_len_raises() {
+        buf: bytes = b"abcd"
+        caught: str = ""
+        try {
+            const x: int = buf[-len(buf) - 1]
+        } except IndexError {
+            caught = "index"
+        }
+        self.assertEqual(caught, "index")
+    }
+
+    def test_index_into_empty_bytes_raises() {
+        buf: bytes = "".encode("utf-8")
+        self.assertEqual(len(buf), 0)
+        caught: str = ""
+        try {
+            const x: int = buf[0]
+        } except IndexError {
+            caught = "index"
+        }
+        self.assertEqual(caught, "index")
+    }
+
+    def test_len_of_empty_and_of_a_full_page() {
+        page: bytes = ("abcd" * 1023).encode("utf-8")
+        self.assertEqual(len(page), 4092)
+        self.assertEqual(len("".encode("utf-8")), 0)
+        self.assertEqual(len(b"abcd"), 4)
+    }
+
+    def test_indexed_sum_over_a_full_page() {
+        page: bytes = ("abcd" * 1023).encode("utf-8")
+        total: int = 0
+        i: int = 0
+        while i < len(page) {
+            total = total + page[i]
+            i = i + 1
+        }
+        self.assertEqual(total, 1023 * (ord("a") + ord("b") + ord("c") + ord("d")))
+        self.assertEqual(page[4091], ord("d"))
+        self.assertEqual(page[-4092], ord("a"))
+    }
+
+    def test_field_bytes_index_and_len() {
+        h: ByteHolder = ByteHolder(b"hi")
+        self.assertEqual(h.data[0], ord("h"))
+        self.assertEqual(h.data[-1], ord("i"))
+        self.assertEqual(len(h.data), 2)
+    }
+
+    def test_read_inside_with_and_try() {
+        w: ByteWindow = ByteWindow(b"page")
+        first: int = 0
+        last: int = 0
+        with w {
+            first = w.first()
+            try {
+                last = w.data[-1]
+                const oob: int = w.data[99]
+            } except IndexError {
+                last = last + 1000
+            }
+        }
+        self.assertEqual(first, ord("p"))
+        self.assertEqual(last, ord("e") + 1000)
+        self.assertEqual(w.depth, 0)
+    }
+
+    def test_owned_temp_indexed_repeatedly() {
+        grand: int = 0
+        for i in range(2000) {
+            grand = grand + "leak probe".encode("utf-8")[0]
+        }
+        self.assertEqual(grand, 2000 * ord("l"))
+    }
+
+    def test_owned_temp_out_of_range_releases_the_temp() {
+        caught: int = 0
+        for i in range(2000) {
+            try {
+                const x: int = "leak probe".encode("utf-8")[99]
+            } except IndexError {
+                caught = caught + 1
+            }
+        }
+        self.assertEqual(caught, 2000)
+    }
 }
 
 
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
-      ConversionTests(), TypeBuiltinTests(), BytesIterationTests()])
+      ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
+      BytesElementAccessTests()])

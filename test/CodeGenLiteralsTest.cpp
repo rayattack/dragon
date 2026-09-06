@@ -249,7 +249,8 @@ TEST(CodeGenTest, BytesConcatIR) {
 
 TEST(CodeGenTest, BytesLenIR) {
     auto ir = generateIR(code("bytes_len_ir"));
-    EXPECT_NE(ir.find("dragon_bytes_len"), std::string::npos);
+    EXPECT_EQ(ir.find("call i64 @dragon_bytes_len"), std::string::npos);
+    EXPECT_NE(ir.find("bytes.len.safe"), std::string::npos);
 }
 
 TEST(CodeGenTest, BytesDecodeIR) {

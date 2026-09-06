@@ -572,7 +572,9 @@ Quote rule: inside a double-quoted f-string use single-quoted dict keys
 
 `bytes`: literals `b"..."`/`b"\xde\xad"`; `len` is byte count; `b[i]` is an int;
 slices are bytes; `+` concatenates; `.hex()` and `bytes.fromhex(s)` round-trip.
-Keep text as `str`; drop to `bytes` only at the I/O edge.
+`b[i]`, `len(b)` and `for x in b` compile to inline loads with a bounds check,
+not runtime calls; only the out-of-range edge leaves the loop, to raise
+`IndexError`. Keep text as `str`; drop to `bytes` only at the I/O edge.
 
 ## 11. Collections
 
