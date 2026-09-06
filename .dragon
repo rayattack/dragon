@@ -13,10 +13,11 @@ language is used (Task, Lock, TestCase, HTML, SQL) appear here only as far as th
 language story needs them.
 
 This file describes the language as designed. Every section was re-verified on
-2026-09-05 by compiling and running probe programs against the compiler at
-commit 7a2b935 plus the fixes landed that day, so the examples are real code,
-not aspiration. When this text and the compiler disagree, the compiler wins and
-the text is wrong; report it.
+2026-09-05 by compiling and running probe programs against the compiler, and
+every claim touched by the fixes landed through 2026-09-06 (commit d93bc92) was
+re-probed on 2026-09-06, so the examples are real code, not aspiration. When
+this text and the compiler disagree, the compiler wins and the text is wrong;
+report it.
 
 ## 1. Design rules (why the language is shaped this way)
 
@@ -57,11 +58,12 @@ driver shells out to. `dragon init` scaffolds a `dragon.drs` manifest;
 `grab <name>[@version] | --path <dir> | --git <url> [--name <n>]` adds a
 dependency and installs it under `.drx/`; `sync` reinstalls every egg in the
 manifest; `drop <name>` removes one. `push` publishes (needs
-`DRAGON_REGISTRY_TOKEN`), `find` and `scan` query the registry over the network.
-`bump`, `list`, `info`, `hash`, `yank` and `wipe` are accepted by the `dragon`
-front end but rejected by the egg tool ("unknown egg command"). Vendoring by hand
-(copy sources, or point `-I` at them) still works and is the fallback with no
-network.
+`DRAGON_REGISTRY_TOKEN` and an author key); `keygen` creates that signing key
+once, at `~/.dragon/author.key` (a second run prints the existing public key and
+changes nothing); `find` and `scan` query the registry over the network. Those
+eight are the whole verb set: anything else (`bump`, `list`, `info`, `hash`,
+`yank`, `wipe`) is `Unknown command` at the front end. Vendoring by hand (copy
+sources, or point `-I` at them) still works and is the fallback with no network.
 
 A `<dir>` argument to run/build resolves the `entry` field of that directory's
 `dragon.drs`.
@@ -82,7 +84,7 @@ Flags:
 | `-l<name>` / `-L<dir>` | link `lib<name>` / add a library search dir (FFI) |
 | `--cc-source <file>` | compile and link a C/C++ shim (repeatable; a `.cpp` switches the link driver to `c++`) |
 | `--dump-ast` | print the AST, then carry on compiling and running as normal |
-| `--dump-tokens` | print the token stream; honoured by `check` only, silently ignored by `run`/`build` |
+| `--dump-tokens` | print the token stream, then carry on as normal (`check`, `run` and `build` all honour it) |
 | `--check-overflow` | trap on signed integer overflow instead of wrapping |
 | `--backend <llvm>` | accepted for compatibility and ignored (LLVM is the only backend) |
 | `-v, --verbose` | verbose output |
@@ -99,9 +101,11 @@ the value of a bare expression, and has `:help`, `:reset`, `:quit`/`:q`. It is
 itself written in Dragon (`tools/repl/*.dr`) and JIT-compiles cells.
 
 `dragon migrate` output is a DRAFT that does not necessarily compile: an untyped
-parameter comes out annotated `Any`, which the compiler rejects, and an inferred
-return type can be wrong (a body returning `a + b` can come back `-> None`). Read
-it as a starting skeleton and write the real annotations yourself.
+parameter whose type cannot be inferred stays unannotated in the draft (never
+`Any`) and each one gets a warning naming the function and the parameter
+("annotate it in the draft before building"), and an inferred return type can be
+wrong (a body returning `a + b` can come back `-> None`). Read it as a starting
+skeleton and write the real annotations yourself.
 
 ### Compilation model
 
@@ -112,8 +116,10 @@ direct cross-module calls, no separate compilation. The binary statically links
 the Dragon runtime and depends only on libc/libm.
 
 Value representation: `int` is `i64`, `float` is `f64`, `bool` is `i1`; `str`,
-`bytes`, containers and instances are pointers; only `Union[...]` and `Any` are a
-16-byte `{tag, payload}` box. Generics monomorphize: each distinct type argument
+`bytes`, containers and instances are pointers; only a union of two or more
+non-None arms (`int | str`, a `type` alias of one, `json.Data`) is a 16-byte
+`{tag, payload}` box, while `T | None` for a pointer-shaped `T` is one nullable
+pointer (section 7). Generics monomorphize: each distinct type argument
 stamps out a separate native specialization (`Box[int]` and `Box[str]` are two
 concrete types in the binary).
 
@@ -184,11 +190,15 @@ total = total + 5   # reassigns; bare = requires the name to already exist
   reserved too: `none: int = 1` is the same reserved-word error. Every read of
   `none` is the None literal, never a variable.
 - `match`, `case` and `type` are soft keywords, not reserved words. `case` works
-  as an ordinary name anywhere. `match` and `type` work as parameter and field
-  names (`def f(match: int, type: int)` compiles), but a statement that STARTS
-  with either is read as a match statement or a type alias, so
-  `match: int = 1` and `type: int = 2` do not compile. Pick another name at
-  statement level.
+  as an ordinary name anywhere. `match` and `type` work as parameter, field and
+  function names (`def f(match: int, type: int)` compiles), and at statement
+  level too whenever a `:` or an assignment operator follows the word:
+  `match: int = 1`, `match += 1`, `type: int = 2`, `type = 3` all compile. A
+  statement that starts with `match` followed by anything else (`match(x)`,
+  `match.bits()`) is still read as a match statement, and `type` followed by a
+  name (`type Shape = ...`) is a type alias. The builtin `type(x)` is already a
+  name in scope, so `type = 3` with no `type: int` declaration before it is
+  rejected as an assignment to the builtin.
 
 ### A bare dict key is text, and must not be ambiguous
 
@@ -361,9 +371,10 @@ def show(v: int | str) -> str {
 print(show(1) + show("a"))
 ```
 
-- `isinstance` is the narrowing tool: it narrows union-typed and Any-typed
-  values by runtime tag, and it walks class hierarchies (`isinstance(dog,
-  Animal)` is True). Use it to narrow unions/Any and to test class ancestry,
+- `isinstance` is the narrowing tool: it narrows union-typed values (a
+  `json.Data` included) by runtime tag, and it walks class hierarchies
+  (`isinstance(dog, Animal)` is True). Use it to narrow unions and to test
+  class ancestry,
   not to interrogate values whose type is already statically known (the
   compiler already knows; there is nothing to ask).
 
@@ -514,7 +525,7 @@ print(str(sum_pair([1, 2])))
 print(where(Point(1, 2)))
 ```
 
-Verified: literals, type tests (runtime tag for Union/Any subjects; non-null
+Verified: literals, type tests (runtime tag for union subjects; non-null
 check for `Class | None`; subclass matches its base), OR patterns, sequence
 patterns, capture, wildcard, guards (`case x if cond`), and class positional
 destructuring `case Point(x, y)` all work. NOT supported: dict/mapping patterns
@@ -797,8 +808,10 @@ all refuse it by name. `@dataclass`, `NamedTuple`, `Enum`, and exception classes
 get their text form synthesized, so they render without you writing one.
 `<Class instance>` survives only where no static type exists at the point of
 rendering: an instance sitting inside a container (`f"{[p]}"` is a structural
-walk over tagged data, so it prints `[<Point instance>]`) and a boxed `Any`
-rendered at runtime. Rendering a container prints the same text everywhere:
+walk over tagged data, so it prints `[<Point instance>]`). A class arm of a
+union box does not get that far: rendering it is a compile error ("a value of
+type 'Point' cannot be rendered as text"). Rendering a container prints the
+same text everywhere:
 `str(xs)`, `f"{xs}"`, and `!{xs}` agree, with the template's escaping on top.
 
 ### Member privacy (compile-time enforced, zero runtime cost)
@@ -1128,16 +1141,18 @@ def load_index(path: str) -> Index {
 - Defers run during unwind, before the handler sees the exception. If NO handler
   exists and the process dies on an uncaught exception, pending defers are
   skipped (defer is a scope tool, not a shutdown hook).
-- Current limits. Two refuse at check time: `defer` at module top level
-  ("'defer' outside function") and a bare identifier operand ("'defer' requires
-  a direct call: a function call, method call, or bound-closure call"). Three
-  refuse at LOWERING, so `dragon check` passes them and only `dragon run`/
-  `build` reports them: a callee that is a closure value ("cannot resolve the
-  callee to a direct function or method"), keyword arguments ("defer does not
-  support keyword arguments yet; pass them positionally"), and a union-typed
-  argument ("an argument of Any/union type is not supported yet"). `Any` is not
-  a parameter type in Dragon at all, so that case never reaches defer.
-  `defer fire f(x)` does not parse.
+- Current limits, every one refused by `dragon check` (nothing is left for the
+  build to find): `defer` at module top level ("'defer' outside function"); an
+  operand that is not a call, `defer f` and `defer fire f(x)` alike ("'defer'
+  requires a direct call: a function call, method call, or bound-closure
+  call"); a callee that is not a top-level function or a method on a value
+  ("defer cannot bind 'cb': a deferred call must name a top-level function or a
+  method on a value. A builtin, a class, a nested def and a variable holding a
+  callable are all out of reach; wrap the work in a top-level function and
+  defer that"); keyword arguments ("defer does not take keyword arguments; pass
+  them positionally"); and a union-typed argument ("defer cannot store an
+  argument of union type; narrow it to a concrete type before deferring the
+  call").
 
 ## 21. Ownership: `del`, `own`, `dub`
 
@@ -1204,7 +1219,11 @@ tuple (immutable, indistinguishable from a copy). Non-dubable in v1: `Lock`
 ("a raw OS mutex cannot be copied"), Task handles ("a task handle is
 single-owner; a second joiner would race the result move"), and EVERY class,
 whatever its fields ("class dub is not in v1; copy the fields you need"). `dub`
-copies a binding or a field, not an element (`dub xs[0]` refuses).
+copies a binding or a field, not an element (`dub xs[0]` refuses). A closed
+union is dubable when every arm is: `mirror: dict[str, Data] = dub doc` copies a
+`json.Data` tree, picking each arm by its runtime tag and recursing, and a union
+with a class arm refuses, naming the arm ("arm 'Point' of 'int | Point' has no
+deep copy through a box").
 
 ### The three MANDATORY places
 
@@ -1231,8 +1250,18 @@ fire record(router)       # 4 internally-locked type (own Lock field guards its 
 fire read_only(counts)    # 5 shared read-only: compiles ONLY if the callee provably never writes it
 ```
 
-A plain `fire f(x)` that compiles is PROOF `f` only reads `x`; a `dub` at a fire
-site is a visible admission a copy was needed.
+A plain `fire f(x)` on a sole-owned `x` takes one of two doors, decided by the
+callee's body. If `f` provably never writes `x`, `x` is shared read-only and
+stays usable while the thread runs (door 5). Otherwise, when the Task is bound,
+`x` is LENT to the thread until `await`/`join`, and touching it before then is
+an error ("'counts' is lent to task 't' until it is awaited or joined - touching
+it here races the thread"). A discarded handle (`fire f(x)` in statement
+position) has no join to end a lend, so a writer there is E12; the message
+names the write ("'bump' writes 'xs' ('xs.append()' at line 2)") and the three
+fixes (`dub`, `own`, or a locked type). The proof is a property of the callee's
+body, so it travels with the function: an imported `f` shares exactly as a
+same-file one does. A `dub` at a fire site is a visible admission a copy was
+needed.
 
 Coming OUT: the result slot is an `own` field of the Task. `await t` / `t.join()`
 MOVE the result out exactly once (a second await/join is an error). An abandoned
@@ -1299,7 +1328,13 @@ fire { cleanup()  notify() }       # fire-and-forget a block
 When a green thread does I/O the runtime parks it and runs another. Fan-out is
 several fires, then join each.
 
-### `async def` and `await`
+### `async def` and `await` (legacy spelling, slated for deprecation)
+
+Ruling (2026-09-06): `await` is a crutch to be avoided, and `async def` /
+`await` will be deprecated. Write `fire f(...)` wherever you want concurrency,
+bind the `Task[T]` when you need the result, and `.join()` it. Do not write new
+`async def` or `await`; the rest of this subsection records what still compiles
+today so existing code can be read.
 
 `async def f(...) -> T` changes only the RETURN: calling it yields a `Task[T]`
 running on a green thread. `await` unwraps a Task and is legal in ANY function
@@ -1332,8 +1367,8 @@ t: Thread = Thread(target=worker)
 t.start()  t.is_alive()  t.join()   # join returns an int status, NOT a value
 ```
 
-You can `await` inside a `thread { }` block (a green thread on top of it). Want
-a typed result? That is what `fire`/`Task[T]` is for.
+Want a typed result out of a thread? That is what `fire`/`Task[T]` is for
+(a `fire` inside a `thread { }` block runs a green thread on top of it).
 
 ### Synchronization (`from threading import ...`)
 
@@ -1630,7 +1665,8 @@ the backing str/bytes went out of scope.
 extern "python" def score(batch: list[User]) -> list[Scored] from "ml/score.py"
 ```
 
-Typed at compile time; `Any` appears nowhere unless you ask for it. Lowering:
+Typed at compile time; nothing crosses boxed unless the signature names a union
+or `json.Data`. Lowering:
 arguments encode as one JSON object via the box-free `encode[T]` (a `bytes`
 parameter rides as a raw blob, never base64); the child spawns ONCE from an
 argv list (never a shell) and stays warm (imports and state survive across
@@ -1665,11 +1701,13 @@ pair is public too and ships in `json`, not `ffi`: `from json import encode,
 decode`, then `encode[T](value) -> bytes` and `decode[T](buf)` on any class.
 
 Current limits: crossing types are scalars, `list` of scalars, classes, `list`
-of classes, `dict[str, scalar]`, `Optional` of those, and `bytes` as a
-parameter/return (not yet as a class field). `dict` with non-str keys or class
+of classes, `dict[str, scalar]`, `Optional` of those, `bytes` as a
+parameter/return (not yet as a class field), and the boxed `json.Data` /
+`dict[str, Data]` as a return. `dict` with non-str keys or class
 values: not yet. Calls on one sidecar serialize in call order (no worker pools
-yet). A reply of unknown shape: declare `-> dict[str, Any]` and narrow (boxed
-tier, priced by the `Any` in the signature).
+yet). A reply of unknown shape: `from json import Data`, declare
+`-> dict[str, Data]` and narrow each value with `isinstance` (boxed tier, priced
+by the union in the signature); `Any` is rejected there as everywhere.
 
 Price model: serialize + pipe + deserialize per call; spawn and imports paid
 once. Right for batch-shaped calls; wrong for per-element calls in a hot loop
@@ -1698,9 +1736,10 @@ Not part of the surface: `next`, `iter`, `callable`, `frozenset`, `format`,
 `slice`, `setattr`, `delattr`, `vars`, `globals`, `locals`, `eval`, `exec`,
 `compile` (the reflection/eval family is rejected by design, not a gap; the
 static `getattr`/`hasattr` above are the exception because the field name is a
-compile-time literal). Also unavailable, but only at lowering: 2-arg
-`round(x, n)` and `bytes("text", "utf-8")` (use `s.encode()`) pass
-`dragon check` and then fail the build with "Unknown function".
+compile-time literal). Also refused, by `dragon check`: 2-arg `round(x, n)`
+("round() takes 1 argument, but 2 were given"; for fixed decimals format the
+value, `f"{x:.2f}"`) and `bytes("text", "utf-8")` ("bytes() takes 0 or 1
+arguments"; call `"text".encode("utf-8")`).
 
 An empty `list()` is a `list[<boxed>]` and so cannot initialize a concretely
 typed binding; the typed empty list is the literal: `xs: list[int] = []`.
@@ -1782,11 +1821,12 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   (with adaptive back-off when it finds nothing); `own` fields form trees and
   are excluded from cycle tracking.
 - `--gc=none` disables refcount emission for one-shot programs (benchmarks,
-  short CLI filters); never ship a service with it. Neither it nor `--release`
-  is listed by `dragon --help`; both are accepted.
+  short CLI filters); never ship a service with it. `--gc=rc` is the default
+  and the only other mode; any other spelling is "Unknown --gc mode". Both
+  `--gc` modes and `--release` are listed by `dragon --help`.
 - Performance levers: build `--release` (exactly `-O3`) for anything measured;
   the default is `-O0`, so an unflagged build is not a measurement. Keep types
-  concrete (a value left `Any` is boxed; a knowable type in a register is not);
+  concrete (a union-typed value is boxed; a knowable type in a register is not);
   never build strings with `out = out + x` in a loop (O(n^2)): collect
   `list[str]` and `"".join(parts)`; `del` big buffers early to cut peak memory;
   `fire f(own x)` keeps refcounts non-atomic by proof.
