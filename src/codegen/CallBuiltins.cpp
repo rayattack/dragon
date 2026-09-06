@@ -533,16 +533,35 @@ bool CodeGen::emitIsinstanceBuiltin(CallExpr& node) {
 
     if (tryEmitIsinstanceNicheCheck(node, typeName)) return true;
 
+    int64_t targetTag = -1;
+    if (typeName == "int")        targetTag = 0;
+    else if (typeName == "str")   targetTag = 1;
+    else if (typeName == "float") targetTag = 2;
+    else if (typeName == "bool")  targetTag = 3;
+    else if (typeName == "list")  targetTag = 5;
+    else if (typeName == "dict")  targetTag = 6;
+    else if (typeName == "bytes") targetTag = 7;
+    else if (impl_->classNames.count(typeName)) targetTag = 7;
+
+    const bool boxedOperand = argVarName.empty() && node.args[0]->type &&
+                              Impl::isBoxedKind(node.args[0]->type->kind());
+    if (boxedOperand && targetTag >= 0) {
+        node.args[0]->accept(*this);
+        llvm::Value* box = impl_->lastValue;
+        if (box->getType() != impl_->boxType) {
+            impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
+            return true;
+        }
+        auto* tagVal = impl_->boxTag(box, "isinstance.tag");
+        impl_->lastValue = impl_->builder->CreateICmpEQ(
+            tagVal, llvm::ConstantInt::get(impl_->i64Type, targetTag),
+            "isinstance");
+        if (impl_->isOwnedBoxResult(box))
+            impl_->emitUnionDecref(impl_->boxPayloadI64(box, "isinstance.p"), tagVal);
+        return true;
+    }
+
     if (argKind == Impl::VarKind::Union) {
-        int64_t targetTag = -1;
-        if (typeName == "int")        targetTag = 0;
-        else if (typeName == "str")   targetTag = 1;
-        else if (typeName == "float") targetTag = 2;
-        else if (typeName == "bool")  targetTag = 3;
-        else if (typeName == "list")  targetTag = 5;
-        else if (typeName == "dict")  targetTag = 6;
-        else if (typeName == "bytes") targetTag = 7;
-        else if (impl_->classNames.count(typeName)) targetTag = 7;
         if (targetTag >= 0) {
             llvm::Value* slotPtr = impl_->lookupVar(argVarName);
             if (!slotPtr)

@@ -902,6 +902,21 @@ DragonList* dragon_list_slice(DragonList* l, int64_t start, int64_t stop, int64_
         dragon_raise_exc_cstr(90, "ValueError: slice step cannot be zero");
     }
     dragon_slice_indices(len, &start, &stop, step);
+    if (l->header.type_tag == DRAGON_TAG_LIST_BOX) {
+        auto* src = (DragonListBox*)(void*)l;
+        DragonListBox* boxed = dragon_list_box_new(8);
+        auto take = [&](int64_t i) {
+            DragonListBoxElem e = src->data[i];
+            dragon_incref_tagged(e.payload, (uint8_t)e.tag);
+            dragon_list_box_append(boxed, e.tag, e.payload);
+        };
+        if (step > 0) {
+            for (int64_t i = start; i < stop; i += step) take(i);
+        } else {
+            for (int64_t i = start; i > stop; i += step) take(i);
+        }
+        return (DragonList*)(void*)boxed;
+    }
     DragonList* r = dragon_list_new_tagged(8, l->elem_tag);
     if (step > 0) {
         for (int64_t i = start; i < stop; i += step) {

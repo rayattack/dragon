@@ -635,6 +635,9 @@ void           dragon_list_append_ptr(DragonListPtr* list, void* value);
 DragonListBox* dragon_list_box_new(int64_t capacity);
 void           dragon_list_box_append(DragonListBox* list, int64_t tag, int64_t payload);
 void           dragon_list_box_delitem(DragonListBox* list, int64_t index);
+int64_t        dragon_list_box_contains(DragonListBox* list, int64_t tag, int64_t payload);
+int64_t        dragon_list_box_index(DragonListBox* list, int64_t tag, int64_t payload);
+int64_t        dragon_list_box_count(DragonListBox* list, int64_t tag, int64_t payload);
 
 const char*    dragon_str_join_ptr(const char* sep, DragonListPtr* list);
 

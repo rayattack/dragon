@@ -274,6 +274,12 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_list_box_remove",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
+    getOrDeclareRuntime("dragon_list_box_contains",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type, i64Type}, false));
+    getOrDeclareRuntime("dragon_list_box_index",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type, i64Type}, false));
+    getOrDeclareRuntime("dragon_list_box_count",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_list_box_insert",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_list_box_destroy",

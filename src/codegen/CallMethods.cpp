@@ -1534,6 +1534,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (method == "index" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* val = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            if (Impl::isBoxedKind(
+                    impl_->getIterableElementKind(attr.object.get()))) {
+                auto tp = impl_->boxArgTagPayload(node.args[0].get(), val, false);
+                impl_->lastValue = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_list_box_index"],
+                    {obj, tp.first, tp.second}, "listindex");
+                return true;
+            }
             if (val->getType() == impl_->f64Type) val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             else if (val->getType() == impl_->i1Type) val = impl_->builder->CreateZExt(val, impl_->i64Type);
             else if (val->getType()->isPointerTy()) val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
@@ -1544,6 +1552,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (method == "count" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* val = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            if (Impl::isBoxedKind(
+                    impl_->getIterableElementKind(attr.object.get()))) {
+                auto tp = impl_->boxArgTagPayload(node.args[0].get(), val, false);
+                impl_->lastValue = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_list_box_count"],
+                    {obj, tp.first, tp.second}, "listcount");
+                return true;
+            }
             if (val->getType() == impl_->f64Type) val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             else if (val->getType() == impl_->i1Type) val = impl_->builder->CreateZExt(val, impl_->i64Type);
             else if (val->getType()->isPointerTy()) val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);

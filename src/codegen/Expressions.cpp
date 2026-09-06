@@ -997,6 +997,18 @@ void CodeGen::visit(BinaryExpr& node) {
                 node.right->type->kind() == Type::Kind::List) {
                 rhsIsList = true;
             }
+            const bool rhsHoldsBoxes = rhsIsList && rhs->getType()->isPointerTy() &&
+                Impl::isBoxedKind(impl_->getIterableElementKind(node.right.get()));
+            if (rhsHoldsBoxes) {
+                auto tp = impl_->boxArgTagPayload(node.left.get(), lhs, false);
+                impl_->lastValue = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_list_box_contains"],
+                    {rhs, tp.first, tp.second}, "listcontains");
+                impl_->lastValue = impl_->builder->CreateICmpNE(
+                    impl_->lastValue, llvm::ConstantInt::get(impl_->i64Type, 0), "inbool");
+                releaseOwnedInOperands();
+                return;
+            }
             if (rhsIsList && rhs->getType()->isPointerTy()) {
                 llvm::Value* val = lhs;
                 if (val->getType() == impl_->f64Type)
@@ -1381,6 +1393,15 @@ void CodeGen::visit(ChainedCompExpr& node) {
                     val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
                 auto* containsResult = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_set_contains"], {curVal, val}, "setcontains");
+                cmpResult = impl_->builder->CreateICmpNE(
+                    containsResult, llvm::ConstantInt::get(impl_->i64Type, 0), "inbool");
+            } else if (rhsIsList && curVal->getType()->isPointerTy() &&
+                       Impl::isBoxedKind(impl_->getIterableElementKind(
+                           node.operands[i + 1].get()))) {
+                auto tp = impl_->boxArgTagPayload(node.operands[i].get(), prevVal, false);
+                auto* containsResult = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_list_box_contains"],
+                    {curVal, tp.first, tp.second}, "listcontains");
                 cmpResult = impl_->builder->CreateICmpNE(
                     containsResult, llvm::ConstantInt::get(impl_->i64Type, 0), "inbool");
             } else if (rhsIsList && curVal->getType()->isPointerTy()) {

@@ -334,6 +334,16 @@ DragonList* dragon_sorted_ex(DragonList* list, int64_t reverse) {
 
 DragonList* dragon_reversed(DragonList* list) {
     if (!list) return dragon_list_new(0);
+    if (list->header.type_tag == DRAGON_TAG_LIST_BOX) {
+        auto* src = (DragonListBox*)(void*)list;
+        DragonListBox* boxed = dragon_list_box_new(src->size > 0 ? src->size : 8);
+        for (int64_t i = src->size - 1; i >= 0; i--) {
+            DragonListBoxElem e = src->data[i];
+            dragon_incref_tagged(e.payload, (uint8_t)e.tag);
+            dragon_list_box_append(boxed, e.tag, e.payload);
+        }
+        return (DragonList*)(void*)boxed;
+    }
     DragonList* result = dragon_list_new_tagged(list->size, list->elem_tag);
     for (int64_t i = list->size - 1; i >= 0; i--) {
         int64_t v = dragon_list_load(list, i);

@@ -451,8 +451,21 @@ void dragon_list_sort(DragonList* list) {
     dragon_list_sort_ex(list, 0);
 }
 
+static void dragon_list_box_reverse(DragonListBox* list) {
+    for (int64_t i = 0, j = list->size - 1; i < j; i++, j--) {
+        DragonListBoxElem tmp = list->data[i];
+        list->data[i] = list->data[j];
+        list->data[j] = tmp;
+    }
+}
+
 void dragon_list_reverse(DragonList* list) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
+    if (list->header.type_tag == DRAGON_TAG_LIST_BOX) {
+        dragon_list_box_reverse((DragonListBox*)(void*)list);
+        dragon_shared_mut_end(&list->header, mut_armed);
+        return;
+    }
     for (int64_t i = 0, j = list->size - 1; i < j; i++, j--) {
         int64_t tmp = dragon_list_load(list, i);
         dragon_list_store(list, i, dragon_list_load(list, j));
@@ -899,6 +912,35 @@ DragonBoxValue dragon_list_box_pop(DragonListBox* list, int64_t index) {
     list->size--;
     dragon_shared_mut_end(&list->header, mut_armed);
     return v;
+}
+
+static int64_t dragon_list_box_find(DragonListBox* list, int64_t tag, int64_t payload) {
+    DragonBoxAbi needle{tag, payload};
+    for (int64_t i = 0; i < list->size; i++) {
+        DragonBoxAbi cur{list->data[i].tag, list->data[i].payload};
+        if (dragon_box_eq(cur, needle)) return i;
+    }
+    return -1;
+}
+
+int64_t dragon_list_box_contains(DragonListBox* list, int64_t tag, int64_t payload) {
+    return dragon_list_box_find(list, tag, payload) >= 0 ? 1 : 0;
+}
+
+int64_t dragon_list_box_index(DragonListBox* list, int64_t tag, int64_t payload) {
+    int64_t at = dragon_list_box_find(list, tag, payload);
+    if (at < 0) dragon_raise_exc_cstr(90, "ValueError: value is not in list");
+    return at;
+}
+
+int64_t dragon_list_box_count(DragonListBox* list, int64_t tag, int64_t payload) {
+    DragonBoxAbi needle{tag, payload};
+    int64_t hits = 0;
+    for (int64_t i = 0; i < list->size; i++) {
+        DragonBoxAbi cur{list->data[i].tag, list->data[i].payload};
+        if (dragon_box_eq(cur, needle)) hits++;
+    }
+    return hits;
 }
 
 void dragon_list_box_remove(DragonListBox* list, int64_t tag, int64_t payload) {
