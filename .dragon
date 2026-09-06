@@ -1096,8 +1096,10 @@ try {
 - There is no traceback capture (no stack-frame list, no `traceback` module
   render); exceptions are caught and inspected via `except E as e`.
 - Exceptions lower to setjmp/longjmp: the throwing path pays, the normal path is
-  free. Guarding (`d.get(k, dflt)`, `if b != 0`) still beats catching when
-  absence is a normal outcome.
+  free OUTSIDE a `try`/`with`; inside one, every owned heap binding registers a
+  cleanup slot through a runtime call on the way in (measured at 7% of a page
+  builder that never throws; elision is filed). Guarding (`d.get(k, dflt)`,
+  `if b != 0`) still beats catching when absence is a normal outcome.
 
 ## 19. Context managers (`with`)
 
@@ -1855,7 +1857,11 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   concrete (a union-typed value is boxed; a knowable type in a register is not);
   never build strings with `out = out + x` in a loop (O(n^2)): collect
   `list[str]` and `"".join(parts)`; `del` big buffers early to cut peak memory;
-  `fire f(own x)` keeps refcounts non-atomic by proof.
+  `fire f(own x)` keeps refcounts non-atomic by proof. Door 4 does the opposite
+  and for good: a fire that lends a locked object marks everything reachable
+  from it shared, the flag is never cleared, and every refcount on that graph
+  is atomic from then on, on every thread, even when the other thread never
+  runs again.
 - Measured reality: compute-bound code (recursion, float loops) runs at parity
   with Rust at `-O2`; current known gaps are allocation-churn and str-keyed
   dict workloads (runtime data structures, being driven down).
