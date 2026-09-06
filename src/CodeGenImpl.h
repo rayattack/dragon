@@ -1922,21 +1922,58 @@ struct CodeGen::Impl {
 
     // Surviving `type` aliases (the recursive ones; canonicalization erased
     // the rest). An annotation naming one behaves as its definition.
-    std::unordered_map<std::string, TypeExpr*> typeAliasDefs;
+    using TypeAliasTable = std::unordered_map<std::string, TypeExpr*>;
+    std::unordered_map<std::string, TypeAliasTable> typeAliasDefsByModule;
+
+    static void bindImportedTypeAliases(TypeAliasTable& table,
+                                        const FromImportStmt& fi,
+                                        const TypeAliasTable& source) {
+        for (auto& alias : fi.names) {
+            if (alias.name == "*") {
+                for (auto& [name, def] : source) table.emplace(name, def);
+                continue;
+            }
+            auto it = source.find(alias.name);
+            if (it == source.end()) continue;
+            table[alias.asName.empty() ? alias.name : alias.asName] = it->second;
+        }
+    }
+
+    void collectTypeAliases(Module& m) {
+        TypeAliasTable& table = typeAliasDefsByModule[m.moduleName];
+        for (auto& stmt : m.body) {
+            auto* ta = dynamic_cast<TypeAliasStmt*>(stmt.get());
+            if (ta && ta->value) table[ta->name] = ta->value.get();
+        }
+        for (auto& stmt : m.body) {
+            auto* fi = dynamic_cast<FromImportStmt*>(stmt.get());
+            if (!fi) continue;
+            auto source = typeAliasDefsByModule.find(fi->module);
+            if (source != typeAliasDefsByModule.end())
+                bindImportedTypeAliases(table, *fi, source->second);
+        }
+    }
+
+    TypeExpr* lookupTypeAlias(const std::string& name) const {
+        const auto dot = name.rfind('.');
+        const std::string module =
+            dot == std::string::npos ? currentModuleName : name.substr(0, dot);
+        const std::string bare =
+            dot == std::string::npos ? name : name.substr(dot + 1);
+        auto mit = typeAliasDefsByModule.find(module);
+        if (mit == typeAliasDefsByModule.end()) return nullptr;
+        auto it = mit->second.find(bare);
+        return it == mit->second.end() ? nullptr : it->second;
+    }
 
     TypeExpr* resolveTypeAliasExpr(TypeExpr* t) {
         int guard = 0;
         while (t && guard++ < 16) {
             auto* named = dynamic_cast<NamedTypeExpr*>(t);
             if (!named) return t;
-            auto it = typeAliasDefs.find(named->name);
-            if (it == typeAliasDefs.end()) {
-                auto dot = named->name.rfind('.');
-                if (dot == std::string::npos) return t;
-                it = typeAliasDefs.find(named->name.substr(dot + 1));
-            }
-            if (it == typeAliasDefs.end()) return t;
-            t = it->second;
+            TypeExpr* def = lookupTypeAlias(named->name);
+            if (!def) return t;
+            t = def;
         }
         return t;
     }

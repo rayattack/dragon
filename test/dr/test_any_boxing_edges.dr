@@ -4,6 +4,8 @@ from json import Data
 from unittest import TestCase, main
 from json import loads, dumps
 from anybox_src import give_bytes, give_str
+from alias_scope.shapes import Field, width_of
+from alias_scope.packing import describe
 
 
 class IntField {
@@ -657,4 +659,22 @@ class ListDataOperationsTests(TestCase) {
 }
 
 
-main([TestAnyFieldStore(), DictAnyListLiteralBornBoxed(), TopLevelAnyUnboxTests(), AnyBytesUnbox(), BoxedInstanceScopeTests(), AnyBorrowDrainTests(), ClosureBoxSubscriptUAF(), ListDataOperationsTests()])
+class TypeAliasScopeTests(TestCase) {
+    """A type alias is scoped to the module that declares it and the modules
+    that import it by name. A class called Field here must lower as that
+    class even though another module in the program declares
+    `type Field = int | float | bool | str | bytes` (stdlib struct.dr does);
+    before this pin the class parameter was lowered as a tagged box and the
+    build died in the LLVM verifier while `check` stayed green.
+    """
+
+    def test_class_keeps_its_shape_beside_a_same_named_alias() {
+        f: Field = Field("ab", 5)
+        self.assertEqual(width_of(f), 7)
+        self.assertEqual(describe("x"), "str")
+        self.assertEqual(describe(3), "other")
+    }
+}
+
+
+main([TestAnyFieldStore(), DictAnyListLiteralBornBoxed(), TopLevelAnyUnboxTests(), AnyBytesUnbox(), BoxedInstanceScopeTests(), AnyBorrowDrainTests(), ClosureBoxSubscriptUAF(), ListDataOperationsTests(), TypeAliasScopeTests()])

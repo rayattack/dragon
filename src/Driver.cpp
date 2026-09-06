@@ -974,7 +974,14 @@ int Driver::buildFile(const std::string& filename) {
     CodeGen codegen(codegenOpts);
     const char* dumpMode = std::getenv("DRAGON_DUMP_IR");
     bool dumpPreOpt = dumpMode != nullptr && std::string(dumpMode) != "opt";
+    const char* irFile = std::getenv("DRAGON_IR_FILE");
+    const std::string irPath = irFile ? irFile : "/tmp/dragon_dump.ll";
     if (!codegen.generate(*module, depModules)) {
+        if (dumpPreOpt) {
+            codegen.writeIR(irPath);
+            std::cerr << "[DRAGON_DUMP_IR] wrote the failing module's IR to "
+                      << irPath << "\n";
+        }
         for (const auto& diag : codegen.diagnostics()) {
             if (diag.level == CodeGenDiagnostic::Level::Error) {
                 std::cerr << impl_->formatter.format(
@@ -988,8 +995,6 @@ int Driver::buildFile(const std::string& filename) {
     }
 
     if (dumpPreOpt) {
-        const char* irFile = std::getenv("DRAGON_IR_FILE");
-        std::string irPath = irFile ? irFile : "/tmp/dragon_dump.ll";
         codegen.writeIR(irPath);
         std::cerr << "[DRAGON_DUMP_IR] wrote pre-optimization IR to " << irPath << "\n";
     }

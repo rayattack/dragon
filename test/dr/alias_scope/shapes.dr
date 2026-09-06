@@ -1,0 +1,13 @@
+class Field {
+    name: str
+    width: int
+    def(n: str, w: int) {
+        self.name = n
+        self.width = w
+    }
+}
+
+
+def width_of(f: Field) -> int {
+    return f.width + len(f.name)
+}

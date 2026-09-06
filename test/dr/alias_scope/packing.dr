@@ -1,0 +1,9 @@
+type Field = int | float | bool | str | bytes
+
+
+def describe(f: Field) -> str {
+    if isinstance(f, str) {
+        return "str"
+    }
+    return "other"
+}
