@@ -1164,17 +1164,23 @@ struct CodeGen::Impl {
                          std::vector<llvm::Value*>& args, CodeGen& cg,
                          std::vector<std::pair<llvm::Value*, VarKind>>* defaultTemps = nullptr);
 
+    void emitMarkShared(llvm::Value* val, VarKind kind) {
+        if (options.gcMode != GCMode::RC) return;
+        if (!isHeapKind(kind)) return;
+        if (!val->getType()->isPointerTy()) return;
+        const char* marker = kind == VarKind::Str ? "dragon_mark_shared_str"
+                                                  : "dragon_mark_shared_deep";
+        builder->CreateCall(runtimeFuncs[marker], {val});
+    }
+
     void emitAtomicIncref(llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
         if (!isHeapKind(kind)) return;
         if (!val->getType()->isPointerTy()) return;
-        if (kind == VarKind::Str) {
-            builder->CreateCall(runtimeFuncs["dragon_mark_shared_str"], {val});
-            builder->CreateCall(runtimeFuncs["dragon_incref_str_atomic"], {val});
-        } else {
-            builder->CreateCall(runtimeFuncs["dragon_mark_shared_deep"], {val});
-            builder->CreateCall(runtimeFuncs["dragon_incref_atomic"], {val});
-        }
+        emitMarkShared(val, kind);
+        const char* incref = kind == VarKind::Str ? "dragon_incref_str_atomic"
+                                                  : "dragon_incref_atomic";
+        builder->CreateCall(runtimeFuncs[incref], {val});
     }
 
     void emitFieldSharedBarrier(llvm::Value* objPtr, llvm::Value* val, VarKind kind) {

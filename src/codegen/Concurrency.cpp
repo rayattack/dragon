@@ -1,4 +1,5 @@
 #include "../CodeGenImpl.h"
+#include <algorithm>
 
 namespace dragon {
 
@@ -156,10 +157,71 @@ void CodeGen::visit(FireExpr& node) {
             return;
         }
 
-        if (isMethodCall) userArgs.push_back(selfVal);
+        std::string spelled = calleeName;
+        if (auto* ne = dynamic_cast<NameExpr*>(callExpr->callee.get()))
+            spelled = ne->name;
+        else if (auto* ae = dynamic_cast<AttributeExpr*>(callExpr->callee.get()))
+            spelled = ae->attribute;
+        auto failFire = [&](const std::string& what) {
+            impl_->addError("fire: '" + spelled + "' " + what, node.location());
+            impl_->lastValue = llvm::ConstantPointerNull::get(
+                llvm::PointerType::getUnqual(*impl_->context));
+        };
+
+        std::vector<Expr*> argExprs;
+        if (isMethodCall) {
+            userArgs.push_back(selfVal);
+            argExprs.push_back(nullptr);
+        }
         for (auto& arg : callExpr->args) {
             arg->accept(*this);
             userArgs.push_back(impl_->lastValue);
+            argExprs.push_back(arg.get());
+        }
+
+        const size_t numParams = targetFn->getFunctionType()->getNumParams();
+        if (!callExpr->kwArgs.empty()) {
+            auto pnIt = impl_->funcParamNames.find(calleeName);
+            if (pnIt == impl_->funcParamNames.end()) {
+                failFire("cannot take keyword arguments here");
+                return;
+            }
+            const auto& paramNames = pnIt->second;
+            if (userArgs.size() < numParams) {
+                userArgs.resize(numParams, nullptr);
+                argExprs.resize(numParams, nullptr);
+            }
+            for (auto& [kwName, kwVal] : callExpr->kwArgs) {
+                auto nameIt = std::find(paramNames.begin(), paramNames.end(), kwName);
+                const size_t idx = nameIt == paramNames.end()
+                    ? numParams
+                    : (size_t)std::distance(paramNames.begin(), nameIt);
+                if (idx >= numParams) {
+                    failFire("got an unexpected keyword argument '" + kwName + "'");
+                    return;
+                }
+                if (userArgs[idx]) {
+                    failFire("got multiple values for argument '" + kwName + "'");
+                    return;
+                }
+                kwVal->accept(*this);
+                userArgs[idx] = impl_->lastValue;
+                argExprs[idx] = kwVal.get();
+            }
+        }
+
+        std::vector<std::pair<llvm::Value*, Impl::VarKind>> defaultTemps;
+        const bool hasHole =
+            std::find(userArgs.begin(), userArgs.end(), nullptr) != userArgs.end();
+        if (userArgs.size() < numParams || hasHole)
+            impl_->fillDefaultArgs(calleeName, targetFn, userArgs, *this,
+                                   &defaultTemps);
+        argExprs.resize(userArgs.size(), nullptr);
+        for (size_t i = 0; i < userArgs.size(); i++) {
+            if (userArgs[i]) continue;
+            failFire("is missing an argument for parameter " +
+                     std::to_string(i + 1));
+            return;
         }
 
         auto kindsIt = impl_->funcParamKinds.find(calleeName);
@@ -171,8 +233,20 @@ void CodeGen::visit(FireExpr& node) {
             if (impl_->paramIsOwn(calleeName, (unsigned)i))
                 argKinds[i] = Impl::VarKind::Other;
 
-        for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++)
+        auto threadAdoptsTemp = [&](size_t i) {
+            for (auto& [dv, dk] : defaultTemps)
+                if (dv == userArgs[i]) return true;
+            return argExprs[i] != nullptr &&
+                   impl_->renderedSourceDrainKind(argExprs[i], userArgs[i]) !=
+                       Impl::VarKind::Other;
+        };
+        for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++) {
+            if (threadAdoptsTemp(i)) {
+                impl_->emitMarkShared(userArgs[i], argKinds[i]);
+                continue;
+            }
             impl_->emitAtomicIncref(userArgs[i], argKinds[i]);
+        }
 
         siteName = calleeName + "_" + std::to_string(impl_->lambdaCounter++);
     }
