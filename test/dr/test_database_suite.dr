@@ -1,7 +1,7 @@
 from database.base import Value
 from unittest import TestCase, main
 import database
-from database import SQL, ConnectionError
+from database import SQL, ConnectionError, TxError
 from sqlite import Database, Cursor
 from tempfile import mkdtemp
 
@@ -83,6 +83,94 @@ class DatabaseTests(TestCase) {
         self.assertEqual(ins.ran, 1)
         self.assertTrue(ins.xid > 0)
         self.assertEqual(db.val[int](template[SQL] { select count(*) from tx }), 3)
+        db.close()
+    }
+
+    def test_tx_handle_commit_persists() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table h(id integer primary key, v text)")
+        with db.transaction() as t {
+            t.run(template[SQL] { insert into h(id, v) values(!{1}, !{"kept"}) })
+            t.commit()
+        }
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 1)
+        db.run(template[SQL] { insert into h(id, v) values(!{2}, !{"after"}) })
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 2)
+        db.close()
+    }
+
+    def test_tx_without_commit_rolls_back() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table h(id integer primary key, v text)")
+        with db.transaction() as t {
+            t.run(template[SQL] { insert into h(id, v) values(!{1}, !{"dropped"}) })
+        }
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 0)
+        db.close()
+    }
+
+    def test_connection_commit_settles_the_block() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table h(id integer primary key, v text)")
+        with db.transaction() {
+            db.run(template[SQL] { insert into h(id, v) values(!{2}, !{"batch"}) })
+            db.commit()
+        }
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 1)
+        db.run(template[SQL] { insert into h(id, v) values(!{3}, !{"after"}) })
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 2)
+        db.close()
+    }
+
+    def test_connection_rollback_settles_the_block() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table h(id integer primary key, v text)")
+        with db.transaction() {
+            db.run(template[SQL] { insert into h(id, v) values(!{2}, !{"batch"}) })
+            db.rollback()
+        }
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 0)
+        db.run(template[SQL] { insert into h(id, v) values(!{3}, !{"after"}) })
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 1)
+        db.close()
+    }
+
+    def test_tx_exception_rolls_back_and_propagates() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table h(id integer primary key, v text)")
+        seen: bool = false
+        try {
+            with db.transaction() as t {
+                t.run(template[SQL] { insert into h(id, v) values(!{1}, !{"lost"}) })
+                raise ValueError("boom")
+            }
+        } except ValueError {
+            seen = true
+        }
+        self.assertTrue(seen)
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 0)
+        db.close()
+    }
+
+    def test_nested_transaction_raises_tx_error() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table h(id integer primary key, v text)")
+        refused: bool = false
+        with db.transaction() as outer {
+            outer.run(template[SQL] { insert into h(id, v) values(!{1}, !{"outer"}) })
+            try {
+                with db.transaction() as inner {
+                    inner.run(template[SQL] { insert into h(id, v) values(!{2}, !{"inner"}) })
+                }
+            } except TxError {
+                refused = true
+            }
+            outer.commit()
+        }
+        self.assertTrue(refused)
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 1)
+        db.run(template[SQL] { insert into h(id, v) values(!{3}, !{"after"}) })
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from h }), 2)
         db.close()
     }
 

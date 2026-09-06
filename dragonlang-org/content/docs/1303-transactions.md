@@ -73,6 +73,7 @@ from database import SQL
 
 db: database.Connection = database.open("sqlite::memory:")
 db.raw("create table inventory(sku text, qty integer)")
+db.run(template[SQL] { insert into inventory(sku, qty) values(!{"PEN-1"}, !{2}) })
 sku: str = "PEN-1"
 n: int = 3
 
@@ -86,6 +87,11 @@ with db.transaction() as tx {
     }
 }
 ```
+
+The connection knows about the transaction as well: a `db.commit()` or `db.rollback()`
+inside the block settles it there and then, and the block's exit does nothing more.
+Opening a second `with db.transaction()` while one is still open raises `TxError`
+instead of starting a transaction the driver would reject.
 
 ## Batches: `runs`
 

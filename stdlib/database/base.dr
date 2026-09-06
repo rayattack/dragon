@@ -103,6 +103,7 @@ class Results {
 }
 
 class Connection {
+    in_transaction: bool = false
 
     def run(sql: SQL) -> Results {
         raise NotImplementedError("Connection.run must be overridden by a backend driver")
@@ -141,11 +142,13 @@ class Connection {
 
     def commit() -> int {
         self.raw("COMMIT")
+        self.in_transaction = false
         return 0
     }
 
     def rollback() -> int {
         self.raw("ROLLBACK")
+        self.in_transaction = false
         return 0
     }
 
@@ -166,31 +169,30 @@ class Connection {
 class Tx {
     def(conn: Connection) {
         self.conn = conn
-        self._done = false
     }
 
     def __enter__() -> Tx {
+        if self.conn.in_transaction {
+            raise TxError("a transaction is already active on this connection")
+        }
         self.conn.raw("BEGIN")
+        self.conn.in_transaction = true
         return self
     }
 
     def __exit__() -> int {
-        if not self._done {
-            self.conn.raw("ROLLBACK")
+        if self.conn.in_transaction {
+            self.conn.rollback()
         }
         return 0
     }
 
     def commit() -> int {
-        self.conn.raw("COMMIT")
-        self._done = true
-        return 0
+        return self.conn.commit()
     }
 
     def rollback() -> int {
-        self.conn.raw("ROLLBACK")
-        self._done = true
-        return 0
+        return self.conn.rollback()
     }
 
     def run(sql: SQL) -> Results {
