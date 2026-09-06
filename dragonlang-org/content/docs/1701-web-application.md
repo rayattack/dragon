@@ -86,7 +86,7 @@ app.POST("/add", lambda (req: Request, res: Response, ctx: Context) -> None {
     nm: str = form["name"]
     sc: int = int(form["score"])
     db.run(template[SQL] { insert into players (name, score) values (!{nm}, !{sc}) })
-    res.redirect("/")
+    res.see_other("/")
 })
 
 app.listen()
@@ -337,8 +337,9 @@ also set the right `Content-Type`:
 | `res.json(body)` | `application/json` | API responses (pass a `str` of JSON) |
 | `res.out(status, body)` | unchanged | set status + body in one call |
 | `res.binary(status, body)` | unchanged | a `bytes` body sent byte for byte (protobuf, images); content-length is the byte length |
-| `res.redirect(url)` | - | `307` redirect to `url` |
-| `res.redirect(url, true)` | - | `308` permanent redirect |
+| `res.redirect(url)` | - | `307` redirect to `url`; the browser repeats the same method, so use it from `GET` handlers |
+| `res.redirect(url, true)` | - | `308` permanent redirect, same method |
+| `res.see_other(url)` | - | `303`: the browser follows with a `GET`, the redirect to use after a `POST` |
 
 Beyond the body, `res.set_header(key, value)` adds an arbitrary header,
 `res.status = 404` sets the status code directly, and
@@ -359,8 +360,10 @@ app.GET("/teapot", lambda (req: Request, res: Response, ctx: Context) -> None {
 
 The redirect-after-POST that the leaderboard uses is the standard guard
 against duplicate form submissions: the browser `POST`s `/add`, gets a
-`307` to `/`, and re-`GET`s the page - so a refresh re-runs the harmless
-`GET`, not the `POST`.
+`303` to `/`, and follows it with a `GET` - so a refresh re-runs the
+harmless `GET`, not the `POST`. That is what `see_other` is for: a `307`
+from `redirect` tells the browser to repeat the `POST` at the new URL,
+which lands on a 404 when the target is `GET`-only.
 
 ## HTML escaping: closing the XSS hole
 
@@ -656,7 +659,7 @@ documentation you are reading was delivered by the stack it describes.
 | Send HTML / text / JSON | `res.html(s)` / `res.text(s)` / `res.json(s)` |
 | Set status + body | `res.out(404, "Not Found")` |
 | Send a binary body | `res.binary(200, payload)` with `payload: bytes` |
-| Redirect | `res.redirect("/")` (307) / `res.redirect("/", true)` (308) |
+| Redirect | `res.redirect("/")` (307) / `res.redirect("/", true)` (308) / `res.see_other("/")` (303, after a `POST`) |
 | Set a header / cookie | `res.set_header(k, v)` / `res.cookie(name, value)` |
 | Escape user text into HTML | `escape(s)` or `template[HTML] { ... !{x} }` |
 | Query the database | `db.all(template[SQL] { ... })` |

@@ -266,6 +266,12 @@ class Response {
         self._headers["location"] = url
     }
 
+    def see_other(url: str) -> None {
+        _reject_ctl(url, "redirect location")
+        self.status = 303
+        self._headers["location"] = url
+    }
+
     def abort(payload: str = "") -> None {
         self._aborted = true
         if payload != "" {

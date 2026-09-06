@@ -103,12 +103,23 @@ def _proto(req: Request, res: Response, ctx: Context) -> None {
     res.set_header("content-type", "application/x-protobuf")
 }
 
+def _login_post(req: Request, res: Response, ctx: Context) -> None {
+    res.see_other("/p/dashboard")
+}
+
+def _legacy_post(req: Request, res: Response, ctx: Context) -> None {
+    res.redirect("/p/dashboard")
+}
+
 def _app() -> Router {
     const app: Router = Router()
     app.GET("/big", _big)
     app.GET("/small", _small)
     app.GET("/png", _png)
     app.GET("/proto", _proto)
+    app.POST("/login", _login_post)
+    app.POST("/legacy", _legacy_post)
+    app.GET("/p/dashboard", _small)
     return app
 }
 
@@ -610,6 +621,20 @@ class GzipGateTests(TestCase) {
         self.assertIn("content-length: 4", mr.sent)
         self.assertIn(dragon_str_from_bytes(PROTO_PAYLOAD), mr.sent)
         self.assertNotIn("content-encoding: gzip", mr.sent)
+    }
+
+    def test_see_other_answers_303_after_a_post() {
+        const mr: MemoryReader = MemoryReader([_post("/login", "{}").encode("utf-8")])
+        _app().serve_connection(mr)
+        self.assertIn("HTTP/1.1 303 See Other", mr.sent)
+        self.assertIn("location: /p/dashboard", mr.sent)
+    }
+
+    def test_redirect_keeps_the_method_with_307() {
+        const mr: MemoryReader = MemoryReader([_post("/legacy", "{}").encode("utf-8")])
+        _app().serve_connection(mr)
+        self.assertIn("HTTP/1.1 307 Temporary Redirect", mr.sent)
+        self.assertIn("location: /p/dashboard", mr.sent)
     }
 
     def test_incompressible_type_skipped() {

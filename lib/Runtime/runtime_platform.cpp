@@ -361,6 +361,7 @@ const char* dragon_http_build_response(int64_t status, const char* headers, cons
         case 204: reason = "No Content"; break;
         case 301: reason = "Moved Permanently"; break;
         case 302: reason = "Found"; break;
+        case 303: reason = "See Other"; break;
         case 304: reason = "Not Modified"; break;
         case 307: reason = "Temporary Redirect"; break;
         case 308: reason = "Permanent Redirect"; break;
