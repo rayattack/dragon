@@ -30,6 +30,31 @@ CodeGen::CodeGen(CodeGenOptions options) : impl_(std::make_unique<Impl>()) {
 
 CodeGen::~CodeGen() = default;
 
+static constexpr unsigned kInlineHintInstructionBudget = 200;
+
+static void hintSmallFunctionsForInlining(llvm::Module& module) {
+    for (auto& fn : module) {
+        if (fn.isDeclaration() || fn.getName() == "main") continue;
+        if (fn.hasFnAttribute(llvm::Attribute::NoInline) ||
+            fn.hasFnAttribute(llvm::Attribute::AlwaysInline) ||
+            fn.hasFnAttribute(llvm::Attribute::OptimizeNone) ||
+            fn.hasFnAttribute(llvm::Attribute::InlineHint))
+            continue;
+        unsigned count = 0;
+        bool selfRecursive = false;
+        for (auto& block : fn) {
+            count += block.size();
+            if (count > kInlineHintInstructionBudget) break;
+            for (auto& inst : block) {
+                auto* call = llvm::dyn_cast<llvm::CallBase>(&inst);
+                if (call && call->getCalledFunction() == &fn) selfRecursive = true;
+            }
+        }
+        if (selfRecursive || count > kInlineHintInstructionBudget) continue;
+        fn.addFnAttr(llvm::Attribute::InlineHint);
+    }
+}
+
 bool CodeGen::generate(dragon::Module& module) {
     std::vector<dragon::Module*> noDeps;
     return generate(module, noDeps);
@@ -747,6 +772,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
             gv.setLinkage(llvm::GlobalValue::InternalLinkage);
         }
     }
+
+    hintSmallFunctionsForInlining(*impl_->module);
 
     impl_->finalizeDebugLines();
 

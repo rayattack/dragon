@@ -10,6 +10,15 @@ struct BytesInlineFields {
     llvm::Value* data;
 };
 
+struct BytesSharedCheck {
+    llvm::Value* len;
+    llvm::BasicBlock* raiseBlock;
+};
+
+constexpr int kBytesCheckReuseHopLimit = 16;
+constexpr int64_t kBytesHeaderLenSlot = 2;
+constexpr int64_t kBytesHeaderDataSlot = 3;
+
 template <typename CodeGenImpl>
 inline llvm::MDNode* bytesTbaaTag(CodeGenImpl& impl, const char* typeName) {
     auto* scalar = llvm::MDNode::get(*impl.context, {
@@ -33,12 +42,14 @@ inline llvm::Value* emitBytesHeaderLoad(CodeGenImpl& impl, llvm::Value* obj,
 
 template <typename CodeGenImpl>
 inline llvm::Value* emitBytesLen(CodeGenImpl& impl, llvm::Value* obj) {
-    return emitBytesHeaderLoad(impl, obj, 2, impl.i64Type, "bytes.len");
+    return emitBytesHeaderLoad(impl, obj, kBytesHeaderLenSlot, impl.i64Type,
+                               "bytes.len");
 }
 
 template <typename CodeGenImpl>
 inline llvm::Value* emitBytesData(CodeGenImpl& impl, llvm::Value* obj) {
-    return emitBytesHeaderLoad(impl, obj, 3, impl.i8PtrType, "bytes.data");
+    return emitBytesHeaderLoad(impl, obj, kBytesHeaderDataSlot, impl.i8PtrType,
+                               "bytes.data");
 }
 
 template <typename CodeGenImpl>
@@ -50,6 +61,61 @@ inline llvm::Value* emitBytesByte(CodeGenImpl& impl, llvm::Value* data,
     llvm::cast<llvm::Instruction>(load)->setMetadata(
         llvm::LLVMContext::MD_tbaa, bytesTbaaTag(impl, "bytes data"));
     return impl.builder->CreateZExt(load, impl.i64Type, "bytes.byte");
+}
+
+inline bool isSameBytesObject(llvm::Value* a, llvm::Value* b) {
+    if (a == b) return true;
+    auto* loadA = llvm::dyn_cast<llvm::LoadInst>(a);
+    auto* loadB = llvm::dyn_cast<llvm::LoadInst>(b);
+    return loadA && loadB &&
+           loadA->getPointerOperand() == loadB->getPointerOperand();
+}
+
+template <typename CodeGenImpl>
+inline bool isBytesLenLoadOf(CodeGenImpl& impl, llvm::Instruction& inst,
+                             llvm::Value* obj) {
+    auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
+    if (!load || load->getType() != impl.i64Type) return false;
+    auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(load->getPointerOperand());
+    if (!gep || gep->getSourceElementType() != impl.i64Type ||
+        gep->getNumIndices() != 1) return false;
+    auto* slot = llvm::dyn_cast<llvm::ConstantInt>(gep->getOperand(1));
+    return slot && slot->getSExtValue() == kBytesHeaderLenSlot &&
+           isSameBytesObject(gep->getPointerOperand(), obj);
+}
+
+inline bool isBytesRaiseBlock(llvm::BasicBlock* block) {
+    if (!block || block->size() != 2) return false;
+    auto* call = llvm::dyn_cast<llvm::CallInst>(&block->front());
+    if (!call || !call->getCalledFunction()) return false;
+    return call->getCalledFunction()->getName() == "dragon_bytes_index_error" &&
+           llvm::isa<llvm::UnreachableInst>(block->getTerminator());
+}
+
+template <typename CodeGenImpl>
+inline BytesSharedCheck findBytesSharedCheck(CodeGenImpl& impl, llvm::Value* obj) {
+    llvm::BasicBlock* raiseBlock = nullptr;
+    auto* block = impl.builder->GetInsertBlock();
+    auto pos = impl.builder->GetInsertPoint();
+    for (int hop = 0; hop < kBytesCheckReuseHopLimit; ++hop) {
+        while (pos != block->begin()) {
+            --pos;
+            if (isBytesLenLoadOf(impl, *pos, obj)) return {&*pos, raiseBlock};
+            if (pos->mayWriteToMemory() || llvm::isa<llvm::CallBase>(*pos))
+                return {nullptr, raiseBlock};
+        }
+        auto* pred = block->getUniquePredecessor();
+        if (!pred) return {nullptr, raiseBlock};
+        auto* branch = llvm::dyn_cast<llvm::BranchInst>(pred->getTerminator());
+        if (branch && branch->isConditional() && !raiseBlock) {
+            auto* sibling = branch->getSuccessor(0) == block
+                ? branch->getSuccessor(1) : branch->getSuccessor(0);
+            if (isBytesRaiseBlock(sibling)) raiseBlock = sibling;
+        }
+        block = pred;
+        pos = block->end();
+    }
+    return {nullptr, raiseBlock};
 }
 
 template <typename CodeGenImpl>
@@ -85,14 +151,22 @@ template <typename CodeGenImpl>
 inline llvm::Value* emitBytesIndexRead(CodeGenImpl& impl, llvm::Value* obj,
                                        llvm::Value* index, bool indexNonNeg) {
     auto* func = impl.currentFunction;
-    auto* liveBB = llvm::BasicBlock::Create(*impl.context, "bytes.idx.live", func);
+    BytesSharedCheck shared = findBytesSharedCheck(impl, obj);
     auto* okBB = llvm::BasicBlock::Create(*impl.context, "bytes.idx.ok", func);
-    auto* oobBB = llvm::BasicBlock::Create(*impl.context, "bytes.idx.oob", func);
-    impl.builder->CreateCondBr(impl.builder->CreateIsNull(obj, "bytes.isnull"),
-                               oobBB, liveBB);
+    auto* oobBB = shared.raiseBlock;
+    bool needsRaiseBody = oobBB == nullptr;
+    if (needsRaiseBody)
+        oobBB = llvm::BasicBlock::Create(*impl.context, "bytes.idx.oob", func);
 
-    impl.builder->SetInsertPoint(liveBB);
-    llvm::Value* len = emitBytesLen(impl, obj);
+    llvm::Value* len = shared.len;
+    if (!len) {
+        auto* liveBB = llvm::BasicBlock::Create(*impl.context, "bytes.idx.live", func);
+        impl.builder->CreateCondBr(impl.builder->CreateIsNull(obj, "bytes.isnull"),
+                                   oobBB, liveBB);
+        impl.builder->SetInsertPoint(liveBB);
+        len = emitBytesLen(impl, obj);
+    }
+
     llvm::Value* finalIdx = index;
     if (!indexNonNeg) {
         auto* isNeg = impl.builder->CreateICmpSLT(index,
@@ -103,9 +177,11 @@ inline llvm::Value* emitBytesIndexRead(CodeGenImpl& impl, llvm::Value* obj,
     impl.builder->CreateCondBr(
         impl.builder->CreateICmpULT(finalIdx, len, "bytes.idx.inbounds"), okBB, oobBB);
 
-    impl.builder->SetInsertPoint(oobBB);
-    impl.builder->CreateCall(impl.runtimeFuncs["dragon_bytes_index_error"], {});
-    impl.builder->CreateUnreachable();
+    if (needsRaiseBody) {
+        impl.builder->SetInsertPoint(oobBB);
+        impl.builder->CreateCall(impl.runtimeFuncs["dragon_bytes_index_error"], {});
+        impl.builder->CreateUnreachable();
+    }
 
     impl.builder->SetInsertPoint(okBB);
     return emitBytesByte(impl, emitBytesData(impl, obj), finalIdx);

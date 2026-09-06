@@ -942,3 +942,49 @@ TEST(CodeGenTest, BytesThroughAUnionKeepsTheRuntimeCall) {
     EXPECT_NE(ir.find("@dragon_box_subscript"), std::string::npos);
     EXPECT_EQ(ir.find("bytes.elem"), std::string::npos);
 }
+
+static std::string defineOf(const std::string& ir, const std::string& symbol) {
+    const std::string callee = " @" + symbol + "(";
+    size_t start = ir.find("\ndefine ");
+    while (start != std::string::npos) {
+        size_t header = ir.find('\n', start + 1);
+        size_t named = ir.find(callee, start);
+        if (named != std::string::npos && named < header) {
+            size_t end = ir.find("\n}\n", start);
+            return end == std::string::npos ? ir.substr(start)
+                                            : ir.substr(start, end - start);
+        }
+        start = ir.find("\ndefine ", start + 1);
+    }
+    return "";
+}
+
+TEST(CodeGenTest, ReadsOfOneBytesValueShareTheNullTestAndLength) {
+    auto body = defineOf(generateIR(code("bytes_four_reads_of_one_value")),
+                         "four_of");
+    ASSERT_FALSE(body.empty());
+    EXPECT_EQ(countSubstring(body, "bytes.isnull"), 2u) << body;
+    EXPECT_EQ(countSubstring(body, "bytes.len.gep"), 2u) << body;
+    EXPECT_EQ(countSubstring(body, "call void @dragon_bytes_index_error"), 1u) << body;
+    EXPECT_EQ(countSubstring(body, "bytes.idx.inbounds"), 8u) << body;
+    EXPECT_EQ(countSubstring(body, "bytes.elem.gep"), 8u) << body;
+}
+
+TEST(CodeGenTest, ACallBetweenBytesReadsStartsAFreshCheck) {
+    auto body = defineOf(generateIR(code("bytes_reads_after_a_call")), "two_of");
+    ASSERT_FALSE(body.empty());
+    EXPECT_EQ(countSubstring(body, "bytes.isnull"), 4u) << body;
+    EXPECT_EQ(countSubstring(body, "bytes.len.gep"), 4u) << body;
+}
+
+static CodeGenOptions releaseOptions() {
+    CodeGenOptions opts;
+    opts.optimizationLevel = 3;
+    return opts;
+}
+
+TEST(CodeGenTest, BytesDecodeHelpersLeaveNoCallAtO3) {
+    auto ir = generateOptimizedIR(code("bytes_decode_reduction"), releaseOptions());
+    EXPECT_EQ(countSubstring(ir, "@struct__unpack_u32_le"), 0u) << ir;
+    EXPECT_EQ(countSubstring(ir, "@struct__unpack_u64_le"), 0u) << ir;
+}

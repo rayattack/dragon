@@ -1583,3 +1583,53 @@ type Payload = int | bytes
 p: Payload = b"abc"
 print(p[1])
 ```
+
+#### :bytes_four_reads_of_one_value
+
+Four reads of the same `bytes` value in one straight line: the NULL test and the
+length load belong to the value, not to the read, so they are emitted once and
+every later index reuses them. The four bounds compares stay, and they all
+branch to the one cold raise block.
+
+```dr
+def four_of(data: bytes, o: int) -> int {
+    return data[o] | (data[o + 1] << 8) | (data[o + 2] << 16) | (data[o + 3] << 24)
+}
+print(four_of(b"abcd", 0))
+```
+
+#### :bytes_reads_after_a_call
+
+A call between two reads can free the value or rebind the name, so the second
+read starts its own NULL test and length load.
+
+```dr
+def widen(v: int) -> int {
+    return v * 2
+}
+def two_of(data: bytes, o: int) -> int {
+    return widen(data[o]) | data[o + 1]
+}
+print(two_of(b"abcd", 0))
+```
+
+#### :bytes_decode_reduction
+
+The page decoder every binary format is built out of. `unpack_u64_le` calls
+`unpack_u32_le` twice, and each of those reads four bytes, so at -O3 the whole
+chain has to collapse into the loop or the reduction ends in a real call.
+
+```dr
+from struct import unpack_u64_le
+
+def total_of(page: bytes, n: int) -> int {
+    t: int = 0
+    for i in range(n) {
+        t = t + unpack_u64_le(page, i * 8)
+    }
+    return t
+}
+
+page: bytes = bytes(4096)
+print(total_of(page, 512))
+```

@@ -737,6 +737,58 @@ class BytesElementAccessTests(TestCase) {
         self.assertEqual(grand, 2000 * ord("l"))
     }
 
+    def test_four_reads_of_one_value_decode_every_byte() {
+        buf: bytes = b"\x01\x02\x03\x04"
+        packed: int = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24)
+        self.assertEqual(packed, 67305985)
+    }
+
+    def test_a_later_read_of_a_shared_value_still_raises() {
+        buf: bytes = b"abc"
+        caught: int = 0
+        for i in range(2000) {
+            try {
+                const x: int = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24)
+            } except IndexError {
+                caught = caught + 1
+            }
+        }
+        self.assertEqual(caught, 2000)
+    }
+
+    def test_a_first_read_of_a_shared_value_still_raises() {
+        buf: bytes = b"abcd"
+        caught: int = 0
+        for i in range(2000) {
+            try {
+                const x: int = buf[9] | (buf[1] << 8) | (buf[2] << 16)
+            } except IndexError {
+                caught = caught + 1
+            }
+        }
+        self.assertEqual(caught, 2000)
+    }
+
+    def test_negative_indices_mix_with_a_shared_length() {
+        buf: bytes = b"abcd"
+        mixed: int = buf[0] + buf[-1] + buf[1] + buf[-2]
+        self.assertEqual(mixed, ord("a") + ord("d") + ord("b") + ord("c"))
+    }
+
+    def test_a_reassigned_value_is_checked_against_its_own_length() {
+        buf: bytes = b"abcd"
+        first: int = buf[3]
+        buf = b"xy"
+        caught: str = ""
+        try {
+            const x: int = buf[3]
+        } except IndexError {
+            caught = "index"
+        }
+        self.assertEqual(first, ord("d"))
+        self.assertEqual(caught, "index")
+    }
+
     def test_owned_temp_out_of_range_releases_the_temp() {
         caught: int = 0
         for i in range(2000) {

@@ -1875,6 +1875,10 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   from it shared, the flag is never cleared, and every refcount on that graph
   is atomic from then on, on every thread, even when the other thread never
   runs again.
+- Small functions carry an inline hint, so a one-line accessor or a `struct`
+  decode helper folds into its caller at `-O2` and above, and several reads of
+  one `bytes` value in a row share a single NULL test and length load (each
+  index still gets its own bounds check).
 - Measured reality: compute-bound code (recursion, float loops) runs at parity
   with Rust at `-O2`; current known gaps are allocation-churn and str-keyed
   dict workloads (runtime data structures, being driven down).
