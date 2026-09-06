@@ -120,13 +120,18 @@ llvm_map_components_to_libnames(LLVM_LIBS
 target_link_libraries(dragon_lib PUBLIC ${LLVM_LIBS})
 target_link_libraries(dragon_lib PUBLIC dragon_runtime)
 
+option(DRAGON_RUNTIME_DEBUG "Build the runtime archives at the tree's optimization level instead of -O3" OFF)
+if(NOT DRAGON_RUNTIME_DEBUG)
+    set(DRAGON_RUNTIME_OPTIMIZATION -O3)
+endif()
+
 add_library(dragon_llhttp STATIC
     lib/llhttp/llhttp.c
     lib/llhttp/api.c
     lib/llhttp/http.c)
 target_include_directories(dragon_llhttp PUBLIC ${CMAKE_SOURCE_DIR}/lib/llhttp)
 set_target_properties(dragon_llhttp PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
-target_compile_options(dragon_llhttp PRIVATE -w)
+target_compile_options(dragon_llhttp PRIVATE -w ${DRAGON_RUNTIME_OPTIMIZATION})
 
 # DRAGON_ASAN builds a SECOND, ASan-instrumented runtime that only compiled user
 # programs link; the dragon compiler keeps the normal one. UAF-hunting only, never ship.
@@ -164,7 +169,8 @@ target_include_directories(dragon_runtime PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/SQLite
     ${CMAKE_SOURCE_DIR}/lib/Runtime)
 target_compile_options(dragon_runtime PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:${DRAGON_WARNINGS}>)
+    $<$<COMPILE_LANGUAGE:CXX>:${DRAGON_WARNINGS}>
+    ${DRAGON_RUNTIME_OPTIMIZATION})
 target_link_libraries(dragon_runtime PRIVATE dragon_llhttp)
 target_link_libraries(dragon_runtime PRIVATE dragon_mbedtls)
 target_compile_definitions(dragon_runtime PRIVATE
@@ -199,7 +205,7 @@ endif()
 add_library(dragon_sqlite3 STATIC lib/SQLite/sqlite3.c)
 target_include_directories(dragon_sqlite3 PUBLIC ${CMAKE_SOURCE_DIR}/lib/SQLite)
 set_target_properties(dragon_sqlite3 PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
-target_compile_options(dragon_sqlite3 PRIVATE -w)
+target_compile_options(dragon_sqlite3 PRIVATE -w ${DRAGON_RUNTIME_OPTIMIZATION})
 
 set(PCRE2_BUILD_PCRE2_8 ON CACHE BOOL "" FORCE)
 set(PCRE2_BUILD_PCRE2_16 OFF CACHE BOOL "" FORCE)
@@ -215,6 +221,7 @@ set(PCRE2_SUPPORT_LIBZ OFF CACHE BOOL "" FORCE)
 set(PCRE2_SUPPORT_LIBEDIT OFF CACHE BOOL "" FORCE)
 set(PCRE2_SUPPORT_LIBREADLINE OFF CACHE BOOL "" FORCE)
 add_subdirectory(lib/PCRE2)
+target_compile_options(pcre2-8-static PRIVATE ${DRAGON_RUNTIME_OPTIMIZATION})
 
 file(GLOB MBEDTLS_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/lib/mbedtls/library/*.c)
 add_library(dragon_mbedtls STATIC ${MBEDTLS_SOURCES})
@@ -225,7 +232,7 @@ target_include_directories(dragon_mbedtls PUBLIC
 target_compile_definitions(dragon_mbedtls PUBLIC
     MBEDTLS_USER_CONFIG_FILE="dragon_mbedtls_config.h")
 set_target_properties(dragon_mbedtls PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
-target_compile_options(dragon_mbedtls PRIVATE -w)
+target_compile_options(dragon_mbedtls PRIVATE -w ${DRAGON_RUNTIME_OPTIMIZATION})
 
 set(DRAGON_EGG_OUT ${CMAKE_BINARY_DIR}/dragon-egg${CMAKE_EXECUTABLE_SUFFIX})
 set(DRAGON_EGG_SRC_FILE ${CMAKE_SOURCE_DIR}/tools/egg/egg.dr)

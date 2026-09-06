@@ -74,7 +74,7 @@ Flags:
 |---|---|
 | `-o <file>` | output path (default: source name with `.dr` stripped) |
 | `-O0`..`-O3` | optimization level (default `-O0`) |
-| `--release` | optimize aggressively (use for anything you measure or ship) |
+| `--release` | optimize your program aggressively (use for anything you measure or ship); the runtime archive is always `-O3`, whatever the tree's build type |
 | `-g` | debug info |
 | `-f` | force Python-surface parsing (for `.py` content) |
 | `-I <dir>` / `-I<dir>` | add a module search path (repeatable; attached and separated spellings are the same flag) |
@@ -1825,7 +1825,10 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   and the only other mode; any other spelling is "Unknown --gc mode". Both
   `--gc` modes and `--release` are listed by `dragon --help`.
 - Performance levers: build `--release` (exactly `-O3`) for anything measured;
-  the default is `-O0`, so an unflagged build is not a measurement. Keep types
+  the default is `-O0`, so an unflagged build is not a measurement. `-O` and
+  `--release` govern YOUR code only: the runtime archive linked into every
+  binary is compiled at `-O3` whatever the compiler tree's build type, so a
+  Debug build of `dragon` still links a fast runtime. Keep types
   concrete (a union-typed value is boxed; a knowable type in a register is not);
   never build strings with `out = out + x` in a loop (O(n^2)): collect
   `list[str]` and `"".join(parts)`; `del` big buffers early to cut peak memory;

@@ -122,9 +122,11 @@ runtime improves, so [the live table](/benchmarks) is the source of truth
 
 The language already gives you the levers that matter:
 
-- **Build with `--release`** (LLVM `-O2`) for anything you measure or
+- **Build with `--release`** (LLVM `-O3`) for anything you measure or
   ship. The default `-O0` build is for fast iteration, not for speed
-  claims.
+  claims. The flag governs your code only: the Dragon runtime archive
+  every binary links is compiled at `-O3` whatever the compiler's own
+  build type, so a Debug build of `dragon` still links a fast runtime.
 - **For short-lived programs, `--gc=none`** skips reference counting
   entirely and lets the OS reclaim memory at exit - ideal for a one-shot
   CLI filter or a micro-benchmark, never for a long-running service (see

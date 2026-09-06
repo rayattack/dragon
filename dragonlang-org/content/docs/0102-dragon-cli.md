@@ -45,7 +45,7 @@ Common flags:
 | `-I DIR` | Add a directory to the module search path. Repeatable. |
 | `--gc=rc` | Use refcounting + cycle collector (the default). |
 | `--gc=none` | Disable refcount emission. Useful for very short programs and benchmarks; do not ship binaries built this way. |
-| `--release` | Optimize aggressively. Slower compile, faster runtime. |
+| `--release` | Optimize your program aggressively. Slower compile, faster binary. It governs your code only: the runtime archive every binary links is always built at `-O3`, whatever the compiler's own build type. |
 | `--dump-ast` | Print the parsed AST to stdout and exit. Useful for debugging the parser. |
 | `--dump-tokens` | Print the token stream and exit. |
 
