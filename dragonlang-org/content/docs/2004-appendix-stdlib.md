@@ -43,7 +43,7 @@ statically linked the same way. Either way, nothing is fetched at build time.
 | `tomllib` | Read-only TOML parser matching Python 3.11+ `tomllib` (practical subset; no arrays-of-tables, inline tables, multi-line strings, or datetimes). |
 | `drs` | Parser for Dragon Script (`.drs`) config files; returns native `dict[str, Data]` / `list[Data]`. |
 | `base64` | RFC 4648 Base64 encode/decode plus URL-safe variants; bytes-oriented to match Python. |
-| `binascii` | Binary↔ASCII conversion - `hexlify`/`unhexlify` (a.k.a. `b2a_hex`/`a2b_hex`) and CRC32 over bytes. |
+| `binascii` | Binary↔ASCII conversion - `hexlify`/`unhexlify` (a.k.a. `b2a_hex`/`a2b_hex`), CRC32, and CRC-32C (`crc32c`, `crc32c_range`) over bytes. |
 | `struct` | Pack/unpack primitives to/from bytes with the CPython format mini-language (`<`/`>`/`!`/`=`, `b`/`h`/`i`/`q`/`f`/`d`/`s`, …). |
 | `quopri` | Quoted-printable (RFC 1521) encode/decode over bytes. Pure Dragon. |
 | `operator` | Python operators as plain functions for higher-order use; static typing forces monomorphic (`int`-default, suffixed float/str) variants. |

@@ -1140,7 +1140,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                  externLinkName.substr(0, 11) == "dragon_hmac")) {
                 needsMbedtls = true;
             }
-            if (func->isExtern && externLinkName.substr(0, 11) == "dragon_zlib") {
+            if (func->isExtern && (externLinkName.substr(0, 11) == "dragon_zlib" ||
+                                   externLinkName == "dragon_crc32_range")) {
                 needsZ = true;
             }
             if (func->isExtern && externLinkName.substr(0, 11) == "dragon_zstd") {

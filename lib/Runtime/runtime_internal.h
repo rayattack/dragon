@@ -707,6 +707,9 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src);
 DragonBytes* dragon_zstd_compress(DragonBytes* src, int64_t level);
 DragonBytes* dragon_zstd_decompress(DragonBytes* src);
 
+int64_t dragon_crc32_range(DragonBytes* b, int64_t start, int64_t length, int64_t value);
+int64_t dragon_crc32c_range(DragonBytes* b, int64_t start, int64_t length, int64_t value);
+
 DragonBytes* dragon_read_file_bytes(const char* path);
 int64_t dragon_write_file_bytes(const char* path, DragonBytes* data);
 

@@ -1,5 +1,12 @@
-"""binascii.dr - hexlify/unhexlify (b2a_hex/a2b_hex) and CRC32, matching Python's binascii.
-Hex helpers back SHA-256 fingerprints in the registry (D022); CRC32 backs gzip/tar."""
+"""binascii.dr - hexlify/unhexlify (b2a_hex/a2b_hex), CRC32 and CRC-32C, matching
+Python's binascii where the name exists there. Hex helpers back SHA-256 fingerprints
+in the registry (D022); CRC32 backs gzip/tar and CRC-32C backs odb's page checksums.
+Both checksums run in the runtime: CRC32 over zlib, CRC-32C over the SSE4.2 / ARMv8
+crc32 instruction with a table loop where the instruction is missing."""
+
+
+extern "C" def dragon_crc32_range(data: bytes, start: int, length: int, value: int) -> int
+extern "C" def dragon_crc32c_range(data: bytes, start: int, length: int, value: int) -> int
 
 
 const _HEX_LOWER: str = "0123456789abcdef"
@@ -71,37 +78,22 @@ def a2b_hex(data: bytes | str) -> bytes {
 }
 
 
-def _build_crc32_table() -> list[int] {
-    t: list[int] = [0] * 256
-    i: int = 0
-    while i < 256 {
-        c: int = i
-        k: int = 0
-        while k < 8 {
-            if c & 1 != 0 {
-                c = (c >> 1) ^ 0xEDB88320
-            } else {
-                c = c >> 1
-            }
-            k = k + 1
-        }
-        t[i] = c
-        i = i + 1
-    }
-    return t
+def crc32(data: bytes, value: int = 0) -> int {
+    """IEEE 802.3 CRC32, the one gzip, PNG and zip headers carry."""
+    return dragon_crc32_range(data, 0, len(data), value)
 }
 
-const _CRC32_TABLE: list[int] = _build_crc32_table()
+
+def crc32c(data: bytes, value: int = 0) -> int {
+    """Castagnoli CRC-32C. `value` is the running checksum, so crc32c(tail, crc32c(head))
+    equals crc32c(head + tail)."""
+    return dragon_crc32c_range(data, 0, len(data), value)
+}
 
 
-def crc32(data: bytes, value: int = 0) -> int {
-    c: int = (~value) & 0xFFFFFFFF
-    n: int = len(data)
-    i: int = 0
-    while i < n {
-        idx: int = (c ^ data[i]) & 0xFF
-        c = (c >> 8) ^ _CRC32_TABLE[idx]
-        i = i + 1
-    }
-    return (~c) & 0xFFFFFFFF
+def crc32c_range(data: bytes, start: int, length: int, value: int = 0) -> int {
+    """CRC-32C over data[start:start + length], continuing from `value`. Chained ranges
+    that cover the buffer end at the same checksum as crc32c over the whole of it.
+    Raises IndexError when the range leaves the buffer."""
+    return dragon_crc32c_range(data, start, length, value)
 }

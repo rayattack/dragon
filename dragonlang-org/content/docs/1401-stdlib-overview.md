@@ -153,7 +153,7 @@ Reading and writing structured data: JSON, CSV, INI, TOML, and binary.
 | `configparser` | INI files - sections, key-values, comments | [Data Formats](/docs/1404-stdlib-data) |
 | `tomllib` | Read-only TOML, returning a typed `TomlDoc` | [Data Formats](/docs/1404-stdlib-data) |
 | `base64` | RFC 4648 Base64, plus URL-safe variants | [Data Formats](/docs/1404-stdlib-data) |
-| `binascii` | `hexlify`/`unhexlify` and CRC32 over bytes | [Data Formats](/docs/1404-stdlib-data) |
+| `binascii` | `hexlify`/`unhexlify`, CRC32 and CRC-32C over bytes | [Data Formats](/docs/1404-stdlib-data) |
 | `struct` | Pack/unpack primitives to/from bytes | [Data Formats](/docs/1404-stdlib-data) |
 | `gzip` | gzip compress/decompress | [Data Formats](/docs/1404-stdlib-data) |
 | `zipfile` | PKWARE ZIP archive read/write | [Data Formats](/docs/1404-stdlib-data) |

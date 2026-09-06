@@ -299,4 +299,171 @@ class ZipTraversalTests(TestCase) {
 }
 
 
-main([ZipFileTests(), TarTraversalTests(), ZipTraversalTests()])
+class ChecksumTests(TestCase) {
+    """binascii CRC-32 and CRC-32C - known answers, the chaining law, the
+    8-byte fast path with every tail length, odb's page-plus-trailer shape,
+    the out-of-range guards, and agreement with a pure-Dragon table loop."""
+
+    def _reference_table() -> list[int] {
+        t: list[int] = [0] * 256
+        n: int = 0
+        while n < 256 {
+            c: int = n
+            k: int = 0
+            while k < 8 {
+                if (c & 1) != 0 {
+                    c = (c >> 1) ^ 0x82F63B78
+                } else {
+                    c = c >> 1
+                }
+                k = k + 1
+            }
+            t[n] = c
+            n = n + 1
+        }
+        return t
+    }
+
+    def _reference(data: bytes, value: int) -> int {
+        table: list[int] = self._reference_table()
+        c: int = (value ^ 0xFFFFFFFF) & 0xFFFFFFFF
+        i: int = 0
+        n: int = len(data)
+        while i < n {
+            idx: int = (c ^ data[i]) & 0xFF
+            c = (table[idx] ^ (c >> 8)) & 0xFFFFFFFF
+            i = i + 1
+        }
+        return (c ^ 0xFFFFFFFF) & 0xFFFFFFFF
+    }
+
+    def _pattern(n: int) -> bytes {
+        out: list[int] = [0] * n
+        i: int = 0
+        while i < n {
+            out[i] = (i * 7 + 3) & 0xFF
+            i = i + 1
+        }
+        return bytes(out)
+    }
+
+    def _pseudo_random(n: int, seed: int) -> bytes {
+        out: list[int] = [0] * n
+        state: int = seed
+        i: int = 0
+        while i < n {
+            state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+            out[i] = (state >> 16) & 0xFF
+            i = i + 1
+        }
+        return bytes(out)
+    }
+
+    def test_crc32c_check_vector() {
+        self.assertEqual(binascii.crc32c(b"123456789"), 0xE3069283)
+    }
+
+    def test_crc32_check_vector() {
+        self.assertEqual(binascii.crc32(b"123456789"), 0xCBF43926)
+    }
+
+    def test_empty_and_single_byte() {
+        self.assertEqual(binascii.crc32c(b""), 0)
+        self.assertEqual(binascii.crc32(b""), 0)
+        self.assertEqual(binascii.crc32c(b"a"), 0xC1D04330)
+        self.assertEqual(binascii.crc32(b"a"), 0xE8B7BE43)
+    }
+
+    def test_seed_carries_like_python() {
+        const data: bytes = self._pattern(300)
+        const head: int = binascii.crc32c(data[0:100])
+        self.assertEqual(binascii.crc32c(data[100:300], head), binascii.crc32c(data))
+    }
+
+    def test_range_covers_whole_buffer() {
+        const data: bytes = self._pattern(777)
+        self.assertEqual(binascii.crc32c_range(data, 0, 777, 0), binascii.crc32c(data))
+    }
+
+    def test_chaining_law_with_midpoint_and_empty_range() {
+        const data: bytes = self._pattern(1000)
+        const whole: int = binascii.crc32c(data)
+        const a: int = binascii.crc32c_range(data, 0, 137, 0)
+        const b: int = binascii.crc32c_range(data, 137, 0, a)
+        const c: int = binascii.crc32c_range(data, 137, 400, b)
+        const d: int = binascii.crc32c_range(data, 537, 463, c)
+        self.assertEqual(b, a)
+        self.assertEqual(d, whole)
+    }
+
+    def test_every_tail_length() {
+        n: int = 0
+        while n <= 19 {
+            const chunk: bytes = self._pattern(n)
+            self.assertEqual(binascii.crc32c(chunk), self._reference(chunk, 0),
+                             f"crc32c disagrees with the table loop at length {n}")
+            n = n + 1
+        }
+    }
+
+    def test_unaligned_start_every_offset() {
+        const data: bytes = self._pattern(64)
+        start: int = 0
+        while start < 8 {
+            self.assertEqual(binascii.crc32c_range(data, start, 64 - start, 0),
+                             self._reference(data[start:64], 0),
+                             f"crc32c_range disagrees at start {start}")
+            start = start + 1
+        }
+    }
+
+    def test_odb_page_with_trailer_prefix() {
+        const page: bytes = self._pattern(12) + bytes([0] * 4080)
+        self.assertEqual(len(page), 4092)
+        const trailer: int = binascii.crc32c_range(page, 0, 12, 0)
+        const both: int = binascii.crc32c_range(page, 12, 4080, trailer)
+        self.assertEqual(both, binascii.crc32c(page))
+        self.assertEqual(both, self._reference(page, 0))
+    }
+
+    def test_negative_start_raises() {
+        const data: bytes = self._pattern(32)
+        def run() {
+            binascii.crc32c_range(data, -1, 4, 0)
+        }
+        self.assertRaises(IndexError, run)
+    }
+
+    def test_negative_length_raises() {
+        const data: bytes = self._pattern(32)
+        def run() {
+            binascii.crc32c_range(data, 4, -1, 0)
+        }
+        self.assertRaises(IndexError, run)
+    }
+
+    def test_range_past_the_end_raises() {
+        const data: bytes = self._pattern(32)
+        def run() {
+            binascii.crc32c_range(data, 30, 4, 0)
+        }
+        self.assertRaises(IndexError, run)
+    }
+
+    def test_agrees_with_reference_on_random_data() {
+        seed: int = 1
+        while seed <= 8 {
+            const data: bytes = self._pseudo_random(255 + seed * 37, seed)
+            self.assertEqual(binascii.crc32c(data), self._reference(data, 0),
+                             f"crc32c disagrees with the table loop for seed {seed}")
+            const head: int = binascii.crc32c_range(data, 0, 61, 0)
+            self.assertEqual(binascii.crc32c_range(data, 61, len(data) - 61, head),
+                             self._reference(data, 0),
+                             f"chained crc32c_range disagrees for seed {seed}")
+            seed = seed + 1
+        }
+    }
+}
+
+
+main([ZipFileTests(), TarTraversalTests(), ZipTraversalTests(), ChecksumTests()])

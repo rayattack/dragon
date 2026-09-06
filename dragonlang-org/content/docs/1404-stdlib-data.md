@@ -534,9 +534,53 @@ import binascii
 print(binascii.crc32("hello".encode("utf-8")))   # 907060870
 ```
 
+### CRC-32C
+
+`crc32c(data: bytes, value: int = 0) -> int` is the Castagnoli polynomial
+(`0x82F63B78`), the checksum storage engines put on a page because the CPU has
+an instruction for it. It answers the standard check value:
+
+```dragon
+import binascii
+
+print(binascii.crc32c(b"123456789"))   # 3808858755, that is 0xE3069283
+```
+
+`crc32c_range(data: bytes, start: int, length: int, value: int = 0) -> int`
+checksums `data[start:start + length]` without slicing it first, so a page and
+its trailer are two calls over one buffer and no copy is made.
+
+**The chaining law.** `value` is the running checksum, exactly as `crc32`'s
+`value` is. Feeding one call's result into the next as `value` over adjacent
+ranges gives the same number as one call over the whole span:
+
+```dragon
+import binascii
+
+const page: bytes = bytes([7] * 4092)
+
+const head: int = binascii.crc32c_range(page, 0, 12, 0)  # the trailer prefix
+const whole: int = binascii.crc32c_range(page, 12, 4080, head)
+
+print(whole == binascii.crc32c(page))    # True
+```
+
+That holds for any split, at any offset, including a zero-length range (which
+returns `value` untouched). A range that leaves the buffer - a negative
+`start`, a negative `length`, or `start + length` past the end - raises
+`IndexError`, the same error a bad `page[i]` raises.
+
+Both checksums run in the runtime, not in a Dragon table loop: `crc32` over
+zlib, `crc32c` over the SSE4.2 `crc32` instruction on x86-64 and the ARMv8
+crc32 extension on aarch64, with a table loop where the CPU has neither. On a
+4092-byte page that is about half an instruction per byte against roughly
+thirty-six for the same loop hand-written in Dragon.
+
 > **Differs from Python.** The functions match (`hexlify`, `unhexlify`,
 > `crc32`, `b2a_hex`, `a2b_hex`). `unhexlify` accepting a `str` directly is a
-> small ergonomic addition over CPython, which wants bytes.
+> small ergonomic addition over CPython, which wants bytes. `crc32c` and
+> `crc32c_range` have no CPython counterpart at all - `binascii` there stops
+> at CRC32.
 
 ## struct
 

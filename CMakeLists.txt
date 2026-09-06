@@ -151,6 +151,7 @@ add_library(dragon_runtime STATIC
     lib/Runtime/runtime_fileio.cpp
     lib/Runtime/runtime_zlib.cpp
     lib/Runtime/runtime_zstd.cpp
+    lib/Runtime/runtime_checksum.cpp
     lib/Runtime/runtime_box.cpp
     lib/Runtime/runtime_sqltemplate.cpp
     lib/Runtime/runtime_sqlite.cpp
