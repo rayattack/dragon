@@ -120,6 +120,8 @@ Remaining arguments are processed left-to-right:
 | `--dump-tokens`  | Set `dumpTokens = true`                           |
 | `-I <dir>`       | Append to `searchPaths` (consumes next argument)  |
 | `--site-packages`| Set `enableSitePackages = true`                   |
+| `-mcpu=<name>`   | Set `targetCpu` (`native` resolves to the host CPU and its features; `-march=` and `-mtune=` are rejected with a hint pointing at `-mcpu=`) |
+| `--vectorize-report` | Set `vectorizeReport = true`; after `compileToObject` the driver prints `CodeGen::vectorizeReport()` to stderr, one line per loop |
 | (non-dash arg)   | Append to `inputFiles`                            |
 
 `parseArgs` returns `true` only if at least one input file was provided.

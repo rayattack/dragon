@@ -1,0 +1,209 @@
+from unittest import TestCase, main
+
+COUNT: int = 4099
+HALF: int = COUNT // 2
+SCALE: float = 1.5
+
+
+def make_ints(n: int) -> list[int] {
+    xs: list[int] = []
+    for i in range(n) {
+        xs.append(i)
+    }
+    return xs
+}
+
+
+def make_floats(n: int) -> list[float] {
+    xs: list[float] = []
+    for i in range(n) {
+        xs.append(float(i))
+    }
+    return xs
+}
+
+
+def sum_indexed(xs: list[int]) -> int {
+    total: int = 0
+    for i in range(len(xs)) {
+        total += xs[i]
+    }
+    return total
+}
+
+
+def sum_foreach(xs: list[int]) -> int {
+    total: int = 0
+    for x in xs {
+        total += x
+    }
+    return total
+}
+
+
+def scale_in_place(xs: list[float], k: float) -> None {
+    for i in range(len(xs)) {
+        xs[i] = xs[i] * k
+    }
+}
+
+
+def scale_into(a: list[float], c: list[float], k: float) -> None {
+    for i in range(len(a)) {
+        c[i] = a[i] * k
+    }
+}
+
+
+def fsum_indexed(xs: list[float]) -> float {
+    total: float = 0.0
+    for i in range(len(xs)) {
+        total += xs[i]
+    }
+    return total
+}
+
+
+def fsum_foreach(xs: list[float]) -> float {
+    total: float = 0.0
+    for x in xs {
+        total += x
+    }
+    return total
+}
+
+
+def dot(a: list[float], b: list[float]) -> float {
+    total: float = 0.0
+    for i in range(len(a)) {
+        total += a[i] * b[i]
+    }
+    return total
+}
+
+
+def triangular(n: int) -> int {
+    return n * (n - 1) // 2
+}
+
+
+def _scale_into_short() {
+    a: list[float] = make_floats(COUNT)
+    c: list[float] = make_floats(HALF)
+    scale_into(a, c, SCALE)
+}
+
+
+class IntSumTests(TestCase) {
+    def test_indexed_and_foreach_agree() {
+        xs: list[int] = make_ints(COUNT)
+        self.assertEqual(sum_indexed(xs), triangular(COUNT))
+        self.assertEqual(sum_foreach(xs), triangular(COUNT))
+    }
+
+    def test_empty_and_short() {
+        self.assertEqual(sum_indexed([]), 0)
+        self.assertEqual(sum_foreach([]), 0)
+        self.assertEqual(sum_foreach([7]), 7)
+        self.assertEqual(sum_indexed([1, 2, 3]), 6)
+    }
+
+    def test_foreach_sees_growth_through_an_alias() {
+        xs: list[int] = [1, 2, 3]
+        alias: list[int] = xs
+        seen: int = 0
+        for x in xs {
+            seen += 1
+            if len(alias) < 6 {
+                alias.append(x)
+            }
+        }
+        self.assertEqual(seen, 6)
+        self.assertEqual(sum_foreach(xs), 12)
+    }
+}
+
+
+@fastmath
+def fsum_fast(xs: list[float]) -> float {
+    total: float = 0.0
+    for x in xs {
+        total += x
+    }
+    return total
+}
+
+
+@fastmath
+def dot_fast(a: list[float], b: list[float]) -> float {
+    total: float = 0.0
+    for i in range(len(a)) {
+        total += a[i] * b[i]
+    }
+    return total
+}
+
+
+class FastMathTests(TestCase) {
+    def test_fastmath_sum_is_exact_for_integer_values() {
+        xs: list[float] = make_floats(COUNT)
+        self.assertEqual(fsum_fast(xs), float(triangular(COUNT)))
+        self.assertEqual(fsum_fast(xs), fsum_indexed(xs))
+    }
+
+    def test_fastmath_dot_is_exact_for_integer_values() {
+        a: list[float] = make_floats(COUNT)
+        self.assertEqual(dot_fast(a, a), dot(a, a))
+    }
+
+    def test_fastmath_empty_and_short() {
+        self.assertEqual(fsum_fast([]), 0.0)
+        self.assertEqual(fsum_fast([2.5]), 2.5)
+        self.assertEqual(dot_fast([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 32.0)
+    }
+}
+
+
+class FloatMapTests(TestCase) {
+    def test_scale_in_place() {
+        xs: list[float] = make_floats(COUNT)
+        scale_in_place(xs, SCALE)
+        self.assertEqual(xs[0], 0.0)
+        self.assertEqual(xs[1], SCALE)
+        self.assertEqual(xs[COUNT - 1], float(COUNT - 1) * SCALE)
+    }
+
+    def test_scale_into() {
+        a: list[float] = make_floats(COUNT)
+        c: list[float] = make_floats(COUNT)
+        scale_into(a, c, SCALE)
+        self.assertEqual(c[1], SCALE)
+        self.assertEqual(c[COUNT - 1], float(COUNT - 1) * SCALE)
+    }
+
+    def test_scale_into_shorter_target_raises() {
+        self.assertRaises(IndexError, _scale_into_short)
+    }
+}
+
+
+class FloatSumTests(TestCase) {
+    def test_strict_sum_is_exact_for_integer_values() {
+        xs: list[float] = make_floats(COUNT)
+        self.assertEqual(fsum_indexed(xs), float(triangular(COUNT)))
+        self.assertEqual(fsum_foreach(xs), float(triangular(COUNT)))
+    }
+
+    def test_dot() {
+        a: list[float] = make_floats(COUNT)
+        b: list[float] = make_floats(COUNT)
+        expected: float = 0.0
+        for i in range(COUNT) {
+            expected += float(i) * float(i)
+        }
+        self.assertEqual(dot(a, b), expected)
+    }
+}
+
+
+main([IntSumTests(), FloatMapTests(), FloatSumTests(), FastMathTests()])

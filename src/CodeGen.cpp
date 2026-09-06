@@ -1,4 +1,9 @@
 #include "CodeGenImpl.h"
+#include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/TargetParser/SubtargetFeature.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include <algorithm>
 #include <cstdlib>
@@ -743,6 +748,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
         }
     }
 
+    impl_->finalizeDebugLines();
+
     std::string verifyErr;
     llvm::raw_string_ostream verifyStream(verifyErr);
     if (llvm::verifyModule(*impl_->module, &verifyStream)) {
@@ -788,25 +795,137 @@ bool CodeGen::writeBitcode(const std::string& filename) {
     return true;
 }
 
-bool CodeGen::compileToObject(const std::string& filename) {
-    auto targetTriple = impl_->module->getTargetTriple();
-    std::string error;
-    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, error);
-    if (!target) {
-        impl_->addError("Target lookup failed: " + error);
-        return false;
+bool CodeGen::Impl::hasFastMathDecorator(const FunctionDecl& decl) {
+    for (const auto& decorator : decl.decorators) {
+        auto* name = dynamic_cast<NameExpr*>(decorator.get());
+        if (name && name->name == "fastmath") return true;
     }
+    return false;
+}
 
-    auto cpu = "generic";
-    auto features = "";
+void CodeGen::Impl::setStatementDebugLoc(const ASTNode& node) {
+    const SourceLocation& loc = node.location();
+    if (!emitsDebugLines() || !currentFunction || loc.line == 0) return;
+    std::string path = loc.filename.empty() ? entryModulePtr->filename
+                                            : loc.filename;
+    if (path.empty()) path = "<source>";
+    if (!diBuilder) {
+        diBuilder = std::make_unique<llvm::DIBuilder>(*module);
+        module->addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                              llvm::DEBUG_METADATA_VERSION);
+    }
+    llvm::DIFile*& file = diFiles[path];
+    if (!file) {
+        std::error_code ec;
+        file = diBuilder->createFile(
+            path, std::filesystem::current_path(ec).string());
+        if (diFiles.size() == 1)
+            diBuilder->createCompileUnit(llvm::dwarf::DW_LANG_C, file, "dragon",
+                                         options.optimizationLevel > 0, "", 0);
+    }
+    auto* subprogram = currentFunction->getSubprogram();
+    if (!subprogram) {
+        auto* signature = diBuilder->createSubroutineType(
+            diBuilder->getOrCreateTypeArray({}));
+        subprogram = diBuilder->createFunction(
+            file, currentFunction->getName(), currentFunction->getName(), file,
+            loc.line, signature, loc.line, llvm::DINode::FlagZero,
+            llvm::DISubprogram::toSPFlags(currentFunction->hasLocalLinkage(),
+                                          true, options.optimizationLevel > 0));
+        currentFunction->setSubprogram(subprogram);
+    }
+    builder->SetCurrentDebugLocation(
+        llvm::DILocation::get(*context, loc.line, loc.column, subprogram));
+}
+
+void CodeGen::Impl::finalizeDebugLines() {
+    if (!diBuilder) return;
+    for (auto& fn : *module) {
+        auto* subprogram = fn.getSubprogram();
+        if (!subprogram) continue;
+        for (auto& inst : llvm::instructions(fn)) {
+            const llvm::DebugLoc& loc = inst.getDebugLoc();
+            if (loc && loc->getScope()->getSubprogram() == subprogram) continue;
+            inst.setDebugLoc(llvm::DILocation::get(
+                *context, subprogram->getLine(), 0, subprogram));
+        }
+    }
+    diBuilder->finalize();
+}
+
+static std::string defaultTargetCPU(const llvm::Triple& triple) {
+    if (triple.getArch() == llvm::Triple::x86_64) return "x86-64-v2";
+    if (triple.isAArch64() && triple.isOSDarwin()) return "apple-m1";
+    return "generic";
+}
+
+static llvm::CodeGenOptLevel codeGenOptLevel(int optimizationLevel) {
+    switch (optimizationLevel) {
+        case 0: return llvm::CodeGenOptLevel::None;
+        case 1: return llvm::CodeGenOptLevel::Less;
+        case 2: return llvm::CodeGenOptLevel::Default;
+        default: return llvm::CodeGenOptLevel::Aggressive;
+    }
+}
+
+llvm::TargetMachine* CodeGen::Impl::getTargetMachine() {
+    if (targetMachine) return targetMachine.get();
+    const llvm::Triple& triple = module->getTargetTriple();
+    std::string error;
+    auto* target = llvm::TargetRegistry::lookupTarget(triple, error);
+    if (!target) {
+        addError("Target lookup failed: " + error);
+        return nullptr;
+    }
+    std::string cpu = options.targetCpu.empty() ? defaultTargetCPU(triple)
+                                                : options.targetCpu;
+    std::string features;
+    if (options.targetCpu == "native") {
+        cpu = llvm::sys::getHostCPUName().str();
+        llvm::SubtargetFeatures hostFeatures;
+        for (const auto& feature : llvm::sys::getHostCPUFeatures())
+            hostFeatures.AddFeature(feature.first(), feature.second);
+        features = hostFeatures.getString();
+    }
+    std::unique_ptr<llvm::MCSubtargetInfo> subtarget(
+        target->createMCSubtargetInfo(triple, cpu, features));
+    if (!subtarget || !subtarget->isCPUStringValid(cpu)) {
+        addError("unknown -mcpu value '" + cpu + "' for target " +
+                 triple.str());
+        return nullptr;
+    }
     llvm::TargetOptions targetOpts;
-    auto rm = std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_);
-    auto targetMachine = target->createTargetMachine(
-        targetTriple, cpu, features, targetOpts, rm);
+    targetMachine.reset(target->createTargetMachine(
+        triple, cpu, features, targetOpts,
+        std::optional<llvm::Reloc::Model>(llvm::Reloc::PIC_), std::nullopt,
+        codeGenOptLevel(options.optimizationLevel)));
+    return targetMachine.get();
+}
 
-    impl_->module->setDataLayout(targetMachine->createDataLayout());
+void CodeGen::Impl::applyTargetAttributes(llvm::TargetMachine& tm) {
+    for (auto& fn : *module) {
+        if (fn.isDeclaration()) continue;
+        fn.addFnAttr("target-cpu", tm.getTargetCPU());
+        if (!tm.getTargetFeatureString().empty())
+            fn.addFnAttr("target-features", tm.getTargetFeatureString());
+    }
+}
 
+bool CodeGen::optimize() {
+    auto* tm = impl_->getTargetMachine();
+    if (!tm) return false;
+    impl_->module->setDataLayout(tm->createDataLayout());
+    impl_->applyTargetAttributes(*tm);
     impl_->runOptimizationPasses();
+    return true;
+}
+
+const std::vector<std::string>& CodeGen::vectorizeReport() const {
+    return impl_->vectorizeReportLines;
+}
+
+bool CodeGen::compileToObject(const std::string& filename) {
+    if (!optimize()) return false;
 
     if (const char* mode = std::getenv("DRAGON_DUMP_IR")) {
         if (std::string(mode) == "opt") {
@@ -826,7 +945,7 @@ bool CodeGen::compileToObject(const std::string& filename) {
     }
 
     llvm::legacy::PassManager pass;
-    if (targetMachine->addPassesToEmitFile(
+    if (impl_->targetMachine->addPassesToEmitFile(
             pass, dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
         impl_->addError("Target machine cannot emit object file");
         return false;

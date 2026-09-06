@@ -394,8 +394,7 @@ bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_dict_len"], {arg}, "len");
     } else if (isList) {
-        impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_list_len"], {arg}, "len");
+        impl_->lastValue = impl_->loadListSize(arg, "len");
     } else if (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy()) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_len"], {arg}, "len");

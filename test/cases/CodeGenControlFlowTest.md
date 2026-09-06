@@ -168,3 +168,112 @@ print("ok")
 s: str = "hello" + " world"
 del s
 ```
+
+#### :vectorize_int_sum
+
+```dr
+def total(xs: list[int]) -> int {
+    acc: int = 0
+    for i in range(len(xs)) {
+        acc += xs[i]
+    }
+    return acc
+}
+
+print(total([1, 2, 3]))
+```
+
+#### :vectorize_float_map
+
+```dr
+def double_in_place(xs: list[float]) -> None {
+    for i in range(len(xs)) {
+        xs[i] = xs[i] * 2.0
+    }
+}
+
+xs: list[float] = [1.0, 2.0, 3.0]
+double_in_place(xs)
+print(xs[2])
+```
+
+Float addition is not associative, so a strict float reduction must stay scalar
+without the explicit opt-in.
+
+#### :vectorize_float_sum_strict
+
+```dr
+def total(xs: list[float]) -> float {
+    acc: float = 0.0
+    for i in range(len(xs)) {
+        acc += xs[i]
+    }
+    return acc
+}
+
+print(total([1.0, 2.0, 3.0]))
+```
+
+The Pythonic `for x in xs` must lower to the same inline shape as the indexed
+loop so it vectorizes the same way.
+
+#### :vectorize_int_sum_foreach
+
+```dr
+def total(xs: list[int]) -> int {
+    acc: int = 0
+    for x in xs {
+        acc += x
+    }
+    return acc
+}
+
+print(total([1, 2, 3]))
+```
+
+#### :vectorize_float_sum_foreach_strict
+
+```dr
+def total(xs: list[float]) -> float {
+    acc: float = 0.0
+    for x in xs {
+        acc += x
+    }
+    return acc
+}
+
+print(total([1.0, 2.0, 3.0]))
+```
+
+`@fastmath` is the explicit opt-in that lets the compiler reassociate the
+float additions, so the same reduction vectorizes.
+
+#### :vectorize_float_sum_fastmath
+
+```dr
+@fastmath
+def total(xs: list[float]) -> float {
+    acc: float = 0.0
+    for i in range(len(xs)) {
+        acc += xs[i]
+    }
+    return acc
+}
+
+print(total([1.0, 2.0, 3.0]))
+```
+
+#### :vectorize_float_sum_foreach_fastmath
+
+```dr
+@fastmath
+def total(xs: list[float]) -> float {
+    acc: float = 0.0
+    for x in xs {
+        acc += x
+    }
+    return acc
+}
+
+print(total([1.0, 2.0, 3.0]))
+```

@@ -34,6 +34,7 @@ bool isPrimElemKind(Type::Kind k) {
 }
 
 void CodeGen::visit(AssignStmt& node) {
+    impl_->setStatementDebugLoc(node);
     if (node.targets.empty()) return;
 
     impl_->lastClosureCallableType = nullptr;

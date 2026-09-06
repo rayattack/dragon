@@ -75,7 +75,9 @@ Flags:
 | `-o <file>` | output path (default: source name with `.dr` stripped) |
 | `-O0`..`-O3` | optimization level (default `-O0`) |
 | `--release` | optimize your program aggressively (use for anything you measure or ship); the runtime archive is always `-O3`, whatever the tree's build type |
-| `-g` | debug info |
+| `-mcpu=<name>` | target CPU. Defaults to `x86-64-v2` on x86_64 (SSE4.2 and POPCNT: 2009 hardware and newer, 128-bit vectors), `apple-m1` on Apple Silicon and `generic` elsewhere. `-mcpu=native` uses everything the building machine has (AVX2 on most desktops: 256-bit vectors) and stops the binary being portable; `-mcpu=x86-64-v3` is the portable AVX2 level; `-mcpu=x86-64` restores the 2003 baseline. `-march=` and `-mtune=` are rejected with a hint: Dragon spells the CPU selector `-mcpu=` |
+| `-g` | debug info (line tables: file and line for every statement) |
+| `--vectorize-report` | print one line per loop after optimizing: `vectorized 4x at file:line` or `not vectorized at file:line: <reason>`; a strict float reduction names the `@fastmath` opt-in. Needs `-O2` or `-O3`, and says so otherwise |
 | `-f` | force Python-surface parsing (for `.py` content) |
 | `-I <dir>` / `-I<dir>` | add a module search path (repeatable; attached and separated spellings are the same flag) |
 | `--site-packages` | search Python site-packages for typed `.py` modules (last resort) |
@@ -1030,6 +1032,15 @@ A decorator's parameter/return may be spelled as the precise `Callable[...]` or
 as bare `ptr` when the shape does not matter. Method decorators: `@property`,
 `@name.setter`, `@staticmethod`, `@classmethod` (section 13).
 
+`@fastmath` is a compiler directive, not a call: it takes no arguments, wraps
+nothing, and marks the function (or method) it sits on. Inside that function's
+body the compiler may reassociate float additions and multiplications and fuse
+`a * b + c` into one FMA, which is what lets a float reduction (`total += x`,
+`total += a[i] * b[i]`) vectorize (section 28). Results may differ from the
+strict left-to-right order in the last bits; NaN and infinity keep their
+meaning. Without it a float reduction stays scalar, on purpose, and
+`--vectorize-report` says so.
+
 ## 17. Iterators and generators
 
 A function containing `yield` is a generator; calling it returns a lazy object
@@ -1867,6 +1878,26 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
 - Measured reality: compute-bound code (recursion, float loops) runs at parity
   with Rust at `-O2`; current known gaps are allocation-churn and str-keyed
   dict workloads (runtime data structures, being driven down).
+- SIMD: at `-O2` and above ordinary loops over `list[int]` and `list[float]`
+  auto-vectorize, in both spellings (`for x in xs` and `for i in range(len(xs))`
+  lower to the same inline loads, so the Pythonic loop is the fast loop). What
+  vectorizes by default: integer reductions (`total += x`), elementwise maps
+  that write back into the list they read (`xs[i] = xs[i] * k`), and any loop
+  body made of loads, arithmetic and stores with no call in it. What does not:
+  a float reduction (`total += x` over floats), because float addition is not
+  associative and reordering it changes the last bits; a loop that calls
+  anything (`xs.append(...)`, `print`, a method); and a map into a second list
+  (`c[i] = a[i] * k`), whose bounds check on `c` is a second loop exit. The
+  opt-in for float reductions is `@fastmath` on the function: it lets the
+  compiler reassociate the float additions and multiplications in that
+  function's body and fuse `a * b + c` into one FMA, so sums and dot products
+  vectorize; results may differ from the strict order in the last bits, and
+  NaN and infinity behave as before. Width follows the CPU: 128-bit (2 lanes of
+  `float`/`int`) at the `x86-64-v2` default, 256-bit (4 lanes) with
+  `-mcpu=native` or `-mcpu=x86-64-v3` on an AVX2 machine. `--vectorize-report`
+  prints one line per loop, `vectorized 4x at file:line` or
+  `not vectorized at file:line: <reason>`, and a strict float reduction's line
+  names the opt-in.
 
 ## 29. What Dragon rejects (deltas from Python, one table)
 

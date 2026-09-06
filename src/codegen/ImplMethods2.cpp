@@ -1,6 +1,9 @@
 #include "../CodeGenImpl.h"
+#include "llvm/IR/DiagnosticHandler.h"
+#include "llvm/IR/DiagnosticInfo.h"
 #include <cstdlib>
 #include <map>
+#include <tuple>
 
 namespace dragon {
 namespace {
@@ -1725,6 +1728,49 @@ llvm::AllocaInst* CodeGen::Impl::bindListElemTyped(
         return alloca;
     }
 
+llvm::Value* CodeGen::Impl::loadListSize(llvm::Value* list,
+                                         const llvm::Twine& name) {
+        auto* tbaaHdrTag = llvm::MDNode::get(*context,
+            {tbaaListHeader, tbaaListHeader,
+             llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Type, 0))});
+        auto* sizeGEP = builder->CreateGEP(i64Type, list,
+            llvm::ConstantInt::get(i64Type, 3), name + ".gep");
+        auto* size = builder->CreateLoad(i64Type, sizeGEP, name);
+        size->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaHdrTag);
+        return size;
+    }
+
+llvm::Value* CodeGen::Impl::loadListData(llvm::Value* list,
+                                         const llvm::Twine& name) {
+        auto* tbaaHdrTag = llvm::MDNode::get(*context,
+            {tbaaListHeader, tbaaListHeader,
+             llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Type, 0))});
+        auto* dataGEP = builder->CreateGEP(i64Type, list,
+            llvm::ConstantInt::get(i64Type, 2), name + ".gep");
+        auto* dataRaw = builder->CreateLoad(i64Type, dataGEP, name + ".raw");
+        dataRaw->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaHdrTag);
+        return builder->CreateIntToPtr(dataRaw, i8PtrType, name);
+    }
+
+llvm::AllocaInst* CodeGen::Impl::bindListElemInline(
+    llvm::Function* func,
+    llvm::Value* listVal,
+    llvm::Value* idx,
+    const std::string& varName,
+    Type::Kind elemKind) {
+        llvm::Type* elemType = elemKind == Type::Kind::Float ? f64Type : i64Type;
+        auto* tbaaDataTag = llvm::MDNode::get(*context,
+            {tbaaListData, tbaaListData,
+             llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Type, 0))});
+        auto* data = loadListData(listVal, "list.data");
+        auto* elemGEP = builder->CreateGEP(elemType, data, idx, varName + ".gep");
+        auto* elem = builder->CreateLoad(elemType, elemGEP, varName);
+        elem->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaDataTag);
+        auto* alloca = createEntryAlloca(func, varName, elemType);
+        builder->CreateStore(elem, alloca);
+        return alloca;
+    }
+
 llvm::AllocaInst* CodeGen::Impl::bindListElemByTypeKind(
     llvm::Function* func,
     llvm::Value* listVal,
@@ -1894,7 +1940,94 @@ llvm::Function* CodeGen::Impl::getOrDeclareRuntime(const std::string& name,
         return func;
     }
 
+namespace {
+
+using LoopKey = std::pair<std::string, const llvm::Value*>;
+
+struct LoopRemark {
+    std::string file;
+    unsigned line = 0;
+    std::string width;
+    std::string reason;
+    unsigned reasonLine = 0;
+};
+
+std::string vectorWidth(const llvm::DiagnosticInfoOptimizationBase& remark) {
+    for (const auto& arg : remark.getArgs())
+        if (arg.Key == "VectorizationFactor") return arg.Val;
+    return "";
+}
+
+const llvm::BasicBlock* innermostLoopHeader(const llvm::Function& fn,
+                                            const llvm::BasicBlock* block) {
+    llvm::DominatorTree dominators(const_cast<llvm::Function&>(fn));
+    llvm::LoopInfo loops(dominators);
+    if (auto* loop = loops.getLoopFor(block)) return loop->getHeader();
+    return block;
+}
+
+struct VectorizeRemarkHandler : llvm::DiagnosticHandler {
+    std::map<LoopKey, LoopRemark>& loops;
+    explicit VectorizeRemarkHandler(std::map<LoopKey, LoopRemark>& loops)
+        : loops(loops) {}
+    bool isAnalysisRemarkEnabled(llvm::StringRef pass) const override {
+        return pass == "loop-vectorize";
+    }
+    bool isMissedOptRemarkEnabled(llvm::StringRef pass) const override {
+        return pass == "loop-vectorize";
+    }
+    bool isPassedOptRemarkEnabled(llvm::StringRef pass) const override {
+        return pass == "loop-vectorize";
+    }
+    bool isAnyRemarkEnabled() const override { return true; }
+    bool handleDiagnostics(const llvm::DiagnosticInfo& info) override {
+        auto* remark = llvm::dyn_cast<llvm::DiagnosticInfoIROptimization>(&info);
+        if (!remark) return false;
+        if (remark->getPassName() != "loop-vectorize" ||
+            !remark->isLocationAvailable())
+            return true;
+        auto location = remark->getLocation();
+        const llvm::Function& fn = remark->getFunction();
+        auto& loop = loops[{fn.getName().str(),
+                            innermostLoopHeader(fn, remark->getCodeRegion())}];
+        std::string message = remark->getMsg();
+        bool loopLevel = remark->isPassed() || message == "loop not vectorized";
+        if (loopLevel || loop.line == 0) {
+            loop.file = location.getRelativePath().str();
+            loop.line = location.getLine();
+        }
+        std::string width = remark->isPassed() ? vectorWidth(*remark) : "";
+        if (!width.empty()) {
+            loop.width = width;
+        } else if (loop.reason.empty() && !loopLevel) {
+            loop.reason = message;
+            loop.reasonLine = location.getLine();
+        }
+        return true;
+    }
+};
+
+std::string renderLoopRemark(const LoopRemark& loop) {
+    const std::string at = " at " + loop.file + ":" + std::to_string(loop.line);
+    if (!loop.width.empty()) return "vectorized " + loop.width + "x" + at;
+    std::string reason = loop.reason.empty() ? "loop not vectorized" : loop.reason;
+    const std::string prefix = "loop not vectorized: ";
+    if (reason.rfind(prefix, 0) == 0) reason = reason.substr(prefix.size());
+    if (loop.reasonLine != 0 && loop.reasonLine != loop.line)
+        reason += " (line " + std::to_string(loop.reasonLine) + ")";
+    if (reason.find("reorder floating-point operations") != std::string::npos)
+        reason += " (add @fastmath to the enclosing function to allow "
+                  "reassociation)";
+    return "not vectorized" + at + ": " + reason;
+}
+
+}
+
 void CodeGen::Impl::runOptimizationPasses() {
+        if (options.vectorizeReport && options.optimizationLevel < 2)
+            vectorizeReportLines.push_back(
+                "vectorize report: loops vectorize at -O2 or higher, this "
+                "build is -O" + std::to_string(options.optimizationLevel));
         if (options.optimizationLevel == 0) return;
 
         llvm::LoopAnalysisManager LAM;
@@ -1902,7 +2035,10 @@ void CodeGen::Impl::runOptimizationPasses() {
         llvm::CGSCCAnalysisManager CGAM;
         llvm::ModuleAnalysisManager MAM;
 
-        llvm::PassBuilder PB;
+        llvm::PipelineTuningOptions tuning;
+        tuning.LoopVectorization = options.optimizationLevel >= 2;
+        tuning.SLPVectorization = options.optimizationLevel >= 2;
+        llvm::PassBuilder PB(targetMachine.get(), tuning);
         PB.registerModuleAnalyses(MAM);
         PB.registerCGSCCAnalyses(CGAM);
         PB.registerFunctionAnalyses(FAM);
@@ -1919,7 +2055,20 @@ void CodeGen::Impl::runOptimizationPasses() {
 
         llvm::ModulePassManager MPM =
             PB.buildPerModuleDefaultPipeline(optLevel);
+        std::map<LoopKey, LoopRemark> loops;
+        if (options.vectorizeReport)
+            context->setDiagnosticHandler(
+                std::make_unique<VectorizeRemarkHandler>(loops));
         MPM.run(*module, MAM);
+        if (options.vectorizeReport) {
+            context->setDiagnosticHandler(
+                std::make_unique<llvm::DiagnosticHandler>());
+            std::set<std::tuple<std::string, unsigned, std::string>> ordered;
+            for (const auto& [key, loop] : loops)
+                ordered.insert({loop.file, loop.line, renderLoopRemark(loop)});
+            for (const auto& entry : ordered)
+                vectorizeReportLines.push_back(std::get<2>(entry));
+        }
 
         unsigned loopAlign = 32;
         if (const char* e = std::getenv("DRAGON_LOOP_ALIGN"))

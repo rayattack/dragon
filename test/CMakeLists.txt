@@ -145,6 +145,8 @@ foreach(_dr ${DR_TEST_FILES})
     add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr})
 endforeach()
 set_tests_properties(dr_test_green_parking PROPERTIES TIMEOUT 120)
+add_test(NAME dr_test_simd_release
+    COMMAND $<TARGET_FILE:dragon> run -O3 -mcpu=native ${CMAKE_CURRENT_SOURCE_DIR}/dr/test_simd.dr)
 
 # Linux-only: macOS accepts but does not enforce RLIMIT_AS, and it lazily grants
 # huge reservations Linux overcommit refuses, so no oom probe can fail there.

@@ -1032,6 +1032,7 @@ void Sema::defineBuiltins() {
     defineBuiltin("super");
     defineBuiltin("property", Symbol::Kind::Class);
     defineBuiltin("staticmethod", Symbol::Kind::Class);
+    defineBuiltin("fastmath", Symbol::Kind::Class);
     defineBuiltin("classmethod", Symbol::Kind::Class);
     defineBuiltin("dataclass", Symbol::Kind::Class);
     defineBuiltin("NamedTuple", Symbol::Kind::Class);

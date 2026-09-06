@@ -801,7 +801,7 @@ void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
     for (auto& dec : node.decorators) {
         if (auto* n = dynamic_cast<NameExpr*>(dec.get())) {
             if (n->name == "staticmethod" || n->name == "classmethod" ||
-                n->name == "property")
+                n->name == "property" || n->name == "fastmath")
                 continue;
         }
         if (auto* a = dynamic_cast<AttributeExpr*>(dec.get())) {
@@ -826,6 +826,7 @@ void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
 
 void CodeGen::visit(FunctionDecl& node) {
     if (!node.typeParams.empty()) return;
+    Impl::FastMathScope _fastMath(*impl_, node);
     const std::string externLinkName =
         node.externSymbol.empty() ? node.name : node.externSymbol;
     const std::string llvmName = node.isExtern
@@ -1133,7 +1134,7 @@ void CodeGen::visit(FunctionDecl& node) {
         for (auto& dec : node.decorators) {
             if (auto* n = dynamic_cast<NameExpr*>(dec.get())) {
                 if (n->name == "staticmethod" || n->name == "classmethod" ||
-                    n->name == "property")
+                    n->name == "property" || n->name == "fastmath")
                     continue;
             }
             if (auto* a = dynamic_cast<AttributeExpr*>(dec.get())) {

@@ -25,6 +25,7 @@ void CodeGen::visit(StarredExpr& node) {
 }
 
 void CodeGen::visit(ExprStmt& node) {
+    impl_->setStatementDebugLoc(node);
     if (emitReplEcho(node)) return;
 
     node.expr->accept(*this);
@@ -169,6 +170,7 @@ void CodeGen::visit(ExprStmt& node) {
 }
 
 void CodeGen::visit(IfStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto applyClassNarrow = [this](const std::string& var,
                                    const std::string& cls) -> std::function<void()> {
         if (var.empty() || cls.empty()) return []{};
@@ -334,6 +336,7 @@ void CodeGen::visit(IfStmt& node) {
 }
 
 void CodeGen::visit(WhileStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto* func = impl_->currentFunction;
     auto* condBB = llvm::BasicBlock::Create(*impl_->context, "whilecond", func);
     auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "whilebody", func);
@@ -448,6 +451,7 @@ void CodeGen::emitReturnBorrowIncref(Expr* value, llvm::Value* retVal) {
 }
 
 void CodeGen::visit(ReturnStmt& node) {
+    impl_->setStatementDebugLoc(node);
     if (impl_->generatorPtr) {
         impl_->emitExcFramePops(impl_->currentFnTryFrames());
         impl_->emitEarlyExitCleanups(*this, 0,
@@ -550,6 +554,7 @@ void CodeGen::visit(PassStmt&) {
 }
 
 void CodeGen::visit(DeferStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto* call = dynamic_cast<CallExpr*>(node.call.get());
     if (!call) {
         impl_->addError("defer requires a direct call", node.location());
@@ -796,6 +801,7 @@ void CodeGen::visit(DeferStmt& node) {
 }
 
 void CodeGen::visit(RaiseStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto* func = impl_->currentFunction;
 
     auto emitRaise = [&](llvm::Value* typeVal, llvm::Value* msgVal) {
@@ -999,6 +1005,7 @@ void CodeGen::visit(NonlocalStmt& node) {
     }
 }
 void CodeGen::visit(DeleteStmt& node) {
+    impl_->setStatementDebugLoc(node);
     for (size_t ti = 0; ti < node.targets.size(); ++ti) {
         auto& target = node.targets[ti];
         if (auto* nameExpr = dynamic_cast<NameExpr*>(target.get())) {

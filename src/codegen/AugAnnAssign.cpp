@@ -3,6 +3,7 @@
 namespace dragon {
 
 void CodeGen::visit(AugAssignStmt& node) {
+    impl_->setStatementDebugLoc(node);
     impl_->lastClosureCallableType = nullptr;
     impl_->lastValueIsType = false;
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
@@ -579,6 +580,7 @@ void CodeGen::visit(AugAssignStmt& node) {
 }
 
 void CodeGen::visit(AnnAssignStmt& node) {
+    impl_->setStatementDebugLoc(node);
     impl_->lastClosureCallableType = nullptr;
     impl_->lastValueIsType = false;
 

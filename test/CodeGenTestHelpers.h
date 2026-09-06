@@ -125,6 +125,44 @@ static std::string generateIR(const std::string& source) {
     return ir;
 }
 
+static std::string generateOptimizedIR(const std::string& source,
+                                       const CodeGenOptions& opts) {
+    auto module = parse(source);
+    if (!module) return "<parse failed>";
+    ImportGraph graph;
+    std::vector<Module*> depModules;
+    if (auto fe = frontendResolve(*module, true, graph, depModules);
+        !fe.empty()) return fe;
+    CodeGen codegen(opts);
+    if (!codegen.generate(*module, depModules) || !codegen.optimize()) {
+        std::string errs;
+        for (auto& d : codegen.diagnostics()) errs += d.message + "\n";
+        return "<codegen failed: " + errs + ">";
+    }
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    codegen.getLLVMModule()->print(os, nullptr);
+    return ir;
+}
+
+static std::vector<std::string> vectorizeReportFor(const std::string& source,
+                                                   CodeGenOptions opts) {
+    opts.vectorizeReport = true;
+    auto module = parse(source);
+    if (!module) return {"<parse failed>"};
+    ImportGraph graph;
+    std::vector<Module*> depModules;
+    if (auto fe = frontendResolve(*module, true, graph, depModules);
+        !fe.empty()) return {fe};
+    CodeGen codegen(opts);
+    if (!codegen.generate(*module, depModules) || !codegen.optimize()) {
+        std::string errs;
+        for (auto& d : codegen.diagnostics()) errs += d.message + "\n";
+        return {"<codegen failed: " + errs + ">"};
+    }
+    return codegen.vectorizeReport();
+}
+
 static std::string generateIRPy(const std::string& source) {
     auto module = parse(source, false);
     if (!module) return "<parse failed>";

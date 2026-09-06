@@ -3,7 +3,16 @@
 
 namespace dragon {
 
+static std::optional<Type::Kind> inlineListElemKind(const ForStmt& node) {
+    auto* listType = dynamic_cast<ListType*>(node.iterable->type.get());
+    if (!listType || !listType->elementType) return std::nullopt;
+    auto kind = listType->elementType->kind();
+    if (kind == Type::Kind::Int || kind == Type::Kind::Float) return kind;
+    return std::nullopt;
+}
+
 void CodeGen::visit(ForStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto* func = impl_->currentFunction;
     auto* targetName = dynamic_cast<NameExpr*>(node.target.get());
     auto* tupleTarget = dynamic_cast<TupleExpr*>(node.target.get());
@@ -783,8 +792,14 @@ void CodeGen::visit(ForStmt& node) {
     impl_->builder->SetInsertPoint(condBB);
     llvm::Value* currentIdx = impl_->builder->CreateLoad(impl_->i64Type, idxVar, "__i");
     llvm::Value* iterLoaded = impl_->builder->CreateLoad(impl_->i8PtrType, iterAlloca, "__iter");
+    std::optional<Type::Kind> inlineElemKind;
+    if (!isDictKeysIterable && !isDictItemsIterable && !isBytesIterable &&
+        !isStrIterable)
+        inlineElemKind = inlineListElemKind(node);
     llvm::Value* lenVal;
-    if (isStrIterable) {
+    if (inlineElemKind) {
+        lenVal = impl_->loadListSize(iterLoaded, "len");
+    } else if (isStrIterable) {
         lenVal = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_len"], {iterLoaded}, "len");
     } else if (isBytesIterable) {
@@ -1143,6 +1158,9 @@ void CodeGen::visit(ForStmt& node) {
         if (elemVarKind == Impl::VarKind::Type) {
             targetAlloca = impl_->bindListElemTyped(
                 func, iterLoaded, currentIdx, targetName->name, elemVarKind);
+        } else if (inlineElemKind && elemTypeKind == *inlineElemKind) {
+            targetAlloca = impl_->bindListElemInline(
+                func, iterLoaded, currentIdx, targetName->name, elemTypeKind);
         } else {
             targetAlloca = impl_->bindListElemByTypeKind(
                 func, iterLoaded, currentIdx, targetName->name, elemTypeKind);

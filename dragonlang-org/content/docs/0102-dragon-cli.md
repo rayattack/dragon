@@ -46,6 +46,9 @@ Common flags:
 | `--gc=rc` | Use refcounting + cycle collector (the default). |
 | `--gc=none` | Disable refcount emission. Useful for very short programs and benchmarks; do not ship binaries built this way. |
 | `--release` | Optimize your program aggressively. Slower compile, faster binary. It governs your code only: the runtime archive every binary links is always built at `-O3`, whatever the compiler's own build type. |
+| `-mcpu=NAME` | Target CPU. The default is `x86-64-v2` on x86_64 (SSE4.2 and POPCNT, so the binary runs on 2009 hardware and newer, with 128-bit vectors), `apple-m1` on Apple Silicon and `generic` elsewhere. `-mcpu=native` uses everything the building machine has (AVX2 on most desktops, 256-bit vectors) and stops the binary being portable; `-mcpu=x86-64-v3` is the portable AVX2 level. `-march=` and `-mtune=` are rejected with a hint: Dragon spells the CPU selector `-mcpu=`. |
+| `--vectorize-report` | After optimizing, print one line per loop: `vectorized 4x at file:line`, or `not vectorized at file:line: <reason>`. A strict float reduction's line names the `@fastmath` opt-in. Needs `-O2` or `--release`; at a lower level the report says so instead of staying silent. |
+| `-g` | Emit line tables (file and line for every statement), so backtraces and debuggers map to `.dr` lines. |
 | `--dump-ast` | Print the parsed AST to stdout and exit. Useful for debugging the parser. |
 | `--dump-tokens` | Print the token stream and exit. |
 

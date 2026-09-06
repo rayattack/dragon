@@ -8,6 +8,7 @@ static std::string handlerTypeLeaf(const std::string& spelled) {
 }
 
 void CodeGen::visit(AssertStmt& node) {
+    impl_->setStatementDebugLoc(node);
     node.test->accept(*this);
     llvm::Value* cond = impl_->toBool(impl_->lastValue, node.test.get());
     if (cond->getType() == impl_->i1Type) {
@@ -30,6 +31,7 @@ void CodeGen::visit(AssertStmt& node) {
 }
 
 void CodeGen::visit(TryStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto* func = impl_->currentFunction;
     int excId = impl_->excCounter++;
     std::string prefix = "try" + std::to_string(excId);
@@ -297,6 +299,7 @@ void CodeGen::visit(TryStmt& node) {
 }
 
 void CodeGen::visit(WithStmt& node) {
+    impl_->setStatementDebugLoc(node);
     struct CtxInfo {
         llvm::Value* val;
         bool isClassCtx;
@@ -494,6 +497,7 @@ void CodeGen::visit(WithStmt& node) {
 }
 
 void CodeGen::visit(MatchStmt& node) {
+    impl_->setStatementDebugLoc(node);
     auto* func = impl_->currentFunction;
 
     node.subject->accept(*this);

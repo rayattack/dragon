@@ -3,6 +3,12 @@
 
 namespace dragon {
 
+static void markPureGetter(llvm::Function* fn, llvm::MemoryEffects effects) {
+    fn->setMemoryEffects(effects);
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+}
+
 void CodeGen::Impl::init() {
     context = std::make_unique<llvm::LLVMContext>();
     module = std::make_unique<llvm::Module>("dragon_module", *context);
@@ -999,6 +1005,14 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_template_escape_url",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+
+    for (const char* lenGetter : {"dragon_list_len", "dragon_bytes_len",
+                                  "dragon_dict_len", "dragon_tuple_len",
+                                  "dragon_set_len"})
+        markPureGetter(runtimeFuncs[lenGetter],
+                       llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref));
+    markPureGetter(runtimeFuncs["dragon_str_len"],
+                   llvm::MemoryEffects::readOnly());
 }
 
 void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {

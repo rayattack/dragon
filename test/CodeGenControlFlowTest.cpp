@@ -1,5 +1,6 @@
 #include "CodeGenTestHelpers.h"
 #include "CodeBlock.h"
+#include <cctype>
 
 static std::string code(const std::string& block) {
     return extractCode("CodeGenControlFlowTest.md", block);
@@ -84,8 +85,10 @@ TEST(CodeGenTest, AssertStatement) {
 
 TEST(CodeGenTest, ForInList) {
     auto ir = generateIR("nums: list[int] = [1, 2, 3]\nfor x in nums {\n  print(x)\n}");
-    EXPECT_NE(ir.find("dragon_list_len"), std::string::npos);
-    EXPECT_NE(ir.find("dragon_list_get"), std::string::npos);
+    EXPECT_NE(ir.find("len.gep"), std::string::npos);
+    EXPECT_NE(ir.find("list.data"), std::string::npos);
+    EXPECT_EQ(ir.find("call i64 @dragon_list_len"), std::string::npos);
+    EXPECT_EQ(ir.find("call i64 @dragon_list_get("), std::string::npos);
 }
 
 TEST(CodeGenTest, ForInString) {
@@ -163,4 +166,90 @@ TEST(CodeGenE2E, DeleteStmtString) {
 TEST(CodeGenTest, DeleteStmtIR) {
     auto ir = generateIR(code("delete_stmt_ir"));
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos);
+}
+
+static CodeGenOptions releaseOptions() {
+    CodeGenOptions opts;
+    opts.optimizationLevel = 3;
+    return opts;
+}
+
+static bool hasVectorOf(const std::string& ir, const std::string& elem) {
+    const std::string lanes = " x " + elem + ">";
+    size_t pos = 0;
+    while ((pos = ir.find(lanes, pos)) != std::string::npos) {
+        size_t start = pos;
+        while (start > 0 && std::isdigit(static_cast<unsigned char>(ir[start - 1])))
+            --start;
+        if (start > 0 && start < pos && ir[start - 1] == '<') return true;
+        pos += lanes.size();
+    }
+    return false;
+}
+
+TEST(CodeGenVectorize, IntSumVectorizes) {
+    auto ir = generateOptimizedIR(code("vectorize_int_sum"), releaseOptions());
+    EXPECT_TRUE(hasVectorOf(ir, "i64")) << ir;
+}
+
+TEST(CodeGenVectorize, FloatMapVectorizes) {
+    auto ir = generateOptimizedIR(code("vectorize_float_map"), releaseOptions());
+    EXPECT_TRUE(hasVectorOf(ir, "double")) << ir;
+}
+
+TEST(CodeGenVectorize, StrictFloatSumStaysScalar) {
+    auto ir = generateOptimizedIR(code("vectorize_float_sum_strict"), releaseOptions());
+    EXPECT_FALSE(hasVectorOf(ir, "double")) << ir;
+}
+
+TEST(CodeGenVectorize, IntSumForeachVectorizes) {
+    auto ir = generateOptimizedIR(code("vectorize_int_sum_foreach"), releaseOptions());
+    EXPECT_TRUE(hasVectorOf(ir, "i64")) << ir;
+}
+
+TEST(CodeGenVectorize, StrictFloatSumForeachStaysScalar) {
+    auto ir = generateOptimizedIR(code("vectorize_float_sum_foreach_strict"), releaseOptions());
+    EXPECT_FALSE(hasVectorOf(ir, "double")) << ir;
+}
+
+TEST(CodeGenVectorize, FloatSumFastMathVectorizes) {
+    auto ir = generateOptimizedIR(code("vectorize_float_sum_fastmath"), releaseOptions());
+    EXPECT_TRUE(hasVectorOf(ir, "double")) << ir;
+}
+
+TEST(CodeGenVectorize, FloatSumForeachFastMathVectorizes) {
+    auto ir = generateOptimizedIR(code("vectorize_float_sum_foreach_fastmath"), releaseOptions());
+    EXPECT_TRUE(hasVectorOf(ir, "double")) << ir;
+}
+
+static std::string joinLines(const std::vector<std::string>& lines) {
+    std::string out;
+    for (const auto& line : lines) out += line + "\n";
+    return out;
+}
+
+static bool hasReportLine(const std::vector<std::string>& report,
+                          const std::string& prefix, const std::string& fragment) {
+    for (const auto& line : report) {
+        if (line.rfind(prefix, 0) == 0 && line.find(fragment) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+TEST(CodeGenVectorize, ReportNamesTheVectorizedLoopLine) {
+    auto report = vectorizeReportFor(code("vectorize_int_sum"), releaseOptions());
+    EXPECT_TRUE(hasReportLine(report, "vectorized ", "x at <test>:3")) << joinLines(report);
+}
+
+TEST(CodeGenVectorize, ReportNamesTheFastMathOptIn) {
+    auto report = vectorizeReportFor(code("vectorize_float_sum_strict"), releaseOptions());
+    EXPECT_TRUE(hasReportLine(report, "not vectorized at <test>:3:", "@fastmath"))
+        << joinLines(report);
+}
+
+TEST(CodeGenVectorize, ReportSaysWhenThePipelineDidNotRun) {
+    CodeGenOptions opts;
+    auto report = vectorizeReportFor(code("vectorize_int_sum"), opts);
+    EXPECT_TRUE(hasReportLine(report, "vectorize report:", "-O2 or higher")) << joinLines(report);
 }

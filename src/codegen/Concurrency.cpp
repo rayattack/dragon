@@ -369,6 +369,7 @@ void CodeGen::visit(YieldExpr& node) {
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 void CodeGen::visit(ThreadStmt& node) {
+    impl_->setStatementDebugLoc(node);
     impl_->needsPthread = true;
 
     if (!node.mutatedCapturedVars.empty()) {

@@ -535,6 +535,21 @@ bool Driver::parseArgs(int argc, char* argv[]) {
             impl_->options.optimizationLevel = 3;
         } else if (arg == "--release") {
             impl_->options.optimizationLevel = 3;
+        } else if (arg.rfind("-mcpu=", 0) == 0) {
+            impl_->options.targetCpu = arg.substr(6);
+            if (impl_->options.targetCpu.empty()) {
+                std::cerr << "-mcpu needs a CPU name: -mcpu=native (this "
+                             "machine) or a name such as -mcpu=x86-64-v3\n";
+                return false;
+            }
+        } else if (arg.rfind("-march=", 0) == 0 || arg.rfind("--march=", 0) == 0 ||
+                   arg.rfind("-mtune=", 0) == 0) {
+            std::cerr << "Unknown option: " << arg << "\n"
+                      << "Dragon spells the CPU selector -mcpu="
+                      << arg.substr(arg.find('=') + 1) << "\n";
+            return false;
+        } else if (arg == "--vectorize-report") {
+            impl_->options.vectorizeReport = true;
         } else if (arg == "-g") {
             impl_->options.debugInfo = true;
         } else if (arg == "-f") {
@@ -685,6 +700,11 @@ Options:
   -o <file>         Output file name
   -O0/-O1/-O2/-O3   Optimization level (default: 0)
   --release         Optimize aggressively (same as -O3)
+  -mcpu=<name>      Target CPU (default: x86-64-v2 on x86_64, apple-m1 on
+                    Apple Silicon, generic elsewhere). -mcpu=native uses
+                    everything this machine has; -mcpu=x86-64-v3 is AVX2
+  --vectorize-report  Say which loops vectorized and why the others did not
+                    (needs -O2 or -O3)
   -g                Generate debug information
   -f                Force Python mode (for .py files)
   -I <dir>          Add module search path (-I<dir> also works)
@@ -913,6 +933,8 @@ int Driver::buildFile(const std::string& filename) {
 
     CodeGenOptions codegenOpts;
     codegenOpts.optimizationLevel = impl_->options.optimizationLevel;
+    codegenOpts.targetCpu = impl_->options.targetCpu;
+    codegenOpts.vectorizeReport = impl_->options.vectorizeReport;
     codegenOpts.debugInfo = impl_->options.debugInfo;
     codegenOpts.outputFile = outputFile;
     {
@@ -1019,6 +1041,7 @@ int Driver::buildFile(const std::string& filename) {
         }
         return 1;
     }
+    for (const auto& line : codegen.vectorizeReport()) std::cerr << line << "\n";
 
     if (!codegen.linkExecutable(outputFile, objFile)) {
         objCleanup();

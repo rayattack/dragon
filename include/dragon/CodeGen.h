@@ -34,6 +34,10 @@ enum class GCMode { None, RC };
 struct CodeGenOptions {
     int optimizationLevel = 0;
 
+    std::string targetCpu;
+
+    bool vectorizeReport = false;
+
     GCMode gcMode = GCMode::RC;
 
     std::string targetTriple;
@@ -96,6 +100,8 @@ public:
     std::unique_ptr<llvm::LLVMContext> takeContext();
     bool writeIR(const std::string& filename);
     bool writeBitcode(const std::string& filename);
+    bool optimize();
+    const std::vector<std::string>& vectorizeReport() const;
     bool compileToObject(const std::string& filename);
     bool linkExecutable(const std::string& outputFile,
                         const std::string& objectFile);

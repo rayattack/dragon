@@ -441,6 +441,7 @@ std::unique_ptr<Stmt> Parser::ifStatement() {
 std::unique_ptr<Stmt> Parser::whileStatement() {
     consume(TokenType::WHILE, "Expect 'while'");
     auto stmt = std::make_unique<WhileStmt>();
+    stmt->setLocation(previous().location());
     stmt->condition = expression();
     stmt->body = parseBlock();
     if (match(TokenType::ELSE)) stmt->elseBody = parseBlock();
@@ -450,6 +451,7 @@ std::unique_ptr<Stmt> Parser::whileStatement() {
 std::unique_ptr<Stmt> Parser::forStatement() {
     consume(TokenType::FOR, "Expect 'for'");
     auto stmt = std::make_unique<ForStmt>();
+    stmt->setLocation(previous().location());
     auto target = primary();
     if (check(TokenType::COMMA)) {
         auto tuple = std::make_unique<TupleExpr>();

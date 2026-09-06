@@ -15,6 +15,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/TargetSelect.h"
@@ -2311,6 +2312,15 @@ struct CodeGen::Impl {
         const std::string& varName,
         Type::Kind elemKind);
 
+    llvm::Value* loadListSize(llvm::Value* list, const llvm::Twine& name);
+    llvm::Value* loadListData(llvm::Value* list, const llvm::Twine& name);
+    llvm::AllocaInst* bindListElemInline(
+        llvm::Function* func,
+        llvm::Value* listVal,
+        llvm::Value* idx,
+        const std::string& varName,
+        Type::Kind elemKind);
+
     llvm::Value* emitStringLiteralBytes(const std::string& bytes,
                                         const llvm::Twine& twine = "");
 
@@ -2326,6 +2336,34 @@ struct CodeGen::Impl {
     }
 
     void runOptimizationPasses();
+
+    std::unique_ptr<llvm::TargetMachine> targetMachine;
+    llvm::TargetMachine* getTargetMachine();
+    void applyTargetAttributes(llvm::TargetMachine& tm);
+    std::vector<std::string> vectorizeReportLines;
+
+    std::unique_ptr<llvm::DIBuilder> diBuilder;
+    std::unordered_map<std::string, llvm::DIFile*> diFiles;
+    bool emitsDebugLines() const {
+        return options.debugInfo || options.vectorizeReport;
+    }
+    void setStatementDebugLoc(const ASTNode& node);
+    void finalizeDebugLines();
+
+    static bool hasFastMathDecorator(const FunctionDecl& decl);
+    struct FastMathScope {
+        llvm::IRBuilder<>& builder;
+        llvm::FastMathFlags saved;
+        FastMathScope(Impl& impl, const FunctionDecl& decl)
+            : builder(*impl.builder), saved(impl.builder->getFastMathFlags()) {
+            if (!hasFastMathDecorator(decl)) return;
+            llvm::FastMathFlags fast = saved;
+            fast.setAllowReassoc();
+            fast.setAllowContract();
+            builder.setFastMathFlags(fast);
+        }
+        ~FastMathScope() { builder.setFastMathFlags(saved); }
+    };
 
     llvm::Type* inferExprLLVMType(Expr* expr);
 

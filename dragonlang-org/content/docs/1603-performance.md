@@ -127,6 +127,28 @@ The language already gives you the levers that matter:
   claims. The flag governs your code only: the Dragon runtime archive
   every binary links is compiled at `-O3` whatever the compiler's own
   build type, so a Debug build of `dragon` still links a fast runtime.
+- **Ordinary numeric loops vectorize.** At `-O2` and above, a loop over a
+  `list[int]` or `list[float]` compiles to SIMD instructions in both
+  spellings, `for x in xs` and `for i in range(len(xs))`: an integer sum,
+  an in-place map such as `xs[i] = xs[i] * k`, any body made of loads,
+  arithmetic and stores. Width follows the CPU: binaries target
+  `x86-64-v2` by default (SSE4.2, 128-bit vectors, so a default build runs
+  on any x86-64 machine from roughly 2009 onward), `-mcpu=native` uses
+  everything the building machine has (AVX2, 256-bit, on most desktops)
+  and `-mcpu=x86-64-v3` is the portable AVX2 level. On Apple Silicon the
+  default is `apple-m1`; elsewhere `generic`.
+- **Float reductions need `@fastmath`.** `total += x` over floats stays
+  scalar by default because float addition is not associative and the
+  compiler will not silently change your results. Put `@fastmath` on the
+  function and its float additions and multiplications may be reassociated
+  and fused into FMA, so sums and dot products vectorize; the result can
+  differ from the strict left-to-right order in the last bits.
+- **Ask the compiler what it did.** `--vectorize-report` prints one line per
+  loop, `vectorized 4x at file:line` or `not vectorized at file:line:
+  <reason>`, and a strict float reduction's line names the `@fastmath`
+  opt-in. A loop that calls anything (`append`, `print`, a method) does not
+  vectorize, and a map into a second list (`c[i] = a[i] * k`) does not yet,
+  because the bounds check on `c` is a second exit from the loop.
 - **For short-lived programs, `--gc=none`** skips reference counting
   entirely and lets the OS reclaim memory at exit - ideal for a one-shot
   CLI filter or a micro-benchmark, never for a long-running service (see

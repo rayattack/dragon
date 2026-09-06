@@ -23,6 +23,8 @@ struct DriverOptions {
     std::vector<std::string> programArgs;
     std::string outputFile;
     int optimizationLevel = 0;
+    std::string targetCpu;
+    bool vectorizeReport = false;
     bool verbose = false;
     bool debugInfo = false;
     bool forcePython = false;
