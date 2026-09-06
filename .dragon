@@ -1897,7 +1897,8 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
   `-mcpu=native` or `-mcpu=x86-64-v3` on an AVX2 machine. `--vectorize-report`
   prints one line per loop, `vectorized 4x at file:line` or
   `not vectorized at file:line: <reason>`, and a strict float reduction's line
-  names the opt-in.
+  names the opt-in. A reason that comes from an inlined helper names both ends,
+  `call at main.dr:6, inlined from codec.dr:56`.
 
 ## 29. What Dragon rejects (deltas from Python, one table)
 

@@ -253,3 +253,33 @@ TEST(CodeGenVectorize, ReportSaysWhenThePipelineDidNotRun) {
     auto report = vectorizeReportFor(code("vectorize_int_sum"), opts);
     EXPECT_TRUE(hasReportLine(report, "vectorize report:", "-O2 or higher")) << joinLines(report);
 }
+
+static std::string helperModulePath() {
+    return dragon::platform::getTempDir() +
+           std::string(1, dragon::platform::pathSeparator()) +
+           "dragon_vectorize_helper.dr";
+}
+
+TEST(CodeGenVectorize, ReportNamesTheInlinedCallSiteAndOrigin) {
+    auto report = vectorizeReportFor(code("vectorize_inlined_helper_call"),
+                                     releaseOptions());
+    EXPECT_TRUE(hasReportLine(report, "not vectorized at <test>:7:",
+                              "(call at <test>:8, inlined from <test>:2)"))
+        << joinLines(report);
+}
+
+TEST(CodeGenVectorize, ReportNamesTheInlinedCalleeFile) {
+    const std::string path = helperModulePath();
+    std::ofstream helper(path);
+    helper << code("vectorize_helper_module");
+    helper.close();
+    auto report = vectorizeReportFor(code("vectorize_imported_helper_call"),
+                                     releaseOptions());
+    std::remove(path.c_str());
+    EXPECT_TRUE(hasReportLine(report, "not vectorized at <test>:5:",
+                              "(call at <test>:6, inlined from "))
+        << joinLines(report);
+    EXPECT_TRUE(hasReportLine(report, "not vectorized at <test>:5:",
+                              "dragon_vectorize_helper.dr:2)"))
+        << joinLines(report);
+}

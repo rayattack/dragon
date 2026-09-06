@@ -1949,7 +1949,10 @@ struct LoopRemark {
     unsigned line = 0;
     std::string width;
     std::string reason;
+    std::string reasonFile;
     unsigned reasonLine = 0;
+    std::string callFile;
+    unsigned callLine = 0;
 };
 
 std::string vectorWidth(const llvm::DiagnosticInfoOptimizationBase& remark) {
@@ -1958,12 +1961,44 @@ std::string vectorWidth(const llvm::DiagnosticInfoOptimizationBase& remark) {
     return "";
 }
 
-const llvm::BasicBlock* innermostLoopHeader(const llvm::Function& fn,
-                                            const llvm::BasicBlock* block) {
+struct LoopAnchor {
+    const llvm::BasicBlock* header = nullptr;
+    const llvm::DILocation* start = nullptr;
+};
+
+LoopAnchor innermostLoopAnchor(const llvm::Function& fn,
+                               const llvm::BasicBlock* block) {
     llvm::DominatorTree dominators(const_cast<llvm::Function&>(fn));
     llvm::LoopInfo loops(dominators);
-    if (auto* loop = loops.getLoopFor(block)) return loop->getHeader();
-    return block;
+    auto* loop = loops.getLoopFor(block);
+    if (!loop) return {block, nullptr};
+    return {loop->getHeader(), loop->getStartLoc().get()};
+}
+
+const llvm::DILocation* blockingLocation(const llvm::BasicBlock* region,
+                                         const llvm::DiagnosticLocation& at) {
+    if (!region) return nullptr;
+    for (const llvm::Instruction& inst : *region) {
+        const llvm::DILocation* debug = inst.getDebugLoc().get();
+        if (!debug || !debug->getInlinedAt()) continue;
+        if (debug->getLine() != at.getLine()) continue;
+        if (debug->getColumn() != at.getColumn()) continue;
+        if (debug->getFilename() == at.getRelativePath()) return debug;
+    }
+    return nullptr;
+}
+
+const llvm::DILocation* inlinedCallSite(const llvm::DILocation* blocking,
+                                        const llvm::DILocation* loopStart) {
+    if (!blocking || !loopStart) return nullptr;
+    const llvm::DILocation* frame = loopStart->getInlinedAt();
+    const llvm::DISubprogram* scope = loopStart->getScope()->getSubprogram();
+    for (const llvm::DILocation* at = blocking->getInlinedAt(); at;
+         at = at->getInlinedAt())
+        if (at->getInlinedAt() == frame &&
+            at->getScope()->getSubprogram() == scope)
+            return at;
+    return nullptr;
 }
 
 struct VectorizeRemarkHandler : llvm::DiagnosticHandler {
@@ -1988,8 +2023,8 @@ struct VectorizeRemarkHandler : llvm::DiagnosticHandler {
             return true;
         auto location = remark->getLocation();
         const llvm::Function& fn = remark->getFunction();
-        auto& loop = loops[{fn.getName().str(),
-                            innermostLoopHeader(fn, remark->getCodeRegion())}];
+        LoopAnchor anchor = innermostLoopAnchor(fn, remark->getCodeRegion());
+        auto& loop = loops[{fn.getName().str(), anchor.header}];
         std::string message = remark->getMsg();
         bool loopLevel = remark->isPassed() || message == "loop not vectorized";
         if (loopLevel || loop.line == 0) {
@@ -2001,11 +2036,33 @@ struct VectorizeRemarkHandler : llvm::DiagnosticHandler {
             loop.width = width;
         } else if (loop.reason.empty() && !loopLevel) {
             loop.reason = message;
+            loop.reasonFile = location.getRelativePath().str();
             loop.reasonLine = location.getLine();
+            const llvm::DILocation* site = inlinedCallSite(
+                blockingLocation(remark->getCodeRegion(), location),
+                anchor.start);
+            if (site) {
+                loop.callFile = site->getFilename().str();
+                loop.callLine = site->getLine();
+            }
         }
         return true;
     }
 };
+
+std::string reasonLocation(const LoopRemark& loop) {
+    if (loop.callLine != 0)
+        return " (call at " + loop.callFile + ":" +
+               std::to_string(loop.callLine) + ", inlined from " +
+               loop.reasonFile + ":" + std::to_string(loop.reasonLine) + ")";
+    if (loop.reasonLine == 0) return "";
+    if (loop.reasonFile != loop.file)
+        return " (" + loop.reasonFile + ":" + std::to_string(loop.reasonLine) +
+               ")";
+    if (loop.reasonLine != loop.line)
+        return " (line " + std::to_string(loop.reasonLine) + ")";
+    return "";
+}
 
 std::string renderLoopRemark(const LoopRemark& loop) {
     const std::string at = " at " + loop.file + ":" + std::to_string(loop.line);
@@ -2013,8 +2070,7 @@ std::string renderLoopRemark(const LoopRemark& loop) {
     std::string reason = loop.reason.empty() ? "loop not vectorized" : loop.reason;
     const std::string prefix = "loop not vectorized: ";
     if (reason.rfind(prefix, 0) == 0) reason = reason.substr(prefix.size());
-    if (loop.reasonLine != 0 && loop.reasonLine != loop.line)
-        reason += " (line " + std::to_string(loop.reasonLine) + ")";
+    reason += reasonLocation(loop);
     if (reason.find("reorder floating-point operations") != std::string::npos)
         reason += " (add @fastmath to the enclosing function to allow "
                   "reassociation)";

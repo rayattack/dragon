@@ -277,3 +277,60 @@ def total(xs: list[float]) -> float {
 
 print(total([1.0, 2.0, 3.0]))
 ```
+
+The blocking instruction is often not one the loop wrote. An inlined helper
+carries its own file and line, so the report has to name the call site inside
+the loop and the line the instruction really came from.
+
+#### :vectorize_inlined_helper_call
+
+```dr
+def collect(out: list[int], v: int) -> None {
+    out.append(v * 3)
+}
+
+def build(n: int) -> list[int] {
+    out: list[int] = []
+    for i in range(n) {
+        collect(out, i)
+    }
+    return out
+}
+
+def run(seed: int) -> int {
+    return len(build(seed))
+}
+
+print(run(120))
+```
+
+The same shape across two modules is what a real program looks like, and there
+a bare line number names a line in the wrong file.
+
+#### :vectorize_helper_module
+
+```dr
+def collect(out: list[int], v: int) -> None {
+    out.append(v * 3)
+}
+```
+
+#### :vectorize_imported_helper_call
+
+```dr
+from dragon_vectorize_helper import collect
+
+def build(n: int) -> list[int] {
+    out: list[int] = []
+    for i in range(n) {
+        collect(out, i)
+    }
+    return out
+}
+
+def run(seed: int) -> int {
+    return len(build(seed))
+}
+
+print(run(120))
+```

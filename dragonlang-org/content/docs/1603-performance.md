@@ -146,7 +146,10 @@ The language already gives you the levers that matter:
 - **Ask the compiler what it did.** `--vectorize-report` prints one line per
   loop, `vectorized 4x at file:line` or `not vectorized at file:line:
   <reason>`, and a strict float reduction's line names the `@fastmath`
-  opt-in. A loop that calls anything (`append`, `print`, a method) does not
+  opt-in. When the reason comes from a helper the compiler inlined, it names
+  both ends, `call at main.dr:6, inlined from codec.dr:56`, so the second
+  location is never a stray line number in another file.
+  A loop that calls anything (`append`, `print`, a method) does not
   vectorize, and a map into a second list (`c[i] = a[i] * k`) does not yet,
   because the bounds check on `c` is a second exit from the loop.
 - **For short-lived programs, `--gc=none`** skips reference counting
