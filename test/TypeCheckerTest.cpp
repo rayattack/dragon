@@ -2215,3 +2215,9 @@ TEST(TypeCheckerTest, GetattrResolvesDeclaredAttributes) {
     EXPECT_TRUE(checkHasErrors(code("getattr_method_is_not_text")));
     EXPECT_TRUE(checkOk(code("getattr_declared_attributes_accepted")));
 }
+
+TEST(TypeCheckerTest, DubCopiesClosedUnionsOnly) {
+    EXPECT_TRUE(checkOk(code("dub_dict_of_recursive_union_accepted")));
+    EXPECT_TRUE(checkOk(code("union_with_class_arm_declared_accepted")));
+    EXPECT_TRUE(checkHasErrors(code("dub_union_with_class_arm_rejected")));
+}

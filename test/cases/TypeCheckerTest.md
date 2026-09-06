@@ -3957,3 +3957,42 @@ print(str(hasattr(c, "nope")))
 missing: str = "no" + "pe"
 print(str(hasattr(c, missing)))
 ```
+
+A closed union is dubable when every arm is: `json.Data` is `str | int | float
+| bool | none | list[Data] | dict[str, Data]`, and each arm has a deep copy the
+runtime can pick by tag. A class arm has no such copy, so a union holding one
+stays refused; the control case proves the declaration alone type-checks, so
+the refusal is the `dub` and nothing else.
+
+#### :dub_dict_of_recursive_union_accepted
+
+```dr
+type Data = str | int | float | bool | none | list[Data] | dict[str, Data]
+doc: dict[str, Data] = {"name": "auth-api", "replicas": 3}
+mine: dict[str, Data] = dub doc
+items: list[Data] = [1, "two"]
+copy: list[Data] = dub items
+one: Data = doc["name"]
+two: Data = dub one
+```
+
+#### :union_with_class_arm_declared_accepted
+
+```dr
+class Node {
+    n: int
+    def(n: int) { self.n = n }
+}
+v: Node | int = 1
+```
+
+#### :dub_union_with_class_arm_rejected
+
+```dr
+class Node {
+    n: int
+    def(n: int) { self.n = n }
+}
+v: Node | int = 1
+w: Node | int = dub v
+```

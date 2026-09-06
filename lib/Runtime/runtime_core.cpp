@@ -1146,6 +1146,13 @@ int64_t dragon_deep_copy_tagged(int64_t val, int64_t tag) {
     }
 }
 
+DragonBox dragon_box_deep_copy(int64_t tag, int64_t payload) {
+    DragonBox copy;
+    copy.tag = tag;
+    copy.payload = dragon_deep_copy_tagged(payload, tag);
+    return copy;
+}
+
 void dragon_del_assert_unique(void* p, int64_t cls, const char* file,
                               int64_t line) {
     if (!p) return;

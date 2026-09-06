@@ -615,6 +615,8 @@ the line you wrote. Searching a program for `dub` shows you every copy it
 makes.
 
 ```dragon
+from json import Data
+
 def load() -> list[dict[str, str]] {
     return [{"row": "1"}]
 }
@@ -633,6 +635,13 @@ tag2: str = dub tag    # str: semantically an independent copy; since the payloa
 rows: list[dict[str, str]] = load()
 snapshot: list[dict[str, str]] = dub rows   # dubable by recursion:
                                             # list -> dict -> str, all dubable
+
+doc: dict[str, Data] = {"name": "auth-api", "replicas": 3}
+mirror: dict[str, Data] = dub doc           # a closed union (json.Data) is dubable
+                                            # when every arm is; the copy picks
+                                            # each arm by its runtime tag and
+                                            # recurses. A union with a class arm
+                                            # refuses, naming the arm
 ```
 
 A class is dubable if and only if every field is dubable, and things that

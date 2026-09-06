@@ -4,12 +4,14 @@
 #include "dragon/TemplateSyntax.h"
 #include "TypeCheckerImpl.h"
 #include "dragon/AstClone.h"
+#include "dragon/Dubable.h"
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <functional>
 #include <set>
 #include <system_error>
+#include <unordered_set>
 
 namespace dragon {
 
@@ -1635,7 +1637,52 @@ void TypeChecker::visit(NameExpr& node) {
     }
 }
 
-bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
+namespace {
+
+bool dubable(const Type* t, std::string& why,
+             std::unordered_set<const Type*>& openUnions);
+
+bool boxCarriesDeepCopy(Type::Kind k) {
+    switch (k) {
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bool:
+        case Type::Kind::None_:
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+        case Type::Kind::List:
+        case Type::Kind::Dict:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool unionDubable(const UnionType& u, std::string& why,
+                  std::unordered_set<const Type*>& openUnions) {
+    if (!openUnions.insert(&u).second) return true;
+    bool ok = true;
+    for (auto& arm : u.types) {
+        if (!arm) continue;
+        if (!boxCarriesDeepCopy(arm->kind())) {
+            why = "arm '" + arm->toString() + "' of '" + u.toString() +
+                  "' has no deep copy through a box";
+            ok = false;
+            break;
+        }
+        if (!dubable(arm.get(), why, openUnions)) {
+            why = "arm '" + arm->toString() + "' of '" + u.toString() +
+                  "': " + why;
+            ok = false;
+            break;
+        }
+    }
+    openUnions.erase(&u);
+    return ok;
+}
+
+bool dubable(const Type* t, std::string& why,
+             std::unordered_set<const Type*>& openUnions) {
     if (!t) { why = "its type is unknown"; return false; }
     switch (t->kind()) {
         case Type::Kind::Int:
@@ -1648,13 +1695,16 @@ bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
         case Type::Kind::List: {
             auto& lt = static_cast<const ListType&>(*t);
             if (!lt.elementType) { why = "its element type is unknown"; return false; }
-            return typeIsDubable(lt.elementType.get(), why);
+            return dubable(lt.elementType.get(), why, openUnions);
         }
         case Type::Kind::Dict: {
             auto& dt = static_cast<const DictType&>(*t);
             if (!dt.valueType) { why = "its value type is unknown"; return false; }
-            return typeIsDubable(dt.valueType.get(), why);
+            return dubable(dt.valueType.get(), why, openUnions);
         }
+        case Type::Kind::Union:
+            return unionDubable(static_cast<const UnionType&>(*t), why,
+                                openUnions);
         case Type::Kind::Set:
             return true;
         case Type::Kind::Tuple: {
@@ -1691,6 +1741,17 @@ bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
                   t->toString() + "')";
             return false;
     }
+}
+
+}
+
+bool typeIsDubable(const Type* t, std::string& why) {
+    std::unordered_set<const Type*> openUnions;
+    return dubable(t, why, openUnions);
+}
+
+bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
+    return dragon::typeIsDubable(t, why);
 }
 
 static bool setOperandsCompatible(const std::shared_ptr<Type>& l,

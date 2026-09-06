@@ -585,7 +585,7 @@ std::unique_ptr<Stmt> Parser::constDeclaration() {
         names.push_back(std::move(name));
     } while (match(TokenType::COMMA));
     consume(TokenType::EQUAL, "const declaration must have an initializer");
-    auto value = expression();
+    auto value = maybeMoveRhs();
 
     if (names.size() == 1) {
         auto stmt = std::make_unique<AnnAssignStmt>();

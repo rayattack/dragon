@@ -9,6 +9,24 @@ void CodeGen::visit(AttributeExpr& node) {
         node.isDubMarked = true;
         llvm::Value* v = impl_->lastValue;
         auto k = node.type ? node.type->kind() : Type::Kind::Unknown;
+        if (k == Type::Kind::Union && v->getType() != impl_->boxType) {
+            impl_->addError("dub of '" + node.attribute +
+                                "': the union value carries no runtime "
+                                "tag to copy by; annotate the concrete type",
+                            node.location());
+            return;
+        }
+        if (k == Type::Kind::Union) {
+            auto* callee = impl_->getOrDeclareRuntime("dragon_box_deep_copy",
+                llvm::FunctionType::get(impl_->boxType,
+                                        {impl_->i64Type, impl_->i64Type},
+                                        false));
+            impl_->lastValue = impl_->builder->CreateCall(
+                callee,
+                {impl_->boxTag(v, "dub.tag"), impl_->boxPayloadI64(v, "dub.payload")},
+                "dub");
+            return;
+        }
         const char* fn = nullptr;
         switch (k) {
             case Type::Kind::Str:   fn = "dragon_str_retain"; break;

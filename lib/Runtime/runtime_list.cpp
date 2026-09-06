@@ -462,6 +462,17 @@ void dragon_list_reverse(DragonList* list) {
 }
 
 DragonList* dragon_list_deep_copy(DragonList* list) {
+    if (list && list->header.type_tag == DRAGON_TAG_LIST_BOX) {
+        auto* src = (DragonListBox*)(void*)list;
+        DragonListBox* boxCopy =
+            dragon_list_box_new(src->size > 0 ? src->size : 8);
+        for (int64_t i = 0; i < src->size; i++) {
+            DragonListBoxElem e = src->data[i];
+            dragon_list_box_append(boxCopy, e.tag,
+                                   dragon_deep_copy_tagged(e.payload, e.tag));
+        }
+        return (DragonList*)(void*)boxCopy;
+    }
     DragonList* copy = dragon_list_new_tagged(
         list->size > 0 ? list->size : 8, list->elem_tag);
     for (int64_t i = 0; i < list->size; i++) {

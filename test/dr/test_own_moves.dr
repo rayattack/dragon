@@ -1,5 +1,15 @@
 from unittest import TestCase, main
 from threading import Lock
+from json import Data
+import json
+
+def data_key_count(d: Data) -> int {
+    if isinstance(d, dict) {
+        dd: dict[str, Data] = d
+        return len(dd)
+    }
+    return 0
+}
 
 class OwnFieldSink {
     own _payload: str
@@ -387,6 +397,64 @@ class DubTests(TestCase) {
             names.remove(d)
         }
         self.assertEqual(names, ["a", "b"])
+    }
+
+    def test_dub_dict_of_data_is_deep() {
+        i: int = 0
+        while i < 2000 {
+            base: dict[str, Data] = {"name": "auth-api", "tags": ["a", "b"], "meta": {"k": 1}}
+            mine: dict[str, Data] = dub base
+            mine["extra"] = True
+            tags: Data = mine["tags"]
+            if isinstance(tags, list) {
+                tl: list[Data] = tags
+                tl.append("c")
+            }
+            self.assertEqual(json.dumps(base), '{"name": "auth-api", "tags": ["a", "b"], "meta": {"k": 1}}')
+            self.assertEqual(json.dumps(mine), '{"name": "auth-api", "tags": ["a", "b", "c"], "meta": {"k": 1}, "extra": true}')
+            i = i + 1
+        }
+    }
+
+    def test_dub_list_of_data_is_deep() {
+        i: int = 0
+        while i < 2000 {
+            base: list[Data] = [1, "two", [3, 4], {"k": "v"}]
+            mine: list[Data] = dub base
+            inner: Data = mine[2]
+            if isinstance(inner, list) {
+                il: list[Data] = inner
+                il.append(5)
+            }
+            mine.append(None)
+            self.assertEqual(json.dumps(base), '[1, "two", [3, 4], {"k": "v"}]')
+            self.assertEqual(json.dumps(mine), '[1, "two", [3, 4, 5], {"k": "v"}, null]')
+            i = i + 1
+        }
+    }
+
+    def test_const_dub_is_a_snapshot() {
+        a: dict[str, str] = {"k": "v"}
+        const b: dict[str, str] = dub a
+        a["extra"] = "later"
+        self.assertEqual(len(a), 2)
+        self.assertEqual(len(b), 1)
+    }
+
+    def test_dub_bare_data_is_deep() {
+        i: int = 0
+        while i < 2000 {
+            base: Data = {"k": [1, 2]}
+            mine: Data = dub base
+            if isinstance(mine, dict) {
+                md: dict[str, Data] = mine
+                md["k2"] = 9
+            }
+            self.assertEqual(json.dumps(base), '{"k": [1, 2]}')
+            self.assertEqual(json.dumps(mine), '{"k": [1, 2], "k2": 9}')
+            self.assertEqual(data_key_count(dub base), 1)
+            i = i + 1
+        }
     }
 }
 

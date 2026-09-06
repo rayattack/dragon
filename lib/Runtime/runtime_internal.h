@@ -617,6 +617,7 @@ DragonList* dragon_list_copy(DragonList* list);
 DragonList* dragon_list_deep_copy(DragonList* list);
 DragonDict* dragon_dict_deep_copy(DragonDict* d);
 int64_t dragon_deep_copy_tagged(int64_t val, int64_t tag);
+DragonBox dragon_box_deep_copy(int64_t tag, int64_t payload);
 void* dragon_obj_retain(void* p);
 DragonList* dragon_list_repeat(DragonList* src, int64_t count);
 DragonList* dragon_list_concat(DragonList* a, DragonList* b);
