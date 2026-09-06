@@ -373,7 +373,12 @@ print(show(1) + show("a"))
 
 - `isinstance` is the narrowing tool: it narrows union-typed values (a
   `json.Data` included) by runtime tag, and it walks class hierarchies
-  (`isinstance(dog, Animal)` is True). Use it to narrow unions and to test
+  (`isinstance(dog, Animal)` is True). On a class it tests the object's own
+  class at runtime, so it answers in both directions: a `Node`-typed binding
+  holding a `LeafNode` answers True to `isinstance(n, LeafNode)`, and a
+  `BranchNode` in the same binding answers False. The guarded block does not
+  narrow a class-typed binding to the subclass yet, so a subclass-only field
+  read inside it is still a compile error. Use it to narrow unions and to test
   class ancestry,
   not to interrogate values whose type is already statically known (the
   compiler already knows; there is nothing to ask).
@@ -784,7 +789,11 @@ class Dog(Animal) {                  # single inheritance
   element. Prefer overriding over `isinstance` chains.
 - Rendering dispatches the same way: `str(x)`, `print(x)` and `f"{x}"` on a
   base-typed variable call the most-derived `__str__`.
-- `isinstance(obj, Base)` walks the ancestor chain.
+- `isinstance(obj, Base)` walks the ancestor chain, and `isinstance(obj,
+  Derived)` on a base-typed binding tests the object's class id at runtime
+  (True only when the object really is that class or one of its
+  descendants). The guarded block does not narrow the binding to the
+  subclass yet.
 
 ### Dunder methods (one parameter shorter than Python: self is implicit)
 

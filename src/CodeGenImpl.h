@@ -1849,6 +1849,23 @@ struct CodeGen::Impl {
         return false;
     }
 
+    bool classSymIsSubclassOf(std::string sym, const std::string& baseSym) const {
+        for (int guard = 0; !sym.empty() && guard < 256; ++guard) {
+            if (sym == baseSym) return true;
+            auto pit = classParentNamesBySym.find(sym);
+            if (pit == classParentNamesBySym.end()) break;
+            sym = pit->second;
+        }
+        return false;
+    }
+
+    std::vector<llvm::GlobalVariable*> classSubtreeIdGlobals(
+        const std::string& targetSym) const;
+
+    llvm::Value* emitClassInstanceTest(llvm::Value* obj,
+                                       const std::string& staticSym,
+                                       const std::string& targetSym);
+
     llvm::Value* coerceAssignedFieldValue(llvm::Value* v, llvm::Type* fieldType) {
         if (v->getType() == fieldType) return v;
         if (fieldType == f64Type && v->getType() == i64Type)

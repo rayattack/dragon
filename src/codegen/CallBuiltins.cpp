@@ -409,6 +409,13 @@ bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
     return true;
 }
 
+static std::string instanceOperandClassName(Expr& operand) {
+    const Type* t = operand.type.get();
+    if (!t || t->kind() != Type::Kind::Instance) return "";
+    auto& inst = static_cast<const InstanceType&>(*t);
+    return inst.classType ? inst.classType->name : "";
+}
+
 bool CodeGen::tryEmitIsinstanceNicheCheck(CallExpr& node, const std::string& typeName) {
     const Type* argT = node.args[0]->type.get();
     if (!argT || argT->kind() != Type::Kind::Union) return false;
@@ -469,6 +476,16 @@ bool CodeGen::tryEmitIsinstanceNicheCheck(CallExpr& node, const std::string& typ
             tagVal, llvm::ConstantInt::get(impl_->i64Type, wantTag),
             "isinstance.boxtag");
         return true;
+    }
+    if (nicheT->kind() == Type::Kind::Instance) {
+        auto& inst = static_cast<const InstanceType&>(*nicheT);
+        llvm::Value* test = impl_->emitClassInstanceTest(
+            recv, impl_->classSym(inst.classType ? inst.classType->name : ""),
+            impl_->classSym(typeName));
+        if (test) {
+            impl_->lastValue = test;
+            return true;
+        }
     }
     if (!matches) {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
@@ -610,19 +627,26 @@ bool CodeGen::emitIsinstanceBuiltin(CallExpr& node) {
         result = impl_->classIsSubclassOf(argClassName, typeName);
     }
     node.args[0]->accept(*this);
-    if (result && classCheck) {
-        llvm::Value* recv = impl_->lastValue;
-        if (recv && recv->getType()->isPointerTy()) {
-            impl_->lastValue = impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
-            return true;
-        }
-        if (recv && recv->getType() == impl_->i64Type) {
-            impl_->lastValue = impl_->builder->CreateICmpNE(
-                recv, llvm::ConstantInt::get(impl_->i64Type, 0), "isinstance.nn");
-            return true;
-        }
-    }
-    impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, result ? 1 : 0);
+    llvm::Value* recv = impl_->lastValue;
+    llvm::Value* answer = nullptr;
+    if (classCheck)
+        answer = impl_->emitClassInstanceTest(
+            recv, impl_->classSym(instanceOperandClassName(*node.args[0])),
+            impl_->classSym(typeName));
+    const bool nonNullIsTheAnswer = !answer && result && classCheck && recv;
+    if (nonNullIsTheAnswer && recv->getType()->isPointerTy())
+        answer = impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
+    else if (nonNullIsTheAnswer && recv->getType() == impl_->i64Type)
+        answer = impl_->builder->CreateICmpNE(
+            recv, llvm::ConstantInt::get(impl_->i64Type, 0), "isinstance.nn");
+
+    Impl::VarKind drainKind = impl_->ownedTempDrainKind(node.args[0].get(), recv);
+    if (drainKind != Impl::VarKind::Other)
+        impl_->emitDecrefByKind(recv, drainKind);
+
+    impl_->lastValue = answer
+        ? answer
+        : llvm::ConstantInt::get(impl_->i1Type, result ? 1 : 0);
     return true;
 }
 

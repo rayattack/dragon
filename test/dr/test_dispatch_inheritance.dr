@@ -1,4 +1,6 @@
 from unittest import TestCase, main
+from collide_dispatch_one import Store, MemStore
+from collide_dispatch_two import two_leaf_through_base_slot
 
 class Animal {
     def(n: str) { self.nm = n }
@@ -519,4 +521,121 @@ class Buf {
     }
 }
 
-main([VirtualDispatchTests(), SuperTests(), CtorSurface(), PrivacyTests(), MethodVarMetaIsolationTests(), ForwardRefTests()])
+def is_dog(a: Animal) -> bool {
+    return isinstance(a, Dog)
+}
+
+def is_puppy(a: Animal) -> bool {
+    return isinstance(a, Puppy)
+}
+
+def maybe_dog(a: Animal | None) -> bool {
+    return isinstance(a, Dog)
+}
+
+def dogs_in(zoo: list[Animal]) -> int {
+    n: int = 0
+    for an in zoo {
+        if isinstance(an, Dog) { n += 1 }
+    }
+    return n
+}
+
+def dog_in_slot(k: int) -> bool {
+    slots: dict[int, Animal] = {}
+    slots[1] = Dog("d")
+    slots[2] = Animal("a")
+    return isinstance(slots[k], Dog)
+}
+
+def is_cat(s: SuperAnimal) -> bool {
+    return isinstance(s, SuperCat)
+}
+
+def cross_module_leaf() -> bool {
+    s: Store = MemStore()
+    return isinstance(s, MemStore)
+}
+
+def cross_module_base_only() -> bool {
+    s: Store = Store()
+    return isinstance(s, MemStore)
+}
+
+
+class RuntimeClassTestTests(TestCase) {
+    """DRG-178 Part A: isinstance answers from the object, not the static type.
+
+    A `Animal`-typed binding holding a `Dog` must answer True to
+    isinstance(x, Dog). Before the fix codegen folded the answer out of the
+    declared class of the binding, so every downcast test compiled to a constant
+    False and every upcast test to a bare non-null check. The guarded block does
+    not narrow the binding to the subclass yet (Part B).
+    """
+
+    def test_base_typed_local_sees_subclass() {
+        a: Animal = make("dog")
+        self.assertTrue(isinstance(a, Dog))
+        self.assertTrue(isinstance(a, Animal))
+        self.assertFalse(isinstance(a, Puppy))
+    }
+
+    def test_parameter_sees_subclass() {
+        self.assertTrue(is_dog(Dog("rex")))
+        self.assertFalse(is_dog(Animal("a")))
+    }
+
+    def test_grandchild_matches_grandparents_subclass_test() {
+        self.assertTrue(is_dog(Puppy("bit")))
+        self.assertTrue(is_puppy(Puppy("bit")))
+        self.assertFalse(is_puppy(Dog("rex")))
+    }
+
+    def test_exact_type_binding_unchanged() {
+        d: Dog = Dog("fido")
+        self.assertTrue(isinstance(d, Dog))
+        self.assertTrue(isinstance(d, Animal))
+        self.assertFalse(isinstance(d, Puppy))
+    }
+
+    def test_list_element_sees_subclass() {
+        zoo: list[Animal] = [Dog("x"), Puppy("y"), Animal("z")]
+        self.assertEqual(dogs_in(zoo), 2)
+    }
+
+    def test_dict_read_sees_subclass() {
+        self.assertTrue(dog_in_slot(1))
+        self.assertFalse(dog_in_slot(2))
+    }
+
+    def test_call_result_sees_subclass() {
+        self.assertTrue(isinstance(make("puppy"), Dog))
+        self.assertFalse(isinstance(make("other"), Dog))
+    }
+
+    def test_sibling_stays_false() {
+        d: SuperAnimal = SuperDog("Rex", "Lab")
+        self.assertFalse(is_cat(d))
+        c: SuperAnimal = SuperCat(true)
+        self.assertTrue(is_cat(c))
+    }
+
+    def test_unrelated_class_stays_false() {
+        d: Dog = Dog("rex")
+        self.assertFalse(isinstance(d, Shape))
+    }
+
+    def test_optional_none_is_false() {
+        self.assertFalse(maybe_dog(none))
+        self.assertTrue(maybe_dog(Dog("rex")))
+        self.assertFalse(maybe_dog(Animal("a")))
+    }
+
+    def test_cross_module_classes_keep_their_own_identity() {
+        self.assertTrue(cross_module_leaf())
+        self.assertFalse(cross_module_base_only())
+        self.assertEqual(two_leaf_through_base_slot(), "two:leaf")
+    }
+}
+
+main([VirtualDispatchTests(), SuperTests(), CtorSurface(), PrivacyTests(), MethodVarMetaIsolationTests(), ForwardRefTests(), RuntimeClassTestTests()])

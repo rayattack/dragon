@@ -1985,5 +1985,62 @@ void CodeGen::visit(ClassDecl& node) {
     }
 }
 
+std::vector<llvm::GlobalVariable*> CodeGen::Impl::classSubtreeIdGlobals(
+        const std::string& targetSym) const {
+    std::vector<std::string> subtree{targetSym};
+    std::set<std::string> seen{targetSym};
+    std::vector<llvm::GlobalVariable*> idGlobals;
+    for (size_t i = 0; i < subtree.size(); ++i) {
+        auto git = classIdGlobalsBySym.find(subtree[i]);
+        if (git == classIdGlobalsBySym.end()) return {};
+        idGlobals.push_back(git->second);
+        for (auto& [childSym, parentSym] : classParentNamesBySym) {
+            if (parentSym == subtree[i] && seen.insert(childSym).second)
+                subtree.push_back(childSym);
+        }
+    }
+    return idGlobals;
+}
+
+static constexpr uint64_t kClassIdHalfWordIndex = 5;
+
+llvm::Value* CodeGen::Impl::emitClassInstanceTest(llvm::Value* obj,
+                                                  const std::string& staticSym,
+                                                  const std::string& targetSym) {
+    if (!obj || !obj->getType()->isPointerTy()) return nullptr;
+    if (staticSym.empty() || targetSym.empty()) return nullptr;
+    if (classSymIsSubclassOf(staticSym, targetSym))
+        return builder->CreateIsNotNull(obj, "isinst.nn");
+    if (!classSymIsSubclassOf(targetSym, staticSym)) return nullptr;
+
+    auto idGlobals = classSubtreeIdGlobals(targetSym);
+    if (idGlobals.empty()) return nullptr;
+
+    auto* nullBB = builder->GetInsertBlock();
+    auto* cmpBB = llvm::BasicBlock::Create(*context, "isinst.cmp", currentFunction);
+    auto* doneBB = llvm::BasicBlock::Create(*context, "isinst.done", currentFunction);
+    builder->CreateCondBr(builder->CreateIsNotNull(obj, "isinst.live"), cmpBB, doneBB);
+
+    builder->SetInsertPoint(cmpBB);
+    auto* i16Type = llvm::Type::getInt16Ty(*context);
+    auto* cidPtr = builder->CreateConstInBoundsGEP1_64(
+        i16Type, obj, kClassIdHalfWordIndex, "isinst.cidp");
+    auto* cid = builder->CreateZExt(
+        builder->CreateLoad(i16Type, cidPtr, "isinst.cid"), i64Type, "isinst.cidw");
+    llvm::Value* hit = nullptr;
+    for (auto* idGlobal : idGlobals) {
+        auto* want = builder->CreateLoad(i64Type, idGlobal, "isinst.want");
+        auto* eq = builder->CreateICmpEQ(cid, want, "isinst.eq");
+        hit = hit ? builder->CreateOr(hit, eq, "isinst.any") : eq;
+    }
+    auto* cmpEndBB = builder->GetInsertBlock();
+    builder->CreateBr(doneBB);
+
+    builder->SetInsertPoint(doneBB);
+    auto* phi = builder->CreatePHI(i1Type, 2, "isinst.phi");
+    phi->addIncoming(llvm::ConstantInt::get(i1Type, 0), nullBB);
+    phi->addIncoming(hit, cmpEndBB);
+    return phi;
+}
 
 }

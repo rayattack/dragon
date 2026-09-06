@@ -783,20 +783,13 @@ void CodeGen::visit(MatchStmt& node) {
                 classTest = llvm::ConstantInt::get(impl_->i1Type, pat.name == "bool" ? 1 : 0);
             } else if (valTy->isPointerTy()) {
                 if (impl_->classNames.count(pat.name)) {
-                    std::string cur = subjectClassName;
-                    bool inChain = false;
-                    while (!cur.empty()) {
-                        if (cur == pat.name) { inChain = true; break; }
-                        auto pit = impl_->classParentNamesBySym.find(impl_->classSym(cur));
-                        if (pit == impl_->classParentNamesBySym.end()) break;
-                        cur = pit->second;
-                    }
-                    if (!inChain) {
+                    classTest = impl_->emitClassInstanceTest(
+                        val, impl_->classSym(subjectClassName),
+                        impl_->classSym(pat.name));
+                    if (!classTest)
                         classTest = llvm::ConstantInt::get(impl_->i1Type, 0);
-                    } else {
-                        classTest = impl_->builder->CreateIsNotNull(val, "match.isinst");
-                        if (wantDestructure) instPtr = val;
-                    }
+                    else if (wantDestructure)
+                        instPtr = val;
                 } else {
                     Type::Kind k = subjectStaticType ? subjectStaticType->kind()
                                                      : Type::Kind::Unknown;

@@ -180,6 +180,28 @@ def dog_breed(d: Hound) -> str {
 }
 
 
+class Kitten(Creature) {
+    def(name: str) { self.name = name }
+}
+
+def creature_kind(c: Creature) -> str {
+    match c {
+        case Hound(n, br) { return "hound:" + n + ":" + br }
+        case Kitten(n) { return "kitten:" + n }
+        case _ { return "creature" }
+    }
+    return "?"
+}
+
+def is_hound(c: Creature) -> bool {
+    match c {
+        case Hound() { return true }
+        case _ { return false }
+    }
+    return false
+}
+
+
 class MatchDestructuringTests(TestCase) {
     def test_basic_capture() {
         self.assertEqual(sum_point(Point(3, 4)), 7)
@@ -201,6 +223,25 @@ class MatchDestructuringTests(TestCase) {
 
     def test_inherited_fields() {
         self.assertEqual(dog_breed(Hound("Rex", "Lab")), "Rex:Lab")
+    }
+
+    def test_base_typed_subject_takes_subclass_arm() {
+        c: Creature = Hound("Rex", "Lab")
+        self.assertEqual(creature_kind(c), "hound:Rex:Lab")
+    }
+
+    def test_base_typed_subject_without_subpatterns() {
+        c: Creature = Hound("Rex", "Lab")
+        self.assertTrue(is_hound(c))
+    }
+
+    def test_sibling_subject_falls_to_wildcard() {
+        k: Creature = Kitten("Mia")
+        self.assertEqual(creature_kind(k), "kitten:Mia")
+        self.assertFalse(is_hound(k))
+        base: Creature = Creature("plain")
+        self.assertEqual(creature_kind(base), "creature")
+        self.assertFalse(is_hound(base))
     }
 }
 
