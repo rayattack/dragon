@@ -774,7 +774,9 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 if (nt->name == "Lock") {
                     impl_->varClassNames[name->name] = "__Lock";
                     bool modLevel = (impl_->currentFunction == impl_->mainFunction) && (impl_->scopes.size() <= impl_->moduleBodyScopeDepth);
-                    if (!modLevel && !impl_->scopes.empty())
+                    bool ownsLock = node.value &&
+                        !Impl::isBorrowedHeapExpr(node.value.get());
+                    if (!modLevel && ownsLock && !impl_->scopes.empty())
                         impl_->scopes.back().lockDestroyOnExit.insert(name->name);
                 }
         }

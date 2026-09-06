@@ -1089,11 +1089,42 @@ void TypeChecker::visit(TryStmt& node) {
     impl_->popScope();
 }
 
+static bool classChainHasContextDunders(const ClassType* cls) {
+    bool hasEnter = false;
+    bool hasExit = false;
+    for (int guard = 0; cls && guard < 64; ++guard) {
+        if (!cls->promisedContracts.empty()) return true;
+        if (cls->methods.count("__enter__")) hasEnter = true;
+        if (cls->methods.count("__exit__")) hasExit = true;
+        cls = (cls->parentClass && cls->parentClass->kind() == Type::Kind::Class)
+                  ? static_cast<const ClassType*>(cls->parentClass.get())
+                  : nullptr;
+    }
+    return hasEnter && hasExit;
+}
+
+static bool isUsableWithContext(const std::shared_ptr<Type>& t) {
+    if (!t) return true;
+    if (t->kind() == Type::Kind::Lock) return true;
+    if (t->kind() == Type::Kind::Unknown || t->kind() == Type::Kind::Boxed ||
+        t->kind() == Type::Kind::TypeVar || t->kind() == Type::Kind::Contract)
+        return true;
+    if (t->kind() == Type::Kind::Union || t->kind() == Type::Kind::Optional)
+        return true;
+    if (auto* inst = dynamic_cast<InstanceType*>(t.get()))
+        return classChainHasContextDunders(inst->classType.get());
+    return false;
+}
+
 void TypeChecker::visit(WithStmt& node) {
     impl_->pushScope();
     for (auto& item : node.items) {
         std::shared_ptr<Type> ctxType = impl_->unknownType;
         if (item.contextExpr) ctxType = inferType(item.contextExpr.get());
+        if (!isUsableWithContext(ctxType))
+            error(item.contextExpr->location(),
+                  "'with' needs a Lock or a class with __enter__/__exit__; got '" +
+                      ctxType->toString() + "'");
         if (item.optionalVars) {
             if (auto* nm = dynamic_cast<NameExpr*>(item.optionalVars.get()))
                 impl_->define(nm->name, ctxType);

@@ -1200,6 +1200,11 @@ entry) is a separate, ordinary operation.
   raw resource types: a plain `Lock` field is a compile error ("must be declared
   own"), and containers of raw resources refuse (wrap the resource in a class).
   `own` fields form a tree, so they are excluded from cycle-GC tracking.
+  A Lock reached through a field read (`self.lock`), an element, or a plain
+  parameter is a BORROW like any other read: `l: Lock = self.lock` never makes
+  `l` the owner, and scope exit does not destroy that mutex. Only a Lock the
+  scope minted with `Lock()`, or took through an `own` move, is destroyed when
+  the scope ends.
 - **On a collection-typed field** it seals BOTH edges: a borrow cannot be stored
   in, and the field cannot be returned/aliased out (`return self.headers` is a
   compile error; expose methods, or `return dub self.headers`). `str`/`bytes`/
@@ -1408,6 +1413,15 @@ class Counter {
     }
 }
 ```
+
+`with` guards whichever Lock the expression names, wherever that Lock lives: a
+local, a module global, `self.lock`, `other.lock`, `self.inner.lock`, or a
+`Lock` parameter all acquire on entry and release on the normal exit, on a
+`return` out of the block, and on a raised exception. A Lock held through an
+object is what makes door 4 of the fire boundary ("internally-locked type") a
+guarantee rather than a convention. `with` on anything that is neither a Lock
+nor a class with `__enter__`/`__exit__` is a compile error, so a block can never
+silently run unguarded.
 
 Guarding a module global instead: declare `global counter` in the writer, then
 `with lock { counter = counter + 1 }`.

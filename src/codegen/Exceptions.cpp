@@ -327,14 +327,8 @@ void CodeGen::visit(WithStmt& node) {
         llvm::Function* exitFn =
             ctxCT ? impl_->methodFromClassType(ctxCT, "__exit__") : nullptr;
 
-        bool isLockCtx = false;
-        bool isLockTemp = false;
-        if (impl_->isLockExpr(item.contextExpr.get())) {
-            isLockCtx = true;
-        } else if (auto* ce = dynamic_cast<CallExpr*>(item.contextExpr.get())) {
-            if (auto* cn = dynamic_cast<NameExpr*>(ce->callee.get()))
-                if (cn->name == "Lock") { isLockCtx = true; isLockTemp = true; }
-        }
+        bool isLockTemp = impl_->isLockConstructionExpr(item.contextExpr.get());
+        bool isLockCtx = isLockTemp || impl_->isLockExpr(item.contextExpr.get());
 
         item.contextExpr->accept(*this);
         llvm::Value* ctxVal = impl_->lastValue;
@@ -382,6 +376,11 @@ void CodeGen::visit(WithStmt& node) {
                 }
             }
         } else {
+            impl_->addError(
+                "'with' needs a Lock or a class with __enter__/__exit__; got '" +
+                    impl_->withContextTypeName(item.contextExpr.get(), ctxClassName) +
+                    "'",
+                item.contextExpr->location());
             if (item.optionalVars) {
                 if (auto* nameExpr = dynamic_cast<NameExpr*>(item.optionalVars.get())) {
                     auto* alloca = impl_->createEntryAlloca(

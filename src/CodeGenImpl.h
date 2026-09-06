@@ -684,7 +684,16 @@ struct CodeGen::Impl {
 
     bool exprHasBuiltinClass(Expr* e, const std::string& sentinel);
     bool isLockExpr(Expr* e);
+    bool isLockConstructionExpr(Expr* e);
     bool isDequeExpr(Expr* e);
+
+    static std::string withContextTypeName(Expr* e,
+                                           const std::string& fallbackClass) {
+        if (e && e->type) return e->type->toString();
+        if (!fallbackClass.empty()) return fallbackClass;
+        return "unknown";
+    }
+
     llvm::Value* emitExternAwareCall(llvm::Function* func,
                                      const std::vector<llvm::Value*>& args,
                                      const std::string& name);

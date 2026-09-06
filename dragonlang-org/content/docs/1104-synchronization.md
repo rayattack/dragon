@@ -94,6 +94,41 @@ if lock.acquire(blocking=False) {     # try once, never wait
 still couldn't get the lock. `with lock { ... }` is exactly `acquire()` on entry and
 `release()` on exit, made exception-safe.
 
+## Where the lock lives
+
+`with` guards whichever Lock the expression names, and the Lock does not have to
+be a local. `with self.lock`, `with other.lock`, `with self.inner.lock` and
+`with l` for a `l: Lock` parameter all acquire on entry and release on the
+normal exit, on a `return` out of the block, and on an exception raised through
+it. `self.lock.acquire()` / `self.lock.release()` work on a field the same way.
+That is what makes the `Counter` shape above a real guarantee rather than a
+convention: the lock belongs to the object, and every method that touches the
+guarded field reaches it through `self`.
+
+Reading a Lock out of a field or receiving it as a parameter is a **borrow**.
+Binding it to a local does not make the local its owner:
+
+```dragon
+from threading import Lock
+
+class Tally {
+    value: int = 0
+    own lock: Lock = Lock()
+}
+
+def bump(t: Tally) -> None {
+    guard: Lock = t.lock          # a borrow, not a second owner
+    with guard {
+        t.value = t.value + 1
+    }
+}                                 # scope exit does NOT destroy t's mutex
+```
+
+Only a Lock the scope minted itself (`mine: Lock = Lock()`) or took through an
+`own` move is destroyed when that scope ends. And `with` on a value that is
+neither a Lock nor a class with `__enter__`/`__exit__` is a compile error, so a
+`with` block never silently runs unguarded.
+
 ## The other primitives
 
 Each mirrors its Python counterpart and is imported from `threading`. They all

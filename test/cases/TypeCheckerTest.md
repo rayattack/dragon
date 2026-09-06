@@ -3996,3 +3996,56 @@ class Node {
 v: Node | int = 1
 w: Node | int = dub v
 ```
+
+#### :with_on_int_rejected
+
+An `int` is neither a Lock nor a context manager, so guarding a block with one
+has nothing to acquire and nothing to release. Accepting it would lower to an
+unguarded block.
+
+```dr
+n: int = 3
+with n {
+    print("guarded")
+}
+```
+
+#### :with_on_class_without_dunders_rejected
+
+```dr
+class Plain {
+    n: int = 0
+}
+p: Plain = Plain()
+with p {
+    print("guarded")
+}
+```
+
+#### :with_on_str_rejected
+
+```dr
+s: str = "hello"
+with s {
+    print("guarded")
+}
+```
+
+#### :with_on_context_manager_accepted
+
+```dr
+class Section {
+    name: str
+    def(name: str) {
+        self.name = name
+    }
+    def __enter__() -> str {
+        return self.name
+    }
+    def __exit__() {
+    }
+}
+with Section("setup") {
+    print("guarded")
+}
+```

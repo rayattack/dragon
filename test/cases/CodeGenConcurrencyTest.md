@@ -799,3 +799,169 @@ t: Task = fire work()
 r: int = t.join()
 print(r)
 ```
+
+#### :lock_own_field_with_ir
+
+```dr
+from threading import Lock
+
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+    def bump() -> None {
+        with self.lock {
+            self.value = self.value + 1
+        }
+    }
+}
+
+c: Counter = Counter()
+c.bump()
+print(c.value)
+```
+
+#### :lock_other_object_field_with_ir
+
+```dr
+from threading import Lock
+
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+}
+
+def bump_other(c: Counter) -> None {
+    with c.lock {
+        c.value = c.value + 1
+    }
+}
+
+c: Counter = Counter()
+bump_other(c)
+print(c.value)
+```
+
+#### :lock_nested_field_with_ir
+
+```dr
+from threading import Lock
+
+class Inner {
+    own lock: Lock = Lock()
+}
+
+class Outer {
+    value: int = 0
+    inner: Inner = Inner()
+    def bump() -> None {
+        with self.inner.lock {
+            self.value = self.value + 1
+        }
+    }
+}
+
+o: Outer = Outer()
+o.bump()
+print(o.value)
+```
+
+#### :lock_parameter_with_ir
+
+```dr
+from threading import Lock
+
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+}
+
+def bump_guarded(l: Lock, c: Counter) -> None {
+    with l {
+        c.value = c.value + 1
+    }
+}
+
+c: Counter = Counter()
+bump_guarded(c.lock, c)
+print(c.value)
+```
+
+#### :lock_local_bound_from_field_with_ir
+
+```dr
+from threading import Lock
+
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+    def bump() -> None {
+        borrowed: Lock = self.lock
+        with borrowed {
+            self.value = self.value + 1
+        }
+    }
+}
+
+c: Counter = Counter()
+c.bump()
+print(c.value)
+```
+
+#### :lock_owned_local_still_destroyed_ir
+
+```dr
+from threading import Lock
+
+def guarded(n: int) -> int {
+    mine: Lock = Lock()
+    total: int = 0
+    with mine {
+        total = n + 1
+    }
+    return total
+}
+
+print(guarded(1))
+```
+
+#### :lock_field_acquire_release_ir
+
+```dr
+from threading import Lock
+
+class Counter {
+    value: int = 0
+    own lock: Lock = Lock()
+    def bump() -> None {
+        self.lock.acquire()
+        self.value = self.value + 1
+        self.lock.release()
+    }
+}
+
+c: Counter = Counter()
+c.bump()
+print(c.value)
+```
+
+#### :lock_shared_across_fire_ir
+
+```dr
+from threading import Lock
+
+class Shared {
+    seen: list[str] = []
+    own lock: Lock = Lock()
+    def add(tag: str) -> None {
+        with self.lock {
+            self.seen.append(tag)
+        }
+    }
+}
+
+s: Shared = Shared()
+t: Task[None] = fire s.add("a")
+s.add("b")
+t.join()
+print(len(s.seen))
+```

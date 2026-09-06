@@ -37,6 +37,105 @@ class Rebinder {
     }
 }
 
+class Bag {
+    items: list[str] = []
+    own lock: Lock = Lock()
+    def fill(tag: str, n: int) -> None {
+        i: int = 0
+        while i < n {
+            with self.lock { self.items.append(tag + str(i)) }
+            i = i + 1
+        }
+    }
+}
+
+class Vault {
+    hits: int = 0
+    inner: Bag = Bag()
+    def touch_many(n: int) -> None {
+        i: int = 0
+        while i < n {
+            with self.inner.lock { self.hits = self.hits + 1 }
+            i = i + 1
+        }
+    }
+}
+
+class Borrower {
+    hits: int = 0
+    own lock: Lock = Lock()
+    def hit_many(n: int) -> None {
+        i: int = 0
+        while i < n {
+            borrowed: Lock = self.lock
+            with borrowed { self.hits = self.hits + 1 }
+            i = i + 1
+        }
+    }
+    def hit_explicit_many(n: int) -> None {
+        i: int = 0
+        while i < n {
+            self.lock.acquire()
+            self.hits = self.hits + 1
+            self.lock.release()
+            i = i + 1
+        }
+    }
+}
+
+def fill_guarded(l: Lock, b: Bag, tag: str, n: int) -> None {
+    i: int = 0
+    while i < n {
+        with l { b.items.append(tag + str(i)) }
+        i = i + 1
+    }
+}
+
+def bump_other_field(c: Counter, n: int) -> None {
+    i: int = 0
+    while i < n {
+        with c.lock { c.value = c.value + 1 }
+        i = i + 1
+    }
+}
+
+def distinct_count(items: list[str]) -> int {
+    seen: dict[str, int] = {}
+    for s in items { seen[s] = 1 }
+    return len(seen)
+}
+
+const FIELD_BAG: Bag = Bag()
+const PARAM_BAG: Bag = Bag()
+const SHARED_COUNTER: Counter = Counter()
+const SHARED_VAULT: Vault = Vault()
+const BORROW_BOX: Borrower = Borrower()
+const EXPLICIT_BOX: Borrower = Borrower()
+
+def field_bag_worker(tag: str) -> None {
+    FIELD_BAG.fill(tag, 500)
+}
+
+def param_bag_worker(tag: str) -> None {
+    fill_guarded(PARAM_BAG.lock, PARAM_BAG, tag, 500)
+}
+
+def counter_field_worker() -> None {
+    bump_other_field(SHARED_COUNTER, 2000)
+}
+
+def vault_worker() -> None {
+    SHARED_VAULT.touch_many(2000)
+}
+
+def borrow_worker() -> None {
+    BORROW_BOX.hit_many(2000)
+}
+
+def explicit_worker() -> None {
+    EXPLICIT_BOX.hit_explicit_many(2000)
+}
+
 class OwnFieldDefaultTests(TestCase) {
     def test_docs_counter_shape_bumps() {
         c: Counter = Counter()
@@ -98,6 +197,63 @@ class OwnFieldDefaultTests(TestCase) {
             i = i + 1
         }
         self.assertEqual(total, 3000)
+    }
+
+    def test_two_workers_share_one_own_field_lock() {
+        t1: Task = fire field_bag_worker("a")
+        t2: Task = fire field_bag_worker("b")
+        t1.join()
+        t2.join()
+        self.assertEqual(len(FIELD_BAG.items), 1000)
+        self.assertEqual(distinct_count(FIELD_BAG.items), 1000)
+    }
+
+    def test_two_workers_share_a_lock_passed_as_a_parameter() {
+        t1: Task = fire param_bag_worker("a")
+        t2: Task = fire param_bag_worker("b")
+        t1.join()
+        t2.join()
+        self.assertEqual(len(PARAM_BAG.items), 1000)
+        self.assertEqual(distinct_count(PARAM_BAG.items), 1000)
+    }
+
+    def test_two_workers_guard_another_objects_field_lock() {
+        t1: Task = fire counter_field_worker()
+        t2: Task = fire counter_field_worker()
+        t1.join()
+        t2.join()
+        self.assertEqual(SHARED_COUNTER.value, 4000)
+    }
+
+    def test_nested_field_lock_guards_the_outer_object() {
+        t1: Task = fire vault_worker()
+        t2: Task = fire vault_worker()
+        t1.join()
+        t2.join()
+        self.assertEqual(SHARED_VAULT.hits, 4000)
+    }
+
+    def test_lock_borrowed_into_a_local_survives_repeated_calls() {
+        b: Borrower = Borrower()
+        b.hit_many(3000)
+        b.hit_many(3000)
+        self.assertEqual(b.hits, 6000)
+    }
+
+    def test_borrowed_local_lock_still_excludes_two_workers() {
+        t1: Task = fire borrow_worker()
+        t2: Task = fire borrow_worker()
+        t1.join()
+        t2.join()
+        self.assertEqual(BORROW_BOX.hits, 4000)
+    }
+
+    def test_explicit_acquire_release_on_a_field_lock() {
+        t1: Task = fire explicit_worker()
+        t2: Task = fire explicit_worker()
+        t1.join()
+        t2.join()
+        self.assertEqual(EXPLICIT_BOX.hits, 4000)
     }
 }
 

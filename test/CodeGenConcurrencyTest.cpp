@@ -354,3 +354,72 @@ TEST(CodeGenE2E, BareTaskAnnotationRefinesAndJoins) {
     auto out = compileAndRun(code("bare_task_annotation_refines_and_joins"));
     EXPECT_EQ(out, "42\n");
 }
+
+static std::string irFunction(const std::string& ir, const std::string& name) {
+    size_t pos = ir.find("\ndefine ");
+    while (pos != std::string::npos) {
+        size_t brace = ir.find('{', pos);
+        if (brace == std::string::npos) return "";
+        std::string header = ir.substr(pos, brace - pos);
+        if (header.find("@" + name + "(") != std::string::npos) {
+            size_t end = ir.find("\n}", brace);
+            if (end == std::string::npos) return ir.substr(brace);
+            return ir.substr(brace, end - brace);
+        }
+        pos = ir.find("\ndefine ", brace);
+    }
+    return "";
+}
+
+static void expectGuardedBody(const std::string& block,
+                              const std::string& function) {
+    std::string body = irFunction(generateIR(code(block)), function);
+    ASSERT_FALSE(body.empty()) << block << ": no function @" << function;
+    EXPECT_GE(countSubstring(body, "@dragon_lock_acquire"), 1u)
+        << block << ": @" << function << " never acquires the lock";
+    EXPECT_GE(countSubstring(body, "@dragon_lock_release"), 1u)
+        << block << ": @" << function << " never releases the lock";
+    EXPECT_EQ(countSubstring(body, "@dragon_lock_destroy"), 0u)
+        << block << ": @" << function << " destroys a borrowed lock";
+}
+
+TEST(CodeGenTest, LockOwnFieldWithIR) {
+    expectGuardedBody("lock_own_field_with_ir", "Counter_bump");
+}
+
+TEST(CodeGenTest, LockOtherObjectFieldWithIR) {
+    expectGuardedBody("lock_other_object_field_with_ir", "bump_other");
+}
+
+TEST(CodeGenTest, LockNestedFieldWithIR) {
+    expectGuardedBody("lock_nested_field_with_ir", "Outer_bump");
+}
+
+TEST(CodeGenTest, LockParameterWithIR) {
+    expectGuardedBody("lock_parameter_with_ir", "bump_guarded");
+}
+
+TEST(CodeGenTest, LockLocalBoundFromFieldWithIR) {
+    expectGuardedBody("lock_local_bound_from_field_with_ir", "Counter_bump");
+}
+
+TEST(CodeGenTest, LockFieldAcquireReleaseIR) {
+    expectGuardedBody("lock_field_acquire_release_ir", "Counter_bump");
+}
+
+TEST(CodeGenTest, LockSharedAcrossFireIR) {
+    expectGuardedBody("lock_shared_across_fire_ir", "Shared_add");
+}
+
+TEST(CodeGenTest, LockOwnedLocalStillDestroyedIR) {
+    std::string body = irFunction(
+        generateIR(code("lock_owned_local_still_destroyed_ir")), "guarded");
+    ASSERT_FALSE(body.empty());
+    EXPECT_GE(countSubstring(body, "@dragon_lock_acquire"), 1u);
+    EXPECT_GE(countSubstring(body, "@dragon_lock_destroy"), 1u);
+}
+
+TEST(CodeGenE2E, LockSharedAcrossFireCountsBothWorkers) {
+    auto out = compileAndRun(code("lock_shared_across_fire_ir"));
+    EXPECT_EQ(out, "2\n");
+}

@@ -230,7 +230,15 @@ bool CodeGen::Impl::exprHasBuiltinClass(Expr* e, const std::string& sentinel) {
 }
 
 bool CodeGen::Impl::isLockExpr(Expr* e) {
+    if (e && e->type && e->type->kind() == Type::Kind::Lock) return true;
     return exprHasBuiltinClass(e, "__Lock");
+}
+
+bool CodeGen::Impl::isLockConstructionExpr(Expr* e) {
+    auto* ce = dynamic_cast<CallExpr*>(e);
+    if (!ce) return false;
+    auto* cn = dynamic_cast<NameExpr*>(ce->callee.get());
+    return cn && cn->name == "Lock" && !classNames.count("Lock");
 }
 
 bool CodeGen::Impl::isDequeExpr(Expr* e) {

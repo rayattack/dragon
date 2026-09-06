@@ -2221,3 +2221,10 @@ TEST(TypeCheckerTest, DubCopiesClosedUnionsOnly) {
     EXPECT_TRUE(checkOk(code("union_with_class_arm_declared_accepted")));
     EXPECT_TRUE(checkHasErrors(code("dub_union_with_class_arm_rejected")));
 }
+
+TEST(TypeCheckerTest, WithNeedsLockOrContextManager) {
+    EXPECT_TRUE(checkHasErrors(code("with_on_int_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("with_on_class_without_dunders_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("with_on_str_rejected")));
+    EXPECT_TRUE(checkOk(code("with_on_context_manager_accepted")));
+}
