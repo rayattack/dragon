@@ -336,6 +336,7 @@ also set the right `Content-Type`:
 | `res.text(body)` | `text/plain` | plain text, debug output |
 | `res.json(body)` | `application/json` | API responses (pass a `str` of JSON) |
 | `res.out(status, body)` | unchanged | set status + body in one call |
+| `res.binary(status, body)` | unchanged | a `bytes` body sent byte for byte (protobuf, images); content-length is the byte length |
 | `res.redirect(url)` | - | `307` redirect to `url` |
 | `res.redirect(url, true)` | - | `308` permanent redirect |
 
@@ -654,6 +655,7 @@ documentation you are reading was delivered by the stack it describes.
 | Read a JSON body (unknown shape) | `tree: Data = req.json()` (the declared JSON domain) |
 | Send HTML / text / JSON | `res.html(s)` / `res.text(s)` / `res.json(s)` |
 | Set status + body | `res.out(404, "Not Found")` |
+| Send a binary body | `res.binary(200, payload)` with `payload: bytes` |
 | Redirect | `res.redirect("/")` (307) / `res.redirect("/", true)` (308) |
 | Set a header / cookie | `res.set_header(k, v)` / `res.cookie(name, value)` |
 | Escape user text into HTML | `escape(s)` or `template[HTML] { ... !{x} }` |

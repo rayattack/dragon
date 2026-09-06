@@ -363,6 +363,12 @@ class Response {
         return self
     }
 
+    def binary(status: int, body: bytes) -> Response {
+        self.status = status
+        self.body = dragon_str_from_bytes(body)
+        return self
+    }
+
     def close_connection() -> Response {
         self._close = true
         return self
