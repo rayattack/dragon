@@ -803,7 +803,187 @@ class BytesElementAccessTests(TestCase) {
 }
 
 
+def _len_of(buf: bytes) -> int {
+    return len(buf)
+}
+
+
+def _sum_of(buf: bytes) -> int {
+    total: int = 0
+    for b in buf {
+        total = total + b
+    }
+    return total
+}
+
+
+class BytesEmptyAndSliceTests(TestCase) {
+    """Every zero-length bytes is one immortal singleton, and a step-1 slice is a
+    single memcpy out of one allocation (DRG-198). The singleton is handed to
+    containers, tasks, boxes and concat, so it has to survive release, shared
+    marking and collection without ever being freed."""
+
+    def test_every_producer_of_zero_bytes_agrees() {
+        made: bytes = bytes()
+        from_list: bytes = bytes([])
+        literal: bytes = b""
+        encoded: bytes = "".encode("utf-8")
+        sliced: bytes = b"abcd"[2:2]
+        joined: bytes = b"" + b""
+        self.assertEqual(len(made), 0)
+        self.assertEqual(len(from_list), 0)
+        self.assertEqual(len(literal), 0)
+        self.assertEqual(len(encoded), 0)
+        self.assertEqual(len(sliced), 0)
+        self.assertEqual(len(joined), 0)
+        self.assertEqual(made == from_list, True)
+        self.assertEqual(literal == encoded, True)
+        self.assertEqual(sliced == joined, True)
+    }
+
+    def test_reassigning_an_empty_thousands_of_times_releases_it_each_turn() {
+        held: bytes = b""
+        i: int = 0
+        while i < 2000 {
+            held = bytes()
+            held = bytes([])
+            held = b"abcd"[1:1]
+            i = i + 1
+        }
+        self.assertEqual(len(held), 0)
+    }
+
+    def test_empty_crosses_a_task_boundary() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            blank: bytes = bytes([])
+            const t: Task[int] = fire _len_of(blank)
+            total = total + await t
+            total = total + len(blank)
+            i = i + 1
+        }
+        self.assertEqual(total, 0)
+    }
+
+    def test_empty_lives_and_dies_inside_containers() {
+        i: int = 0
+        while i < 2000 {
+            bag: dict[str, bytes] = {}
+            bag["blank"] = bytes()
+            bag["also"] = b""
+            row: list[bytes] = [bytes([]), b"", b"ab"[0:0]]
+            self.assertEqual(len(bag["blank"]) + len(row[2]), 0)
+            i = i + 1
+        }
+    }
+
+    def test_concat_with_an_empty_on_either_side_keeps_the_payload() {
+        payload: bytes = b"abcd"
+        i: int = 0
+        while i < 2000 {
+            const left: bytes = b"" + payload
+            const right: bytes = payload + bytes()
+            self.assertEqual(len(left), 4)
+            self.assertEqual(len(right), 4)
+            self.assertEqual(left == payload, True)
+            self.assertEqual(right == payload, True)
+            i = i + 1
+        }
+        self.assertEqual(payload[0], ord("a"))
+        self.assertEqual(payload[3], ord("d"))
+        self.assertEqual(len(payload), 4)
+    }
+
+    def test_the_empty_can_be_sliced_iterated_and_decoded() {
+        blank: bytes = bytes()
+        i: int = 0
+        while i < 2000 {
+            self.assertEqual(len(blank[0:0]), 0)
+            self.assertEqual(len(blank[0:5]), 0)
+            self.assertEqual(len(blank[-3:]), 0)
+            self.assertEqual(len(blank[::-1]), 0)
+            self.assertEqual(_sum_of(blank), 0)
+            self.assertEqual(len(blank.decode("utf-8")), 0)
+            i = i + 1
+        }
+        self.assertEqual(len(blank), 0)
+    }
+
+    def test_the_empty_hashes_reprs_and_compares_like_a_value() {
+        blank: bytes = bytes()
+        other: bytes = bytes([])
+        self.assertEqual(hash(blank), hash(other))
+        self.assertEqual(repr(blank), "b\'\'")
+        self.assertEqual(blank == other, True)
+        self.assertEqual(blank == b"a", False)
+        self.assertEqual(blank < b"a", True)
+    }
+
+    def test_the_empty_round_trips_through_a_union() {
+        i: int = 0
+        while i < 2000 {
+            boxed: Boxed = bytes([])
+            const back: bytes = boxed
+            self.assertEqual(len(back), 0)
+            i = i + 1
+        }
+    }
+
+    def test_step_one_slices_read_the_whole_window() {
+        buf: bytes = b"abcdefgh"
+        self.assertEqual(buf[0:8] == buf, True)
+        self.assertEqual(buf[2:6] == b"cdef", True)
+        self.assertEqual(buf[-3:] == b"fgh", True)
+        self.assertEqual(buf[:3] == b"abc", True)
+        self.assertEqual(len(buf[6:2]), 0)
+        self.assertEqual(len(buf[100:200]), 0)
+        self.assertEqual(len(buf[-100:-50]), 0)
+    }
+
+    def test_stepped_and_reversed_slices_are_unchanged() {
+        buf: bytes = b"abcdefgh"
+        self.assertEqual(buf[::2] == b"aceg", True)
+        self.assertEqual(buf[1::2] == b"bdfh", True)
+        self.assertEqual(buf[::-1] == b"hgfedcba", True)
+        self.assertEqual(buf[::-2] == b"hfdb", True)
+        self.assertEqual(buf[6:1:-2] == b"gec", True)
+        self.assertEqual(len(buf[2:2:3]), 0)
+    }
+
+    def test_slices_across_a_page_larger_than_four_kilobytes() {
+        page: bytes = ("abcd" * 1200).encode("utf-8")
+        self.assertEqual(len(page), 4800)
+        head: bytes = page[0:4096]
+        tail: bytes = page[4096:]
+        self.assertEqual(len(head), 4096)
+        self.assertEqual(len(tail), 704)
+        self.assertEqual(head[0], ord("a"))
+        self.assertEqual(head[4095], ord("d"))
+        self.assertEqual(tail[0], ord("a"))
+        self.assertEqual(tail[703], ord("d"))
+        self.assertEqual(len(page[1:4799]), 4798)
+        self.assertEqual(len(page[::2]), 2400)
+        self.assertEqual(page[::2][0], ord("a"))
+        self.assertEqual(page[::2][1], ord("c"))
+    }
+
+    def test_owned_temp_slices_in_a_loop_stay_balanced() {
+        page: bytes = ("abcd" * 1023).encode("utf-8")
+        total: int = 0
+        i: int = 0
+        while i < 2000 {
+            const piece: bytes = page[8:16]
+            total = total + piece[0] + len(piece)
+            total = total + len(page[0:0])
+            i = i + 1
+        }
+        self.assertEqual(total, 2000 * (ord("a") + 8))
+    }
+}
+
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
-      BytesElementAccessTests()])
+      BytesElementAccessTests(), BytesEmptyAndSliceTests()])

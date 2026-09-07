@@ -1120,14 +1120,53 @@ void dragon_set_destroy(DragonSet* s) {
     free(s);
 }
 
-DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
-    auto* buf = (uint8_t*)dragon_xmalloc(len > 0 ? (size_t)len : 1);
-    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
+struct DragonEmptyBytes {
+    DragonBytes bytes;
+    uint8_t terminator;
+};
+
+static DragonEmptyBytes dragon_empty_bytes = {
+    { { DRAGON_IMMORTAL_REFCOUNT, DRAGON_TAG_BYTES, GC_FLAG_HEAP_OBJ, 0, -1 },
+      0,
+      (uint8_t*)&dragon_empty_bytes + sizeof(DragonBytes) },
+    0
+};
+
+DragonBytes* dragon_bytes_empty() {
+    return &dragon_empty_bytes.bytes;
+}
+
+static const size_t DRAGON_BYTES_SMALL_ALLOC = 1024;
+
+static inline bool dragon_bytes_buffer_is_inline(const DragonBytes* b) {
+    return b->data == (const uint8_t*)(b + 1);
+}
+
+static inline DragonBytes* dragon_bytes_alloc(int64_t len) {
+    if (len <= 0) return &dragon_empty_bytes.bytes;
+    if ((size_t)len + sizeof(DragonBytes) + 1 <= DRAGON_BYTES_SMALL_ALLOC) {
+        auto* b = (DragonBytes*)dragon_xmalloc((size_t)len + sizeof(DragonBytes) + 1);
+        dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
+        b->len = len;
+        b->data = (uint8_t*)(b + 1);
+        b->data[len] = 0;
+        return b;
+    }
+    auto* buf = (uint8_t*)dragon_xmalloc_ex(len, 1, 1);
+    auto* b = (DragonBytes*)dragon_malloc_nullable(sizeof(DragonBytes));
+    if (!b) { free(buf); dragon_raise_oom(); }
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = len;
     b->data = buf;
-    if (data && len > 0) memcpy(b->data, data, len);
-    else if (len > 0) memset(b->data, 0, (size_t)len);
+    b->data[len] = 0;
+    return b;
+}
+
+DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
+    DragonBytes* b = dragon_bytes_alloc(len);
+    if (len <= 0) return b;
+    if (data) memcpy(b->data, data, (size_t)len);
+    else memset(b->data, 0, (size_t)len);
     return b;
 }
 
@@ -1136,16 +1175,16 @@ DragonBytes* dragon_bytes_from_literal(const char* data, int64_t len) {
 }
 
 DragonBytes* dragon_bytes_from_list(DragonList* list) {
-    if (!list) return dragon_bytes_new(nullptr, 0);
+    if (!list) return dragon_bytes_empty();
     int64_t n = list->size;
-    auto* buf = (uint8_t*)dragon_xmalloc(n > 0 ? (size_t)n : 1);
-    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
-    b->len = n;
-    b->data = buf;
-    for (int64_t i = 0; i < n; ++i) {
-        b->data[i] = (uint8_t)(dragon_list_load(list, i) & 0xFF);
+    DragonBytes* b = dragon_bytes_alloc(n);
+    if (n <= 0) return b;
+    if (list->elem_size == 1) {
+        memcpy(b->data, list->data, (size_t)n);
+        return b;
     }
+    const int64_t* src = (const int64_t*)list->data;
+    for (int64_t i = 0; i < n; ++i) b->data[i] = (uint8_t)(src[i] & 0xFF);
     return b;
 }
 
@@ -1181,28 +1220,29 @@ DragonBytes* dragon_bytes_concat(DragonBytes* a, DragonBytes* b) {
     if (na > INT64_MAX - nb)
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = na + nb;
-    auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
-    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
-    result->len = newLen;
-    result->data = data;
-    if (na > 0) memcpy(data, a->data, na);
-    if (nb > 0) memcpy(data + na, b->data, nb);
+    DragonBytes* result = dragon_bytes_alloc(newLen);
+    if (newLen <= 0) return result;
+    if (na > 0) memcpy(result->data, a->data, (size_t)na);
+    if (nb > 0) memcpy(result->data + na, b->data, (size_t)nb);
     return result;
 }
 
 DragonBytes* dragon_bytes_repeat(DragonBytes* b, int64_t n) {
-    if (!b || n <= 0 || b->len == 0) return dragon_bytes_new(nullptr, 0);
+    if (!b || n <= 0 || b->len == 0) return dragon_bytes_empty();
     if (n > INT64_MAX / b->len)
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = b->len * n;
-    auto* data = (uint8_t*)dragon_xmalloc_n(n, (size_t)b->len);
-    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
-    result->len = newLen;
-    result->data = data;
-    for (int64_t i = 0; i < n; i++) {
-        memcpy(data + i * b->len, b->data, b->len);
+    DragonBytes* result = dragon_bytes_alloc(newLen);
+    if (b->len == 1) {
+        memset(result->data, b->data[0], (size_t)newLen);
+        return result;
+    }
+    memcpy(result->data, b->data, (size_t)b->len);
+    int64_t filled = b->len;
+    while (filled < newLen) {
+        int64_t chunk = filled < newLen - filled ? filled : newLen - filled;
+        memcpy(result->data + filled, result->data, (size_t)chunk);
+        filled += chunk;
     }
     return result;
 }
@@ -1244,20 +1284,28 @@ void dragon_bytes_index_error() {
     dragon_raise_exc_cstr(41, "IndexError: bytes index out of range");
 }
 
+static inline int64_t dragon_slice_count(int64_t start, int64_t stop, int64_t step) {
+    uint64_t span = step > 0 ? (uint64_t)(stop - start) : (uint64_t)(start - stop);
+    if ((step > 0 && stop <= start) || (step < 0 && start <= stop)) return 0;
+    uint64_t mag = step > 0 ? (uint64_t)step : -(uint64_t)step;
+    return (int64_t)((span + mag - 1) / mag);
+}
+
 DragonBytes* dragon_bytes_slice(DragonBytes* b, int64_t start, int64_t stop, int64_t step) {
-    if (!b) return dragon_bytes_new(nullptr, 0);
+    if (!b) return dragon_bytes_empty();
     if (step == 0) {
         dragon_raise_exc_cstr(90, "ValueError: slice step cannot be zero");
     }
     dragon_slice_indices(b->len, &start, &stop, step);
-    int64_t count = 0;
-    if (step > 0) { for (int64_t i = start; i < stop; i += step) count++; }
-    else { for (int64_t i = start; i > stop; i += step) count++; }
-    auto* data = (uint8_t*)dragon_xmalloc(count > 0 ? (size_t)count : 1);
-    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
-    result->len = count;
-    result->data = data;
+    if (step == 1) {
+        int64_t count = stop > start ? stop - start : 0;
+        DragonBytes* result = dragon_bytes_alloc(count);
+        if (count > 0) memcpy(result->data, b->data + start, (size_t)count);
+        return result;
+    }
+    int64_t count = dragon_slice_count(start, stop, step);
+    DragonBytes* result = dragon_bytes_alloc(count);
+    if (count == 0) return result;
     int64_t w = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) result->data[w++] = b->data[i]; }
     else { for (int64_t i = start; i > stop; i += step) result->data[w++] = b->data[i]; }
@@ -1297,7 +1345,7 @@ const char* dragon_str_from_bytes(DragonBytes* b) {
 }
 
 DragonBytes* dragon_str_encode(const char* s) {
-    if (!s) return dragon_bytes_new(nullptr, 0);
+    if (!s) return dragon_bytes_empty();
     int64_t blen = 0;
     char* enc = dragon_str_to_utf8_alloc(s, &blen);
     DragonBytes* b = dragon_bytes_new((const uint8_t*)(enc ? enc : s), blen);
@@ -1309,15 +1357,8 @@ DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
     int64_t blen = 0;
     char* enc = s ? dragon_str_to_utf8_alloc(s, &blen) : nullptr;
     const uint8_t* src = (const uint8_t*)(enc ? enc : (s ? s : ""));
-    auto* data = (uint8_t*)dragon_malloc_nullable((size_t)(blen > 0 ? blen : 0) + 1);
-    if (!data) { if (enc) free(enc); dragon_raise_oom(); }
-    auto* b = (DragonBytes*)dragon_malloc_nullable(sizeof(DragonBytes));
-    if (!b) { free(data); if (enc) free(enc); dragon_raise_oom(); }
-    dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
-    b->len = blen;
-    b->data = data;
+    DragonBytes* b = dragon_bytes_alloc(blen);
     if (blen > 0) memcpy(b->data, src, (size_t)blen);
-    b->data[blen] = '\0';
     if (enc) free(enc);
     return b;
 }
@@ -1393,7 +1434,7 @@ int64_t dragon_bytes_endswith(DragonBytes* b, DragonBytes* suffix) {
 DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonBytes* new_b) {
     if (!b || !old_b || old_b->len == 0) {
         if (b) return dragon_bytes_new(b->data, b->len);
-        return dragon_bytes_new(nullptr, 0);
+        return dragon_bytes_empty();
     }
     int64_t count = 0;
     for (int64_t i = 0; i <= b->len - old_b->len; i++) {
@@ -1404,11 +1445,8 @@ DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonByte
     if (delta > 0 && count > (INT64_MAX - b->len) / delta)
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = b->len + count * delta;
-    auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
-    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
-    result->len = newLen;
-    result->data = data;
+    DragonBytes* result = dragon_bytes_alloc(newLen);
+    if (newLen <= 0) return result;
     int64_t w = 0;
     for (int64_t i = 0; i < b->len; ) {
         if (i <= b->len - old_b->len && memcmp(b->data + i, old_b->data, old_b->len) == 0) {
@@ -1422,7 +1460,7 @@ DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonByte
 }
 
 DragonBytes* dragon_bytes_upper(DragonBytes* b) {
-    if (!b) return dragon_bytes_new(nullptr, 0);
+    if (!b) return dragon_bytes_empty();
     auto* r = dragon_bytes_new(b->data, b->len);
     for (int64_t i = 0; i < r->len; i++) {
         if (r->data[i] >= 'a' && r->data[i] <= 'z') r->data[i] -= 32;
@@ -1431,7 +1469,7 @@ DragonBytes* dragon_bytes_upper(DragonBytes* b) {
 }
 
 DragonBytes* dragon_bytes_lower(DragonBytes* b) {
-    if (!b) return dragon_bytes_new(nullptr, 0);
+    if (!b) return dragon_bytes_empty();
     auto* r = dragon_bytes_new(b->data, b->len);
     for (int64_t i = 0; i < r->len; i++) {
         if (r->data[i] >= 'A' && r->data[i] <= 'Z') r->data[i] += 32;
@@ -1444,7 +1482,7 @@ static bool is_ascii_whitespace(uint8_t c) {
 }
 
 DragonBytes* dragon_bytes_strip(DragonBytes* b) {
-    if (!b || b->len == 0) return dragon_bytes_new(nullptr, 0);
+    if (!b || b->len == 0) return dragon_bytes_empty();
     int64_t start = 0, end = b->len;
     while (start < end && is_ascii_whitespace(b->data[start])) start++;
     while (end > start && is_ascii_whitespace(b->data[end - 1])) end--;
@@ -1452,14 +1490,14 @@ DragonBytes* dragon_bytes_strip(DragonBytes* b) {
 }
 
 DragonBytes* dragon_bytes_lstrip(DragonBytes* b) {
-    if (!b || b->len == 0) return dragon_bytes_new(nullptr, 0);
+    if (!b || b->len == 0) return dragon_bytes_empty();
     int64_t start = 0;
     while (start < b->len && is_ascii_whitespace(b->data[start])) start++;
     return dragon_bytes_new(b->data + start, b->len - start);
 }
 
 DragonBytes* dragon_bytes_rstrip(DragonBytes* b) {
-    if (!b || b->len == 0) return dragon_bytes_new(nullptr, 0);
+    if (!b || b->len == 0) return dragon_bytes_empty();
     int64_t end = b->len;
     while (end > 0 && is_ascii_whitespace(b->data[end - 1])) end--;
     return dragon_bytes_new(b->data, end);
@@ -1496,7 +1534,7 @@ DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
 }
 
 DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
-    if (!list || list->size == 0) return dragon_bytes_new(nullptr, 0);
+    if (!list || list->size == 0) return dragon_bytes_empty();
     int64_t totalLen = 0;
     for (int64_t i = 0; i < list->size; i++) {
         auto* part = (DragonBytes*)(intptr_t)dragon_list_load(list, i);
@@ -1507,11 +1545,8 @@ DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
             dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
         if (i > 0 && sep) totalLen += sep->len;
     }
-    auto* data = (uint8_t*)dragon_xmalloc(totalLen > 0 ? (size_t)totalLen : 1);
-    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
-    result->len = totalLen;
-    result->data = data;
+    DragonBytes* result = dragon_bytes_alloc(totalLen);
+    if (totalLen <= 0) return result;
     int64_t w = 0;
     for (int64_t i = 0; i < list->size; i++) {
         if (i > 0 && sep && sep->len > 0) { memcpy(result->data + w, sep->data, sep->len); w += sep->len; }
@@ -1565,7 +1600,7 @@ const char* dragon_bytes_hex(DragonBytes* b) {
 }
 
 DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
-    if (!hex_str) return dragon_bytes_new(nullptr, 0);
+    if (!hex_str) return dragon_bytes_empty();
     if (dragon_str_is_heap(hex_str) &&
         dragon_string_from_data(hex_str)->kind == 4) {
         dragon_raise_exc_cstr(90, "ValueError: non-hexadecimal number found in fromhex() arg");
@@ -1590,11 +1625,8 @@ DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
         dragon_raise_exc_cstr(90, "ValueError: non-hexadecimal number found in fromhex() arg");
     }
     int64_t byteLen = nibbles / 2;
-    auto* data = (uint8_t*)dragon_xmalloc(byteLen > 0 ? (size_t)byteLen : 1);
-    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
-    dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
-    result->len = byteLen;
-    result->data = data;
+    DragonBytes* result = dragon_bytes_alloc(byteLen);
+    if (byteLen <= 0) return result;
     int64_t w = 0;
     for (int64_t i = 0; i < slen; ) {
         while (i < slen && hex_str[i] == ' ') i++;
@@ -1609,7 +1641,7 @@ DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
 
 void dragon_bytes_destroy(DragonBytes* b) {
     if (!b) return;
-    free(b->data);
+    if (!dragon_bytes_buffer_is_inline(b)) free(b->data);
     free(b);
 }
 

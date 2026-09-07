@@ -700,6 +700,7 @@ void dragon_set_add(DragonSet* s, int64_t val);
 int64_t dragon_set_contains(DragonSet* s, int64_t val);
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len);
+DragonBytes* dragon_bytes_empty();
 DragonBytes* dragon_bytes_from_list(DragonList* list);
 
 DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level);
