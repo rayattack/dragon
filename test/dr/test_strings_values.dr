@@ -1,6 +1,8 @@
 type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
+type LooseBytes = int | bytes
 
 from unittest import TestCase, main
+from threading import Thread
 
 def _ord_two_chars() {
     ord("ab")
@@ -1166,7 +1168,192 @@ class BytesDecodeTests(TestCase) {
     }
 }
 
+shared_literal: bytes = b"crossing"
+thread_total: int = 0
+
+class LiteralDefaults {
+    raw: bytes = b""
+    tag: bytes = b"probe"
+
+    def touch() -> int {
+        return len(self.raw) + len(self.tag)
+    }
+}
+
+def _fold_bytes(buf: bytes) -> int {
+    total: int = 0
+    for b in buf {
+        total = total + b
+    }
+    return total
+}
+
+def _here_literal() -> bytes {
+    return b"shared literal"
+}
+
+def _there_literal() -> bytes {
+    return b"shared literal"
+}
+
+def _fold_list(items: list[bytes]) -> int {
+    total: int = 0
+    for it in items {
+        total = total + len(it)
+    }
+    return total
+}
+
+shared_box: list[bytes] = [b"abc", b"defg"]
+
+def _thread_body() -> None {
+    global thread_total
+    thread_total = _fold_bytes(shared_literal) + _fold_list(shared_box)
+}
+
+class BytesLiteralImmortalTests(TestCase) {
+    def test_a_literal_reassigned_in_a_loop() {
+        buf: bytes = b""
+        total: int = 0
+        for i in range(5000) {
+            buf = b"abcd"
+            total = total + len(buf)
+            buf = b""
+        }
+        self.assertEqual(total, 20000)
+        self.assertEqual(len(buf), 0)
+    }
+
+    def test_a_literal_outlives_the_container_it_was_put_in() {
+        for i in range(5000) {
+            box: list[bytes] = [b"abc", b"", b"abc"]
+            self.assertEqual(len(box[0]), 3)
+            self.assertEqual(len(box[1]), 0)
+            table: dict[bytes, int] = {}
+            table[b"key"] = 1
+            table[b"other"] = 2
+            self.assertEqual(table[b"key"], 1)
+            self.assertEqual(len(table), 2)
+        }
+        self.assertEqual(len(b"abc"), 3)
+    }
+
+    def test_concatenating_a_literal_with_the_empty_literal() {
+        for i in range(5000) {
+            left: bytes = b"abc" + b""
+            right: bytes = b"" + b"abc"
+            self.assertEqual(left, b"abc")
+            self.assertEqual(right, b"abc")
+            self.assertEqual(left, right)
+        }
+        self.assertEqual(b"abc" + b"", b"abc")
+    }
+
+    def test_a_literal_handed_to_a_fire() {
+        for i in range(2000) {
+            t: Task[int] = fire _fold_bytes(b"abcd")
+            self.assertEqual(t.join(), 394)
+        }
+    }
+
+    def test_a_literal_read_from_an_os_thread() {
+        th: Thread = Thread(target=_thread_body)
+        th.start()
+        th.join()
+        self.assertEqual(thread_total, _fold_bytes(b"crossing") + 7)
+        self.assertEqual(len(shared_literal), 8)
+        self.assertEqual(_fold_list(shared_box), 7)
+    }
+
+    def test_a_literal_inside_a_container_handed_to_a_fire() {
+        for i in range(2000) {
+            box: list[bytes] = [b"abc", b"defg"]
+            t: Task[int] = fire _fold_list(box)
+            self.assertEqual(t.join(), 7)
+        }
+    }
+
+    def test_a_literal_boxed_and_unboxed() {
+        for i in range(5000) {
+            v: LooseBytes = b"payload"
+            self.assertTrue(isinstance(v, bytes))
+            if isinstance(v, bytes) {
+                self.assertEqual(len(v), 7)
+                self.assertEqual(v, b"payload")
+            }
+        }
+    }
+
+    def test_a_literal_field_default_built_many_times() {
+        total: int = 0
+        for i in range(5000) {
+            holder: LiteralDefaults = LiteralDefaults()
+            total = total + holder.touch()
+        }
+        self.assertEqual(total, 25000)
+    }
+
+    def test_slicing_and_iterating_a_literal() {
+        for i in range(5000) {
+            self.assertEqual(len(b"abcd"[1:3]), 2)
+            self.assertEqual(b"abcd"[1:3], b"bc")
+            self.assertEqual(len(b""[0:5]), 0)
+            self.assertEqual(_fold_bytes(b"abcd"), 394)
+        }
+        self.assertEqual(b"abcd"[::-1], b"dcba")
+    }
+
+    def test_len_hash_and_decode_of_a_literal() {
+        for i in range(2000) {
+            self.assertEqual(len(b"abc"), 3)
+            self.assertEqual(hash(b"abc"), hash(b"ab" + b"c"))
+            self.assertEqual(b"abc".decode("utf-8"), "abc")
+            self.assertEqual(b"".decode("utf-8"), "")
+        }
+    }
+
+    def test_the_same_literal_in_two_functions_compares_equal() {
+        for i in range(2000) {
+            self.assertEqual(_here_literal(), _there_literal())
+            self.assertEqual(len(_here_literal()), 14)
+        }
+    }
+
+    def test_deleting_a_name_bound_to_a_literal() {
+        for i in range(2000) {
+            buf: bytes = b"deleteme"
+            self.assertEqual(len(buf), 8)
+            del buf
+        }
+        self.assertEqual(len(b"deleteme"), 8)
+    }
+
+    def test_literals_with_embedded_nul_and_high_bytes() {
+        for i in range(2000) {
+            const nulled: bytes = b"a\x00b"
+            const high: bytes = b"\x80\xff\x00\x7f"
+            self.assertEqual(len(nulled), 3)
+            self.assertEqual(len(high), 4)
+            self.assertEqual(nulled[1], 0)
+            self.assertEqual(high[0], 128)
+            self.assertEqual(high[1], 255)
+            self.assertEqual(_fold_bytes(nulled), ord("a") + ord("b"))
+            self.assertEqual(nulled, b"a\x00b")
+            self.assertNotEqual(nulled, b"ab")
+        }
+    }
+
+    def test_returning_a_literal_from_a_function() {
+        total: int = 0
+        for i in range(5000) {
+            total = total + len(_here_literal())
+        }
+        self.assertEqual(total, 70000)
+    }
+}
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
-      BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests()])
+      BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests(),
+      BytesLiteralImmortalTests()])

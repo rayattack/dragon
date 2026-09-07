@@ -1633,3 +1633,45 @@ def total_of(page: bytes, n: int) -> int {
 page: bytes = bytes(4096)
 print(total_of(page, 512))
 ```
+
+#### :bytes_literal_is_an_immortal_global
+
+A `bytes` literal is a constant, so it is emitted once as a private immortal
+global and every evaluation hands out that same pointer. No allocation, no
+runtime call, and the refcount is the immortal sentinel so any decref is a
+no-op.
+
+```dr
+def tag() -> bytes {
+    return b"abc"
+}
+print(len(tag()))
+```
+
+#### :two_identical_bytes_literals_share_one_global
+
+The same literal written in two functions is one global. Dedup is keyed on the
+content, so the second spelling reuses the first one's storage.
+
+```dr
+def here() -> bytes {
+    return b"shared"
+}
+
+def there() -> bytes {
+    return b"shared"
+}
+
+print(len(here()) + len(there()))
+```
+
+#### :bytes_builtin_with_no_args_is_the_empty_global
+
+`bytes()` with no arguments is the empty literal, so it lowers to the same
+global as `b""` instead of allocating an empty buffer on every call.
+
+```dr
+blank: bytes = bytes()
+lit: bytes = b""
+print(len(blank) + len(lit))
+```

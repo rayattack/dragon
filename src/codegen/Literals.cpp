@@ -161,12 +161,8 @@ void CodeGen::visit(StringLiteral& node) {
         return;
     }
     if (node.isBytes) {
-        std::string processed = impl_->processEscapes(node.value, node.isRaw);
-        auto* dataPtr = impl_->builder->CreateGlobalString(
-            llvm::StringRef(processed.data(), processed.size()));
-        auto* lenVal = llvm::ConstantInt::get(impl_->i64Type, (int64_t)processed.size());
-        impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_bytes_from_literal"], {dataPtr, lenVal}, "bytes");
+        impl_->lastValue = impl_->emitBytesLiteral(
+            impl_->processEscapes(node.value, node.isRaw));
         return;
     }
     std::string processed = impl_->processEscapes(node.value, node.isRaw);

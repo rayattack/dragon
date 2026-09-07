@@ -987,11 +987,7 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
 
     if (name == "bytes") {
         if (node.args.empty()) {
-            llvm::Value* nullData = llvm::ConstantPointerNull::get(
-                llvm::PointerType::getUnqual(*impl_->context));
-            llvm::Value* zeroLen = llvm::ConstantInt::get(impl_->i64Type, 0);
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_from_literal"], {nullData, zeroLen}, "bytesempty");
+            impl_->lastValue = impl_->emitBytesLiteral("");
             return true;
         }
         if (node.args.size() == 1) {
@@ -1184,6 +1180,15 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
         if (!hashClassName.empty() && impl_->hasDunder(hashClassName, "__hash__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(hashClassName, "__hash__", arg);
+            return true;
+        }
+        if (node.args[0]->type &&
+            node.args[0]->type->kind() == Type::Kind::Bytes) {
+            impl_->lastValue = impl_->builder->CreateCall(
+                impl_->getOrDeclareRuntime("dragon_box_hash",
+                    llvm::FunctionType::get(impl_->i64Type,
+                                            {impl_->boxType}, false)),
+                {impl_->makeBoxConstTag(TAG_BYTES, arg)}, "hash");
             return true;
         }
         if (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy()) {

@@ -977,6 +977,30 @@ TEST(CodeGenTest, ACallBetweenBytesReadsStartsAFreshCheck) {
     EXPECT_EQ(countSubstring(body, "bytes.len.gep"), 4u) << body;
 }
 
+static const char kImmortalRefcountText[] = "4611686018427387904";
+
+TEST(CodeGenTest, ABytesLiteralIsAnImmortalGlobal) {
+    auto ir = generateIR(code("bytes_literal_is_an_immortal_global"));
+    EXPECT_EQ(ir.find("call ptr @dragon_bytes_from_literal"), std::string::npos) << ir;
+    EXPECT_EQ(countSubstring(ir, "@dragon.bytes.lit.0 = internal global"), 1u) << ir;
+    EXPECT_EQ(countSubstring(ir, "@dragon.bytes.lit.1"), 0u) << ir;
+    EXPECT_NE(ir.find(kImmortalRefcountText), std::string::npos) << ir;
+}
+
+TEST(CodeGenTest, TwoIdenticalBytesLiteralsShareOneGlobal) {
+    auto ir = generateIR(code("two_identical_bytes_literals_share_one_global"));
+    EXPECT_EQ(ir.find("call ptr @dragon_bytes_from_literal"), std::string::npos) << ir;
+    EXPECT_EQ(countSubstring(ir, "@dragon.bytes.lit.0 = internal global"), 1u) << ir;
+    EXPECT_EQ(countSubstring(ir, "@dragon.bytes.lit.1"), 0u) << ir;
+}
+
+TEST(CodeGenTest, BytesWithNoArgsIsTheEmptyLiteralGlobal) {
+    auto ir = generateIR(code("bytes_builtin_with_no_args_is_the_empty_global"));
+    EXPECT_EQ(ir.find("call ptr @dragon_bytes_from_literal"), std::string::npos) << ir;
+    EXPECT_EQ(countSubstring(ir, "@dragon.bytes.lit.0 = internal global"), 1u) << ir;
+    EXPECT_EQ(countSubstring(ir, "@dragon.bytes.lit.1"), 0u) << ir;
+}
+
 static CodeGenOptions releaseOptions() {
     CodeGenOptions opts;
     opts.optimizationLevel = 3;

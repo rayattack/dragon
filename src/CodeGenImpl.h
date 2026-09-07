@@ -479,6 +479,8 @@ struct CodeGen::Impl {
 
     std::unordered_map<std::string, llvm::GlobalVariable*> asciiLiteralGlobals;
 
+    std::unordered_map<std::string, llvm::GlobalVariable*> bytesLiteralGlobals;
+
     std::vector<std::string> templateContextStack;
 
     std::unordered_map<std::string, llvm::Value*> sqlCanonicalGlobals;
@@ -2323,6 +2325,8 @@ struct CodeGen::Impl {
 
     llvm::Value* emitStringLiteralBytes(const std::string& bytes,
                                         const llvm::Twine& twine = "");
+
+    llvm::Value* emitBytesLiteral(const std::string& bytes);
 
     std::string processEscapes(const std::string& raw, bool isRaw);
 

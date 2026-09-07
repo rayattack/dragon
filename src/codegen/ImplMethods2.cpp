@@ -1877,6 +1877,55 @@ llvm::Value* CodeGen::Impl::emitStringLiteralBytes(const std::string& bytes,
                                    twine.isTriviallyEmpty() ? "utf8lit" : twine);
     }
 
+llvm::Value* CodeGen::Impl::emitBytesLiteral(const std::string& bytes) {
+        auto found = bytesLiteralGlobals.find(bytes);
+        if (found != bytesLiteralGlobals.end()) return found->second;
+
+        const int64_t IMMORTAL = (int64_t)0x4000000000000000LL;
+        const uint8_t BYTES_OBJECT_TAG = 6;
+        const uint8_t HEAP_OBJ_FLAG = 0x80;
+        const int32_t UNTRACKED = -1;
+        const unsigned DATA_FIELD = 7;
+
+        auto& ctx = builder->getContext();
+        auto* i8Ty  = llvm::Type::getInt8Ty(ctx);
+        auto* i16Ty = llvm::Type::getInt16Ty(ctx);
+        auto* i32Ty = llvm::Type::getInt32Ty(ctx);
+        auto* i64Ty = llvm::Type::getInt64Ty(ctx);
+        const int64_t n = (int64_t)bytes.size();
+        auto* dataTy = llvm::ArrayType::get(i8Ty, n + 1);
+        auto* objTy = llvm::StructType::get(ctx, {
+            i64Ty, i8Ty, i8Ty, i16Ty, i32Ty,
+            i64Ty, i8PtrType,
+            dataTy
+        }, false);
+
+        std::string name = "dragon.bytes.lit." +
+                           std::to_string(bytesLiteralGlobals.size());
+        auto* gv = new llvm::GlobalVariable(*module, objTy, false,
+                                            llvm::GlobalVariable::PrivateLinkage,
+                                            nullptr, name);
+        gv->setAlignment(llvm::Align(8));
+        llvm::Constant* dataIdx[] = {
+            llvm::ConstantInt::get(i32Ty, 0),
+            llvm::ConstantInt::get(i32Ty, DATA_FIELD),
+            llvm::ConstantInt::get(i64Ty, 0),
+        };
+        gv->setInitializer(llvm::ConstantStruct::get(objTy, {
+            llvm::ConstantInt::get(i64Ty, IMMORTAL),
+            llvm::ConstantInt::get(i8Ty, BYTES_OBJECT_TAG),
+            llvm::ConstantInt::get(i8Ty, HEAP_OBJ_FLAG),
+            llvm::ConstantInt::get(i16Ty, 0),
+            llvm::ConstantInt::get(i32Ty, UNTRACKED),
+            llvm::ConstantInt::get(i64Ty, n),
+            llvm::ConstantExpr::getInBoundsGetElementPtr(objTy, gv, dataIdx),
+            llvm::ConstantDataArray::getString(
+                ctx, llvm::StringRef(bytes.data(), bytes.size()), true)
+        }));
+        bytesLiteralGlobals[bytes] = gv;
+        return gv;
+    }
+
 std::string CodeGen::Impl::processEscapes(const std::string& raw, bool isRaw) {
         if (isRaw) return raw;
         std::string result;
