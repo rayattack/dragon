@@ -540,6 +540,10 @@ void CodeGen::visit(ForStmt& node) {
             impl_->builder->CreateStore(
                 llvm::Constant::getNullValue(impl_->boxType), loopVar);
             impl_->setVar(boxTarget->name, loopVar, Impl::VarKind::Union);
+            auto* zeroI64 = llvm::ConstantInt::get(impl_->i64Type, 0);
+            if (impl_->options.gcMode == GCMode::RC)
+                impl_->emitCleanupPush(boxTarget->name, zeroI64,
+                                       Impl::DCLEAN_UNION, zeroI64);
 
             auto* condBB = llvm::BasicBlock::Create(*impl_->context, "boxiter.cond", func);
             auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "boxiter.body", func);
@@ -573,6 +577,11 @@ void CodeGen::visit(ForStmt& node) {
                     impl_->boxTag(prev, "boxiter.prev.tag"));
             }
             impl_->builder->CreateStore(elemBox, loopVar);
+            if (impl_->options.gcMode == GCMode::RC)
+                impl_->emitCleanupUpdate(
+                    boxTarget->name,
+                    impl_->boxPayloadI64(elemBox, "boxiter.cl.pay"),
+                    impl_->boxTag(elemBox, "boxiter.cl.tag"));
             impl_->pushScope();
             for (auto& stmt : node.body) stmt->accept(*this);
             impl_->emitScopeCleanup();
@@ -610,6 +619,7 @@ void CodeGen::visit(ForStmt& node) {
                     impl_->boxTag(last, "boxiter.last.tag"));
                 impl_->builder->CreateStore(
                     llvm::Constant::getNullValue(impl_->boxType), loopVar);
+                impl_->emitCleanupUpdate(boxTarget->name, zeroI64, zeroI64);
                 if (ownedIterable)
                     impl_->emitUnionDecref(
                         impl_->boxPayloadI64(iterBox, "boxiter.it.pay"),

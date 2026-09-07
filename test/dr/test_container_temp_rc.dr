@@ -447,6 +447,61 @@ def mklist() -> list[int] {
 }
 
 
+
+class TempErr(Exception) {
+    code: int
+    def(c: int) { self.code = c }
+}
+
+
+def boxed_rows(n: int) -> list[Boxed] {
+    rows: list[Boxed] = []
+    i: int = 0
+    while i < n {
+        rows.append({ "name": "row-" + str(i), "role": "write" })
+        i = i + 1
+    }
+    return rows
+}
+
+
+def raise_in_box_loop(rows: list[Boxed]) -> int {
+    for row in rows { raise TempErr(0) }
+    return 0
+}
+
+
+def raising_leaf(n: int) -> int {
+    raise TempErr(n)
+}
+
+
+def tuple_with_raising_element(n: int) -> tuple[int, bool] {
+    return (raising_leaf(n), True)
+}
+
+
+def list_with_raising_element(n: int) -> list[int] {
+    return [1, raising_leaf(n), 3]
+}
+
+
+def dict_with_raising_value(n: int) -> dict[str, int] {
+    return { "a": 1, "b": raising_leaf(n) }
+}
+
+
+def set_with_raising_element(n: int) -> set[int] {
+    return { 1, raising_leaf(n) }
+}
+
+
+def held_tuple_then_raising_element(n: int) -> tuple[int, bool] {
+    const base: tuple[int, bool] = (n, n == 0)
+    return (raising_leaf(n), base[1])
+}
+
+
 class OwnedTempConsumersProbe(TestCase) {
     def test_chained_list_concat() {
         a: list[int] = [1, 2]
@@ -499,6 +554,105 @@ class OwnedTempConsumersProbe(TestCase) {
         }
         self.assertEqual(xs[0], 1)
         self.assertEqual(d[1], "one-wwwwwwwwwwwwww")
+    }
+    def test_box_loop_element_released_when_the_body_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            rows: list[Boxed] = boxed_rows(2)
+            try {
+                n: int = raise_in_box_loop(rows)
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_box_loop_element_released_when_the_same_frame_catches() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            rows: list[Boxed] = boxed_rows(2)
+            try {
+                for row in rows { raise TempErr(1) }
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_tuple_literal_released_when_an_element_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                t: tuple[int, bool] = tuple_with_raising_element(i)
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_list_literal_released_when_an_element_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                l: list[int] = list_with_raising_element(i)
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_dict_literal_released_when_a_value_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                d: dict[str, int] = dict_with_raising_value(i)
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_set_literal_released_when_an_element_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                st: set[int] = set_with_raising_element(i)
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
+    }
+
+    def test_held_tuple_released_when_a_later_element_raises() {
+        caught: int = 0
+        i: int = 0
+        while i < 300 {
+            try {
+                t: tuple[int, bool] = held_tuple_then_raising_element(i)
+            } except TempErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 300)
     }
 }
 

@@ -2,6 +2,35 @@
 
 namespace dragon {
 
+namespace {
+
+bool literalElementCannotRaise(const Expr* e) {
+    if (!e) return true;
+    return dynamic_cast<const NameExpr*>(e) ||
+           dynamic_cast<const IntegerLiteral*>(e) ||
+           dynamic_cast<const FloatLiteral*>(e) ||
+           dynamic_cast<const BooleanLiteral*>(e) ||
+           dynamic_cast<const NoneLiteral*>(e);
+}
+
+bool needsUnwindGuard(const std::vector<std::unique_ptr<Expr>>& elements) {
+    for (const auto& e : elements)
+        if (!literalElementCannotRaise(e.get())) return true;
+    return false;
+}
+
+bool needsUnwindGuard(
+    const std::vector<std::pair<std::unique_ptr<Expr>, std::unique_ptr<Expr>>>&
+        entries) {
+    for (const auto& entry : entries)
+        if (!literalElementCannotRaise(entry.first.get()) ||
+            !literalElementCannotRaise(entry.second.get()))
+            return true;
+    return false;
+}
+
+}
+
 llvm::Value* CodeGen::Impl::emitNewTypedList(int64_t elemTag, bool isAny,
                                              llvm::Value* capVal) {
     bool isF64 = (elemTag == 2);
@@ -82,6 +111,9 @@ void CodeGen::visit(ListExpr& node) {
     }
 
     llvm::Value* list = impl_->emitNewTypedList(elemTag, isAny, capVal);
+    llvm::Value* unwindBase = needsUnwindGuard(node.elements)
+        ? impl_->emitCleanupPushTemp(list, Impl::DCLEAN_OBJ)
+        : nullptr;
 
     for (auto& elem : node.elements) {
         if (dynamic_cast<StarredExpr*>(elem.get())) {
@@ -99,6 +131,7 @@ void CodeGen::visit(ListExpr& node) {
                                    elemTag, isAny, *this);
     }
 
+    impl_->emitCleanupPopTemp(unwindBase);
     impl_->lastValue = list;
 }
 void CodeGen::visit(TupleExpr& node) {
@@ -106,6 +139,9 @@ void CodeGen::visit(TupleExpr& node) {
     llvm::Value* countVal = llvm::ConstantInt::get(impl_->i64Type, count);
     llvm::Value* tuple = impl_->builder->CreateCall(
         impl_->runtimeFuncs["dragon_tuple_new"], {countVal}, "tuple");
+    llvm::Value* unwindBase = needsUnwindGuard(node.elements)
+        ? impl_->emitCleanupPushTemp(tuple, Impl::DCLEAN_OBJ)
+        : nullptr;
 
     TupleType* tupleType = node.type ? dynamic_cast<TupleType*>(node.type.get()) : nullptr;
 
@@ -171,6 +207,7 @@ void CodeGen::visit(TupleExpr& node) {
         }
     }
 
+    impl_->emitCleanupPopTemp(unwindBase);
     impl_->lastValue = tuple;
 }
 void CodeGen::visit(DictExpr& node) {
@@ -178,6 +215,9 @@ void CodeGen::visit(DictExpr& node) {
     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, cap);
     llvm::Value* dict = impl_->builder->CreateCall(
         impl_->runtimeFuncs["dragon_dict_new"], {capVal}, "dict");
+    llvm::Value* unwindBase = needsUnwindGuard(node.entries)
+        ? impl_->emitCleanupPushTemp(dict, Impl::DCLEAN_OBJ)
+        : nullptr;
 
     bool intKeys = false;
     bool floatKeys = false;
@@ -315,6 +355,7 @@ void CodeGen::visit(DictExpr& node) {
             impl_->runtimeFuncs["dragon_dict_set_tagged"], {dict, key, val, tagVal});
     }
 
+    impl_->emitCleanupPopTemp(unwindBase);
     impl_->lastValue = dict;
 }
 void CodeGen::visit(SetExpr& node) {
@@ -344,6 +385,9 @@ void CodeGen::visit(SetExpr& node) {
         set = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_set_new"], {}, "set");
     }
+    llvm::Value* unwindBase = needsUnwindGuard(node.elements)
+        ? impl_->emitCleanupPushTemp(set, Impl::DCLEAN_OBJ)
+        : nullptr;
 
     for (auto& elem : node.elements) {
         elem->accept(*this);
@@ -365,6 +409,7 @@ void CodeGen::visit(SetExpr& node) {
         if (ownedElem) impl_->emitDecrefByKind(ownedElem, elemDk);
     }
 
+    impl_->emitCleanupPopTemp(unwindBase);
     impl_->lastValue = set;
 }
 }
