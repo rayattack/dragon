@@ -1093,22 +1093,26 @@ bool CodeGen::Impl::tryNarrowShadowWriteThrough(const std::string& name,
         return false;
     }
 
+static Type* optionalInnerType(Type* t) {
+    if (!t || t->kind() != Type::Kind::Union) return nullptr;
+    auto& u = static_cast<UnionType&>(*t);
+    if (u.types.size() != 2) return nullptr;
+    Type* inner = nullptr;
+    bool hasNone = false;
+    for (auto& member : u.types) {
+        if (!member) continue;
+        if (member->kind() == Type::Kind::None_) hasNone = true;
+        else inner = member.get();
+    }
+    return hasNone ? inner : nullptr;
+}
+
 llvm::Value* CodeGen::Impl::nicheOptionalTagForValue(Expr* argExpr,
                                                      llvm::Value* val) {
-        if (!argExpr || !argExpr->type ||
-            argExpr->type->kind() != Type::Kind::Union ||
-            !val->getType()->isPointerTy())
-            return nullptr;
-        auto& u = static_cast<UnionType&>(*argExpr->type);
-        if (u.types.size() != 2) return nullptr;
-        Type* inner = nullptr;
-        bool hasNone = false;
-        for (auto& t : u.types) {
-            if (t->kind() == Type::Kind::None_) hasNone = true;
-            else inner = t.get();
-        }
+        if (!argExpr || !val->getType()->isPointerTy()) return nullptr;
+        Type* inner = optionalInnerType(argExpr->type.get());
         int64_t innerTag = inner ? typeKindToTag(inner->kind()) : -1;
-        if (!hasNone || innerTag < 0) return nullptr;
+        if (innerTag < 0) return nullptr;
         auto* nullp = llvm::ConstantPointerNull::get(
             llvm::cast<llvm::PointerType>(val->getType()));
         auto* isNull = builder->CreateICmpEQ(val, nullp, "opt.isnull");
@@ -1924,6 +1928,101 @@ llvm::Value* CodeGen::Impl::emitBytesLiteral(const std::string& bytes) {
         }));
         bytesLiteralGlobals[bytes] = gv;
         return gv;
+    }
+
+static int64_t contentHashTag(Type::Kind kind) {
+    switch (kind) {
+        case Type::Kind::Bytes: return TAG_BYTES;
+        case Type::Kind::Tuple: return TAG_LIST;
+        case Type::Kind::Float: return TAG_FLOAT;
+        case Type::Kind::None_: return TAG_NONE;
+        default: return -1;
+    }
+}
+
+static int64_t optionalContentHashTag(Type::Kind kind) {
+    switch (kind) {
+        case Type::Kind::Str:   return TAG_STR;
+        case Type::Kind::Bytes: return TAG_BYTES;
+        case Type::Kind::Tuple: return TAG_LIST;
+        default: return -1;
+    }
+}
+
+llvm::Value* CodeGen::Impl::emitOptionalHash(Expr* argExpr, llvm::Value* arg,
+                                             const std::string& className,
+                                             llvm::Function* boxHash) {
+        if (!argExpr || !arg->getType()->isPointerTy()) return nullptr;
+        Type* inner = optionalInnerType(argExpr->type.get());
+        if (!inner) return nullptr;
+
+        auto* nullp = llvm::ConstantPointerNull::get(
+            llvm::cast<llvm::PointerType>(arg->getType()));
+        auto* isNone = builder->CreateICmpEQ(arg, nullp, "hash.isnone");
+
+        int64_t innerTag = optionalContentHashTag(inner->kind());
+        if (innerTag >= 0) {
+            auto* tag = builder->CreateSelect(isNone,
+                llvm::ConstantInt::get(i64Type, TAG_NONE),
+                llvm::ConstantInt::get(i64Type, innerTag), "hash.tag");
+            return builder->CreateCall(boxHash, {makeBox(tag, arg)}, "hash");
+        }
+
+        auto* func = currentFunction;
+        auto* noneBB = llvm::BasicBlock::Create(*context, "hash.opt.none", func);
+        auto* someBB = llvm::BasicBlock::Create(*context, "hash.opt.some", func);
+        auto* joinBB = llvm::BasicBlock::Create(*context, "hash.opt.join", func);
+        builder->CreateCondBr(isNone, noneBB, someBB);
+
+        builder->SetInsertPoint(noneBB);
+        llvm::Value* noneHash = builder->CreateCall(boxHash,
+            {makeBoxConstTag(TAG_NONE, llvm::ConstantInt::get(i64Type, 0))},
+            "hash.none");
+        auto* noneEnd = builder->GetInsertBlock();
+        builder->CreateBr(joinBB);
+
+        builder->SetInsertPoint(someBB);
+        llvm::Value* someHash =
+            (!className.empty() && hasDunder(className, "__hash__"))
+                ? nativeToPayloadI64(callDunder(className, "__hash__", arg))
+                : builder->CreatePtrToInt(arg, i64Type, "hash.id");
+        auto* someEnd = builder->GetInsertBlock();
+        builder->CreateBr(joinBB);
+
+        builder->SetInsertPoint(joinBB);
+        auto* hash = builder->CreatePHI(i64Type, 2, "hash");
+        hash->addIncoming(noneHash, noneEnd);
+        hash->addIncoming(someHash, someEnd);
+        return hash;
+    }
+
+llvm::Value* CodeGen::Impl::emitHashOfValue(Expr* argExpr, llvm::Value* arg,
+                                            const std::string& className) {
+        auto* boxHash = getOrDeclareRuntime("dragon_box_hash",
+            llvm::FunctionType::get(i64Type, {boxType}, false));
+        if (arg->getType() == boxType)
+            return builder->CreateCall(boxHash, {arg}, "hash");
+
+        if (llvm::Value* optHash =
+                emitOptionalHash(argExpr, arg, className, boxHash))
+            return optHash;
+
+        if (!className.empty() && hasDunder(className, "__hash__") &&
+            arg->getType()->isPointerTy())
+            return nativeToPayloadI64(callDunder(className, "__hash__", arg));
+
+        Type* argType = argExpr ? argExpr->type.get() : nullptr;
+        Type::Kind kind = argType ? argType->kind() : Type::Kind::Unknown;
+        int64_t tag = contentHashTag(kind);
+        if (tag >= 0)
+            return builder->CreateCall(boxHash, {makeBoxConstTag(tag, arg)}, "hash");
+        if (kind == Type::Kind::Str)
+            return builder->CreateCall(runtimeFuncs["dragon_hash_str"], {arg}, "hash");
+        if (arg->getType()->isPointerTy())
+            return builder->CreatePtrToInt(arg, i64Type, "hash");
+        if (arg->getType() == i1Type)
+            arg = builder->CreateZExt(arg, i64Type, "hash.bool");
+        return builder->CreateCall(runtimeFuncs["dragon_hash_int"], {arg}, "hash");
     }
 
 std::string CodeGen::Impl::processEscapes(const std::string& raw, bool isRaw) {

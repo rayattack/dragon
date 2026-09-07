@@ -4049,3 +4049,92 @@ with Section("setup") {
     print("guarded")
 }
 ```
+
+#### :hash_of_a_list_rejected
+
+A list can change after it is hashed, so a hash taken from it goes stale and the
+value is lost in whatever bucket it landed in. Python raises at runtime; Dragon
+knows the type at compile time, so it says so then.
+
+```dr
+xs: list[int] = [1, 2, 3]
+print(hash(xs))
+```
+
+#### :hash_of_a_dict_rejected
+
+```dr
+d: dict[str, int] = {"a": 1}
+print(hash(d))
+```
+
+#### :hash_of_a_set_rejected
+
+```dr
+s: set = {1, 2}
+print(hash(s))
+```
+
+#### :hash_of_a_deque_rejected
+
+```dr
+from collections import deque
+
+q: deque[int] = deque()
+q.append(1)
+print(hash(q))
+```
+
+#### :hash_of_a_list_element_rejected
+
+The element read out of a `list[list[int]]` is a list, so it is rejected on the
+element's own type, not on the spelling of the expression.
+
+```dr
+xss: list[list[int]] = [[1, 2], [3]]
+print(hash(xss[0]))
+```
+
+#### :hash_of_a_union_with_a_container_arm_rejected
+
+The union can hold a list, so the call can fail. The checker sees the arm and
+rejects the call rather than letting it become a runtime surprise.
+
+```dr
+type Loose = int | list[int]
+
+v: Loose = 5
+print(hash(v))
+```
+
+#### :hash_of_a_tuple_accepted
+
+A tuple cannot change, so it hashes by content.
+
+```dr
+t: tuple[int, int] = (1, 2)
+d: dict[tuple[int, int], int] = {}
+d[t] = 1
+print(hash(t))
+```
+
+#### :hash_of_scalars_accepted
+
+```dr
+class Weighed {
+    w: int
+    def(w: int) {
+        self.w = w
+    }
+    def __hash__() -> int {
+        return self.w
+    }
+}
+print(hash(1))
+print(hash(1.5))
+print(hash(True))
+print(hash("abc"))
+print(hash(b"abc"))
+print(hash(None))
+print(hash(Weighed(3)))
+```

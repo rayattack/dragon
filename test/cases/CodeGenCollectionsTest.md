@@ -1675,3 +1675,58 @@ blank: bytes = bytes()
 lit: bytes = b""
 print(len(blank) + len(lit))
 ```
+
+#### :hash_of_a_tuple_uses_the_dict_key_tag
+
+`hash(t)` on a tuple must produce the number the dict already produces for the
+same tuple used as a key. The dict boxes an object key with the list tag and
+lets the runtime hasher dispatch on the object's own type tag, so the builtin
+boxes it the same way and calls the same hasher.
+
+```dr
+def key_hash(t: tuple[int, int]) -> int {
+    return hash(t)
+}
+print(key_hash((1, 2)))
+```
+
+#### :hash_of_a_str_still_reads_content
+
+```dr
+def text_hash(s: str) -> int {
+    return hash(s)
+}
+print(text_hash("abc"))
+```
+
+#### :hash_of_a_callable_is_identity
+
+A closure has no content to read, so it hashes by identity rather than being
+walked as if it were text.
+
+```dr
+def one(v: int) -> int {
+    return v
+}
+
+def fn_hash(f: Callable[[int], int]) -> int {
+    return hash(f)
+}
+
+print(fn_hash(one))
+```
+
+#### :hash_of_an_optional_str_reads_content
+
+A `str | None` is one nullable pointer, not a box, so `hash(s)` used to fall
+through to the identity branch and hash the address. The niche tag says which
+member is live, so the builtin boxes the pointer under that tag and calls the
+same hasher a boxed union uses: the value hashes by content, and a null hashes
+as None.
+
+```dr
+def optional_text_hash(s: str | None) -> int {
+    return hash(s)
+}
+print(optional_text_hash("abc"))
+```

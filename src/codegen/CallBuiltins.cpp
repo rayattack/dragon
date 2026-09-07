@@ -1177,33 +1177,8 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
         std::string hashClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
         llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
-        if (!hashClassName.empty() && impl_->hasDunder(hashClassName, "__hash__") &&
-            (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
-            impl_->lastValue = impl_->callDunder(hashClassName, "__hash__", arg);
-            return true;
-        }
-        if (node.args[0]->type &&
-            node.args[0]->type->kind() == Type::Kind::Bytes) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->getOrDeclareRuntime("dragon_box_hash",
-                    llvm::FunctionType::get(impl_->i64Type,
-                                            {impl_->boxType}, false)),
-                {impl_->makeBoxConstTag(TAG_BYTES, arg)}, "hash");
-            return true;
-        }
-        if (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy()) {
-            if (!hashClassName.empty()) {
-                impl_->lastValue = impl_->builder->CreatePtrToInt(arg, impl_->i64Type, "hash");
-            } else {
-                impl_->lastValue = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_hash_str"], {arg}, "hash");
-            }
-        } else {
-            if (arg->getType() == impl_->i1Type)
-                arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_hash_int"], {arg}, "hash");
-        }
+        impl_->lastValue =
+            impl_->emitHashOfValue(node.args[0].get(), arg, hashClassName);
         return true;
     }
 

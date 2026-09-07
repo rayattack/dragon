@@ -4,13 +4,16 @@ type LooseBytes = int | bytes
 from unittest import TestCase, main
 from threading import Thread
 
+
 def _ord_two_chars() {
     ord("ab")
 }
 
+
 def _ord_empty() {
     ord("")
 }
+
 
 class Dog {
     name: str
@@ -18,6 +21,7 @@ class Dog {
         self.name = name
     }
 }
+
 
 class StringEmptyOperandTests(TestCase) {
     """Regression test for empty / NULL string-operand handling in the runtime.
@@ -90,6 +94,7 @@ class StringEmptyOperandTests(TestCase) {
     }
 }
 
+
 class StringLiteralHeaderTests(TestCase) {
     """Regression test for the string-literal DragonObjectHeader fix.
 
@@ -136,6 +141,7 @@ class StringLiteralHeaderTests(TestCase) {
         self.assertTrue("two" == xs[1])
     }
 }
+
 
 class StrSubstringInTests(TestCase) {
     def test_substring_present_and_absent() {
@@ -220,6 +226,7 @@ class StrSubstringInTests(TestCase) {
     }
 }
 
+
 class IntToStrTests(TestCase) {
     """str(int) - hand-rolled itoa fast path (replaced snprintf).
 
@@ -265,6 +272,7 @@ class IntToStrTests(TestCase) {
     }
 }
 
+
 class OrdTests(TestCase) {
     def test_ascii() {
         self.assertEqual(ord("A"), 65)
@@ -298,6 +306,7 @@ class OrdTests(TestCase) {
         self.assertRaises(TypeError, _ord_empty)
     }
 }
+
 
 class PredicateTests(TestCase) {
     def test_isalpha_nonascii() {
@@ -359,6 +368,7 @@ class PredicateTests(TestCase) {
     }
 }
 
+
 class ReprTests(TestCase) {
     def test_repr_ascii() {
         self.assertEqual(repr("hello"), "'hello'")
@@ -372,6 +382,22 @@ class ReprTests(TestCase) {
         self.assertEqual(len(repr("Āb")), 4)
     }
 }
+
+
+class HashPoint {
+    x: int
+    y: int
+
+    def(x: int, y: int) {
+        self.x = x
+        self.y = y
+    }
+
+    def __hash__() -> int {
+        return self.x * 31 + self.y
+    }
+}
+
 
 class HashTests(TestCase) {
     def test_equal_content_equal_hash() {
@@ -389,7 +415,67 @@ class HashTests(TestCase) {
     def test_prefix_differs() {
         self.assertNotEqual(hash("é"), hash("éé"))
     }
+
+    def test_optional_str_hashes_its_content() {
+        s: str | None = "abc"
+        t: str = "abc"
+        self.assertEqual(hash(s), hash(t))
+        self.assertNotEqual(hash(s), hash(none))
+    }
+
+    def test_optional_str_holding_none_hashes_as_none() {
+        s: str | None = none
+        self.assertEqual(hash(s), hash(none))
+    }
+
+    def test_optional_bytes_hashes_its_content() {
+        b: bytes | None = b"xy"
+        c: bytes = b"xy"
+        self.assertEqual(hash(b), hash(c))
+        self.assertNotEqual(hash(b), hash(none))
+    }
+
+    def test_optional_bytes_holding_none_hashes_as_none() {
+        b: bytes | None = none
+        self.assertEqual(hash(b), hash(none))
+    }
+
+    def test_optional_tuple_hashes_its_content() {
+        t: tuple[int, int] | None = (1, 2)
+        u: tuple[int, int] = (1, 2)
+        self.assertEqual(hash(t), hash(u))
+        self.assertNotEqual(hash(t), hash(none))
+    }
+
+    def test_optional_tuple_holding_none_hashes_as_none() {
+        t: tuple[int, int] | None = none
+        self.assertEqual(hash(t), hash(none))
+    }
+
+    def test_optional_instance_uses_dunder_hash() {
+        p: HashPoint = HashPoint(3, 4)
+        o: HashPoint | None = p
+        self.assertEqual(hash(o), hash(p))
+        self.assertEqual(hash(o), 97)
+    }
+
+    def test_optional_instance_holding_none_hashes_as_none() {
+        o: HashPoint | None = none
+        self.assertEqual(hash(o), hash(none))
+    }
+
+    def test_optional_plain_instance_keeps_identity() {
+        d: Dog = Dog("rex")
+        o: Dog | None = d
+        self.assertEqual(hash(o), hash(d))
+    }
+
+    def test_optional_plain_instance_holding_none_hashes_as_none() {
+        o: Dog | None = none
+        self.assertEqual(hash(o), hash(none))
+    }
 }
+
 
 class ConversionTests(TestCase) {
     """float(str) parsing + None/float boxing in Boxed.
@@ -428,6 +514,7 @@ class ConversionTests(TestCase) {
         self.assertIsNone(d["k"])
     }
 }
+
 
 class TypeBuiltinTests(TestCase) {
     """type(x) returns the type's NAME as a str (e.g. "int", "Dog"). Two root-cause
@@ -473,6 +560,7 @@ class TypeBuiltinTests(TestCase) {
     }
 }
 
+
 class ByteHolder {
     data: bytes
 
@@ -480,6 +568,7 @@ class ByteHolder {
         self.data = data
     }
 }
+
 
 class ByteWindow {
     data: bytes
@@ -505,6 +594,7 @@ class ByteWindow {
     }
 }
 
+
 def _first_high_byte(buf: bytes) -> int {
     for b in buf {
         if b > 127 {
@@ -513,6 +603,7 @@ def _first_high_byte(buf: bytes) -> int {
     }
     return -1
 }
+
 
 class BytesIterationTests(TestCase) {
     """A for loop over bytes yields each byte as an int (DRG-84).
@@ -606,6 +697,7 @@ class BytesIterationTests(TestCase) {
         self.assertEqual(total, 1023 * (ord("a") + ord("b") + ord("c") + ord("d")))
     }
 }
+
 
 class BytesElementAccessTests(TestCase) {
     """b[i] and len(b) read the DragonBytes header and buffer inline (DRG-187).
@@ -786,9 +878,11 @@ class BytesElementAccessTests(TestCase) {
     }
 }
 
+
 def _len_of(buf: bytes) -> int {
     return len(buf)
 }
+
 
 def _sum_of(buf: bytes) -> int {
     total: int = 0
@@ -797,6 +891,7 @@ def _sum_of(buf: bytes) -> int {
     }
     return total
 }
+
 
 class BytesEmptyAndSliceTests(TestCase) {
     """Every zero-length bytes is one immortal singleton, and a step-1 slice is a
@@ -1030,6 +1125,7 @@ class BytesEmptyAndSliceTests(TestCase) {
     }
 }
 
+
 class BytesDecodeTests(TestCase) {
     """`b.decode()` scans for high bytes eight at a time and copies an all-ASCII
     payload in one memcpy (DRG-200). Before, it called the UTF-8 decoder once per
@@ -1168,8 +1264,10 @@ class BytesDecodeTests(TestCase) {
     }
 }
 
+
 shared_literal: bytes = b"crossing"
 thread_total: int = 0
+
 
 class LiteralDefaults {
     raw: bytes = b""
@@ -1180,6 +1278,7 @@ class LiteralDefaults {
     }
 }
 
+
 def _fold_bytes(buf: bytes) -> int {
     total: int = 0
     for b in buf {
@@ -1188,13 +1287,16 @@ def _fold_bytes(buf: bytes) -> int {
     return total
 }
 
+
 def _here_literal() -> bytes {
     return b"shared literal"
 }
 
+
 def _there_literal() -> bytes {
     return b"shared literal"
 }
+
 
 def _fold_list(items: list[bytes]) -> int {
     total: int = 0
@@ -1204,12 +1306,15 @@ def _fold_list(items: list[bytes]) -> int {
     return total
 }
 
+
 shared_box: list[bytes] = [b"abc", b"defg"]
+
 
 def _thread_body() -> None {
     global thread_total
     thread_total = _fold_bytes(shared_literal) + _fold_list(shared_box)
 }
+
 
 class BytesLiteralImmortalTests(TestCase) {
     def test_a_literal_reassigned_in_a_loop() {
@@ -1351,6 +1456,7 @@ class BytesLiteralImmortalTests(TestCase) {
         self.assertEqual(total, 70000)
     }
 }
+
 
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),

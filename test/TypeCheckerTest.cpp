@@ -2228,3 +2228,15 @@ TEST(TypeCheckerTest, WithNeedsLockOrContextManager) {
     EXPECT_TRUE(checkHasErrors(code("with_on_str_rejected")));
     EXPECT_TRUE(checkOk(code("with_on_context_manager_accepted")));
 }
+
+TEST(TypeCheckerTest, HashRejectsMutableContainers) {
+    EXPECT_TRUE(checkHasErrors(code("hash_of_a_list_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("hash_of_a_dict_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("hash_of_a_set_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("hash_of_a_deque_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("hash_of_a_list_element_rejected")));
+    EXPECT_TRUE(
+        checkHasErrors(code("hash_of_a_union_with_a_container_arm_rejected")));
+    EXPECT_TRUE(checkOk(code("hash_of_a_tuple_accepted")));
+    EXPECT_TRUE(checkOk(code("hash_of_scalars_accepted")));
+}

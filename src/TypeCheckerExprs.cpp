@@ -59,6 +59,28 @@ static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
     return nullptr;
 }
 
+static bool isUnhashableKind(Type::Kind k) {
+    return k == Type::Kind::List || k == Type::Kind::Dict ||
+           k == Type::Kind::Set || k == Type::Kind::Deque;
+}
+
+static std::string unhashableMessage(const Type& t) {
+    return "unhashable type '" + t.toString() +
+           "': hash() needs a value that cannot change (int, float, bool, str, "
+           "bytes, tuple, or a class with __hash__)";
+}
+
+static const Type* unhashablePart(const Type* t) {
+    if (!t) return nullptr;
+    if (isUnhashableKind(t->kind())) return t;
+    auto* u = dynamic_cast<const UnionType*>(t);
+    if (!u) return nullptr;
+    for (const auto& member : u->types) {
+        if (member && isUnhashableKind(member->kind())) return member.get();
+    }
+    return nullptr;
+}
+
 static const int kOrderNestLimit = 32;
 static const int kClassWalkLimit = 64;
 
@@ -1254,8 +1276,17 @@ void TypeChecker::visit(CallExpr& node) {
             node.type = impl_->strType;
             return;
         }
+        if (n == "hash" && node.args.size() == 1) {
+            const Type* bad = node.args[0]->type
+                                  ? unhashablePart(node.args[0]->type.get())
+                                  : nullptr;
+            if (bad)
+                error(node.args[0]->location(), unhashableMessage(*bad));
+            node.type = impl_->intType;
+            return;
+        }
         if (n == "ord" || n == "len" || n == "round" ||
-            n == "hash" || n == "id" || n == "int" ||
+            n == "id" || n == "int" ||
             n == "__float_bits" || n == "__float32_bits") {
             node.type = impl_->intType;
             return;

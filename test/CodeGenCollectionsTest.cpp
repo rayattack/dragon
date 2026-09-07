@@ -1012,3 +1012,39 @@ TEST(CodeGenTest, BytesDecodeHelpersLeaveNoCallAtO3) {
     EXPECT_EQ(countSubstring(ir, "@struct__unpack_u32_le"), 0u) << ir;
     EXPECT_EQ(countSubstring(ir, "@struct__unpack_u64_le"), 0u) << ir;
 }
+
+static const char kTupleKeyBoxTag[] = "%dragon.box { i64 5, i64 undef }";
+
+TEST(CodeGenTest, HashOfATupleBoxesItWithTheDictKeyTag) {
+    auto body = defineOf(generateIR(code("hash_of_a_tuple_uses_the_dict_key_tag")),
+                         "key_hash");
+    ASSERT_FALSE(body.empty());
+    EXPECT_EQ(body.find("@dragon_hash_str"), std::string::npos) << body;
+    EXPECT_NE(body.find("@dragon_box_hash"), std::string::npos) << body;
+    EXPECT_NE(body.find(kTupleKeyBoxTag), std::string::npos) << body;
+}
+
+TEST(CodeGenTest, HashOfAStrStillReadsContent) {
+    auto body = defineOf(generateIR(code("hash_of_a_str_still_reads_content")),
+                         "text_hash");
+    ASSERT_FALSE(body.empty());
+    EXPECT_NE(body.find("@dragon_hash_str"), std::string::npos) << body;
+}
+
+TEST(CodeGenTest, HashOfACallableIsIdentity) {
+    auto body = defineOf(generateIR(code("hash_of_a_callable_is_identity")),
+                         "fn_hash");
+    ASSERT_FALSE(body.empty());
+    EXPECT_EQ(body.find("@dragon_hash_str"), std::string::npos) << body;
+    EXPECT_NE(body.find("ptrtoint"), std::string::npos) << body;
+}
+
+TEST(CodeGenTest, HashOfAnOptionalStrBoxesItInsteadOfHashingTheAddress) {
+    auto body = defineOf(generateIR(code("hash_of_an_optional_str_reads_content")),
+                         "optional_text_hash");
+    ASSERT_FALSE(body.empty());
+    EXPECT_NE(body.find("select i1 %hash.isnone, i64 4, i64 1"),
+              std::string::npos) << body;
+    EXPECT_NE(body.find("@dragon_box_hash"), std::string::npos) << body;
+    EXPECT_EQ(body.find("%hash = ptrtoint"), std::string::npos) << body;
+}

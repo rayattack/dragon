@@ -1758,7 +1758,10 @@ Available: `print(*values)` (space-separated, newline), `input(prompt="")`,
 annotation type), `enumerate`, `zip`, `int` `float` `str` `bool` (conversions),
 `bytes()` / `bytes(n)` / `bytes(list[int])`, `abs` `min` `max` `sum`, `sorted`
 `reversed` (return new lists), `any` `all`, `isinstance` (see the caveat in
-section 7), `issubclass(Sub, Base)`, `repr` `id` `hash`, `chr` `ord`, `hex`
+section 7), `issubclass(Sub, Base)`, `repr` `id`, `hash` (by content for `int`,
+`float`, `bool`, `str`, `bytes` and `tuple`; a union or a `T | None` hashes the
+value it holds at run time; a class through its `__hash__`, else by identity; a
+`list`, `dict`, `set` or `deque` argument is a compile error), `chr` `ord`, `hex`
 `oct` `bin`, `getattr(obj, "field")` and `hasattr(obj, "field")` (static: the
 name is a literal checked against the class at compile time, not reflection),
 `deque()` (the type is built in: `d: deque[int] = deque()` needs no import),
