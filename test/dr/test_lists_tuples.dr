@@ -707,6 +707,133 @@ class DictComprehension(TestCase) {
 }
 
 
+class ListRepeatTests(TestCase) {
+    """`[x] * n` fills the result with one typed store per element (DRG-201).
+    A single-element repeat used to run one memcpy call per copy, so a blank
+    4080-slot page cost 4080 calls; multi-element repeats now double the block
+    they already wrote. Counts of zero and below must still hand back an empty
+    list, and a repeat of a refcounted element must own every slot it wrote."""
+
+    def test_zero_fill_of_a_page() {
+        page: list[int] = [0] * 4080
+        self.assertEqual(len(page), 4080)
+        self.assertEqual(page[0], 0)
+        self.assertEqual(page[4079], 0)
+        self.assertEqual(sum(page), 0)
+        page[5] = 7
+        self.assertEqual(page[5], 7)
+        self.assertEqual(page[4], 0)
+        self.assertEqual(page[6], 0)
+    }
+
+    def test_uniform_and_non_uniform_element_values() {
+        ones: list[int] = [-1] * 100
+        self.assertEqual(ones[0], -1)
+        self.assertEqual(ones[99], -1)
+        self.assertEqual(sum(ones), -100)
+        sevens: list[int] = [7] * 100
+        self.assertEqual(sevens[0], 7)
+        self.assertEqual(sevens[99], 7)
+        self.assertEqual(sum(sevens), 700)
+        big: list[int] = [1000000] * 8
+        self.assertEqual(big[0], 1000000)
+        self.assertEqual(big[7], 1000000)
+        self.assertEqual(sum(big), 8000000)
+    }
+
+    def test_zero_and_negative_counts_give_an_empty_list() {
+        self.assertEqual(len([1] * 0), 0)
+        self.assertEqual(len([1] * -1), 0)
+        self.assertEqual(len([1] * -4080), 0)
+        self.assertEqual(len([] * 100), 0)
+        empty: list[int] = [7] * 0
+        empty.append(3)
+        self.assertEqual(empty[0], 3)
+    }
+
+    def test_multi_element_blocks_repeat_in_order() {
+        pair: list[int] = [1, 2] * 5
+        self.assertEqual(len(pair), 10)
+        self.assertEqual(pair[0], 1)
+        self.assertEqual(pair[1], 2)
+        self.assertEqual(pair[8], 1)
+        self.assertEqual(pair[9], 2)
+        self.assertEqual(sum(pair), 15)
+        three: list[int] = [4, 5, 6] * 3
+        self.assertEqual(three, [4, 5, 6, 4, 5, 6, 4, 5, 6])
+        odd: list[int] = [1, 2, 3] * 7
+        self.assertEqual(len(odd), 21)
+        self.assertEqual(odd[20], 3)
+        self.assertEqual(sum(odd), 42)
+    }
+
+    def test_bool_and_float_elements_keep_their_values() {
+        flags: list[bool] = [True] * 9
+        self.assertEqual(len(flags), 9)
+        self.assertEqual(flags[0], True)
+        self.assertEqual(flags[8], True)
+        off: list[bool] = [False] * 9
+        self.assertEqual(off[4], False)
+        zeros: list[float] = [0.0] * 100
+        self.assertEqual(zeros[0], 0.0)
+        self.assertEqual(zeros[99], 0.0)
+        halves: list[float] = [1.5] * 100
+        self.assertEqual(halves[0], 1.5)
+        self.assertEqual(halves[99], 1.5)
+        self.assertEqual(sum(halves), 150.0)
+    }
+
+    def test_repeated_strings_stay_owned_by_every_slot() {
+        i: int = 0
+        while i < 2000 {
+            names: list[str] = ["dragon"] * 8
+            self.assertEqual(len(names), 8)
+            self.assertEqual(names[0], "dragon")
+            self.assertEqual(names[7], "dragon")
+            self.assertEqual(names[0] == names[7], True)
+            names[3] = "other"
+            self.assertEqual(names[3], "other")
+            self.assertEqual(names[4], "dragon")
+            i = i + 1
+        }
+    }
+
+    def test_repeated_lists_share_the_same_element() {
+        rows: list[list[int]] = [[1, 2]] * 4
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[0], [1, 2])
+        self.assertEqual(rows[3], [1, 2])
+        rows[0].append(3)
+        self.assertEqual(rows[3], [1, 2, 3])
+    }
+
+    def test_a_large_repeat_is_readable_end_to_end() {
+        page: list[int] = [3] * 20000
+        self.assertEqual(len(page), 20000)
+        self.assertEqual(page[0], 3)
+        self.assertEqual(page[19999], 3)
+        self.assertEqual(sum(page), 60000)
+        block: list[int] = [1, 2, 3, 4] * 5000
+        self.assertEqual(len(block), 20000)
+        self.assertEqual(block[19996], 1)
+        self.assertEqual(block[19999], 4)
+        self.assertEqual(sum(block), 50000)
+    }
+
+    def test_repeats_in_a_loop_stay_balanced() {
+        total: int = 0
+        i: int = 0
+        while i < 2000 {
+            const page: list[int] = [0] * 64
+            const words: list[str] = ["x"] * 4
+            total = total + len(page) + len(words) + page[63]
+            i = i + 1
+        }
+        self.assertEqual(total, 2000 * 68)
+    }
+}
+
+
 main([ListComparisonTests(), ListConcatSortExtendTests(), MinMaxSumTypedTests(),
       SortedLargeTests(), TupleBuiltinType(), CollectionAccessTests(),
-      ContainerRepr(), DictComprehension()])
+      ContainerRepr(), DictComprehension(), ListRepeatTests()])

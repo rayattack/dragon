@@ -968,6 +968,73 @@ class BytesEmptyAndSliceTests(TestCase) {
         self.assertEqual(page[::2][1], ord("c"))
     }
 
+    def test_bytes_from_a_list_masks_every_element_to_one_byte() {
+        wide: bytes = bytes([0, 65, 255, 256, 257, 511, -1, -256, 1000000])
+        self.assertEqual(len(wide), 9)
+        self.assertEqual(wide[0], 0)
+        self.assertEqual(wide[1], 65)
+        self.assertEqual(wide[2], 255)
+        self.assertEqual(wide[3], 0)
+        self.assertEqual(wide[4], 1)
+        self.assertEqual(wide[5], 255)
+        self.assertEqual(wide[6], 255)
+        self.assertEqual(wide[7], 0)
+        self.assertEqual(wide[8], 64)
+    }
+
+    def test_bytes_from_a_bool_list_reads_one_byte_per_flag() {
+        flags: bytes = bytes([True, False, True, True])
+        self.assertEqual(len(flags), 4)
+        self.assertEqual(flags[0], 1)
+        self.assertEqual(flags[1], 0)
+        self.assertEqual(flags[3], 1)
+    }
+
+    def test_bytes_from_a_blank_page_list() {
+        blank: bytes = bytes([0] * 4080)
+        self.assertEqual(len(blank), 4080)
+        self.assertEqual(blank[0], 0)
+        self.assertEqual(blank[4079], 0)
+        filled: list[int] = [0] * 4080
+        filled[5] = 7
+        filled[4079] = 200
+        page: bytes = bytes(filled)
+        self.assertEqual(page[5], 7)
+        self.assertEqual(page[4], 0)
+        self.assertEqual(page[4079], 200)
+    }
+
+    def test_bytes_from_an_empty_list_is_the_shared_empty() {
+        i: int = 0
+        while i < 2000 {
+            const blank: bytes = bytes([])
+            const also: bytes = bytes([0] * 0)
+            self.assertEqual(len(blank) + len(also), 0)
+            self.assertEqual(blank == also, True)
+            i = i + 1
+        }
+    }
+
+    def test_bytes_from_a_union_list_of_ints_reads_the_payloads() {
+        wrapped: list[Boxed] = [65, 66, 300]
+        made: bytes = bytes(wrapped)
+        self.assertEqual(len(made), 3)
+        self.assertEqual(made[0], 65)
+        self.assertEqual(made[1], 66)
+        self.assertEqual(made[2], 44)
+    }
+
+    def test_bytes_from_a_union_list_holding_a_string_raises() {
+        wrapped: list[Boxed] = [65, "no"]
+        caught: str = ""
+        try {
+            const made: bytes = bytes(wrapped)
+        } except TypeError {
+            caught = "type"
+        }
+        self.assertEqual(caught, "type")
+    }
+
     def test_owned_temp_slices_in_a_loop_stay_balanced() {
         page: bytes = ("abcd" * 1023).encode("utf-8")
         total: int = 0

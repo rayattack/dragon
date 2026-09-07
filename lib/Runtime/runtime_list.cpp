@@ -577,15 +577,29 @@ DragonList* dragon_list_repeat(DragonList* src, int64_t count) {
     result->size = total;
     bool needIncref = (src->elem_tag == TAG_STR || src->elem_tag >= TAG_LIST);
 
-    if (!needIncref && src->elem_size == 1 && src->size == 1) {
-        uint8_t v = ((const uint8_t*)src->data)[0];
-        memset(result->data, v, (size_t)total);
+    if (!needIncref && src->size == 1) {
+        if (src->elem_size == 1) {
+            memset(result->data, ((const uint8_t*)src->data)[0], (size_t)total);
+            return result;
+        }
+        uint64_t word = (uint64_t)((const int64_t*)src->data)[0];
+        if ((word & 0xFF) * 0x0101010101010101ULL == word) {
+            memset(result->data, (int)(word & 0xFF), (size_t)total * 8);
+            return result;
+        }
+        int64_t* out = (int64_t*)result->data;
+        for (int64_t i = 0; i < total; ++i) out[i] = (int64_t)word;
         return result;
     }
     if (!needIncref) {
-        size_t block = (size_t)(src->size * src->elem_size);
-        for (int64_t c = 0; c < count; ++c) {
-            memcpy((char*)result->data + (size_t)c * block, src->data, block);
+        size_t block = (size_t)src->size * src->elem_size;
+        size_t totalBytes = (size_t)total * src->elem_size;
+        memcpy(result->data, src->data, block);
+        size_t filled = block;
+        while (filled < totalBytes) {
+            size_t chunk = filled < totalBytes - filled ? filled : totalBytes - filled;
+            memcpy((char*)result->data + filled, result->data, chunk);
+            filled += chunk;
         }
         return result;
     }

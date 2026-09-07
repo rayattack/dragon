@@ -1174,8 +1174,26 @@ DragonBytes* dragon_bytes_from_literal(const char* data, int64_t len) {
     return dragon_bytes_new((const uint8_t*)data, len);
 }
 
+static DragonBytes* dragon_bytes_from_list_box(DragonListBox* list) {
+    int64_t n = list->size;
+    DragonBytes* b = dragon_bytes_alloc(n);
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t tag = list->data[i].tag;
+        if (tag != TAG_INT && tag != TAG_BOOL) {
+            dragon_decref(b);
+            dragon_raise_exc_cstr(80,
+                "TypeError: bytes() needs a list of ints; a boxed-element list "
+                "holds a value that is not an int");
+        }
+        b->data[i] = (uint8_t)(list->data[i].payload & 0xFF);
+    }
+    return b;
+}
+
 DragonBytes* dragon_bytes_from_list(DragonList* list) {
     if (!list) return dragon_bytes_empty();
+    if (list->header.type_tag == DRAGON_TAG_LIST_BOX)
+        return dragon_bytes_from_list_box((DragonListBox*)(void*)list);
     int64_t n = list->size;
     DragonBytes* b = dragon_bytes_alloc(n);
     if (n <= 0) return b;
@@ -1183,8 +1201,9 @@ DragonBytes* dragon_bytes_from_list(DragonList* list) {
         memcpy(b->data, list->data, (size_t)n);
         return b;
     }
-    const int64_t* src = (const int64_t*)list->data;
-    for (int64_t i = 0; i < n; ++i) b->data[i] = (uint8_t)(src[i] & 0xFF);
+    const int64_t* __restrict src = (const int64_t*)list->data;
+    uint8_t* __restrict out = b->data;
+    for (int64_t i = 0; i < n; ++i) out[i] = (uint8_t)(src[i] & 0xFF);
     return b;
 }
 
