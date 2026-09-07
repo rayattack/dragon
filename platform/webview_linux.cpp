@@ -7,7 +7,7 @@
 
 #define DRAGON_DBG(...) do { if (getenv("DRAGON_UI_DEBUG")) { fprintf(stderr, "[shell] " __VA_ARGS__); fflush(stderr); } } while (0)
 
-extern "C" const char* dragon_string_dup(const char* s);
+extern "C" const char* dragon_string_dup_cstr(const char* s);
 
 extern "C" void dragon_decref_str(const char* s);
 
@@ -134,7 +134,7 @@ static void dragon__on_script_message(WebKitUserContentManager* ucm,
     char* s = jsc_value_to_string(value);
     DRAGON_DBG("script-message: '%s' handler=%p\n", s ? s : "(null)", (void*) wv->handler);
     if (wv->handler && s) {
-        const char* dstr = dragon_string_dup(s);
+        const char* dstr = dragon_string_dup_cstr(s);
         wv->handler(dstr);
         dragon_decref_str(dstr);
     }
@@ -337,7 +337,7 @@ const char* dragon_webview_pick_folder(const char* title, const char* start_dir)
     g_cond_clear(&req.cond);
     if (title_owned) free(title_owned);
     if (start_owned) free(start_owned);
-    const char* out = dragon_string_dup(req.path ? req.path : "");
+    const char* out = dragon_string_dup_cstr(req.path ? req.path : "");
     if (req.path) g_free(req.path);
     return out;
 }

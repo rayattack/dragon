@@ -7,7 +7,7 @@
 
 #define DRAGON_DBG(...) do { if (getenv("DRAGON_UI_DEBUG")) { fprintf(stderr, "[shell] " __VA_ARGS__); fflush(stderr); } } while (0)
 
-extern "C" const char* dragon_string_dup(const char* s);
+extern "C" const char* dragon_string_dup_cstr(const char* s);
 
 extern "C" char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
@@ -130,7 +130,7 @@ static void dragon__stop_app(void) {
         : [NSString stringWithFormat:@"%@", message.body];
     const char* utf8 = [body UTF8String];
     DRAGON_DBG("script-message: '%s' handler=%p\n", utf8 ? utf8 : "(null)", (void*) self.handler);
-    if (self.handler && utf8) self.handler(dragon_string_dup(utf8));
+    if (self.handler && utf8) self.handler(dragon_string_dup_cstr(utf8));
 }
 
 - (void)webView:(WKWebView*)webView startURLSchemeTask:(id<WKURLSchemeTask>)task {
@@ -339,7 +339,7 @@ const char* dragon_webview_pick_folder(const char* title, const char* start_dir)
         if ([NSThread isMainThread]) run();
         else dispatch_sync(dispatch_get_main_queue(), run);
 
-        return dragon_string_dup(picked ? [picked UTF8String] : "");
+        return dragon_string_dup_cstr(picked ? [picked UTF8String] : "");
     }
 }
 

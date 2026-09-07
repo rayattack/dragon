@@ -32,6 +32,7 @@ const NON_ASCII: str = "café ☃ 日本"
 const HOSTILE_ATTR_NAME: str = "data-\"x\""
 const NODE_ID_SLOT: str = "$id"
 const OUT_OF_RANGE_CALLBACK: str = "99999"
+const OUT_OF_RANGE_CALLBACK_TOO_LONG_TO_FIT_INLINE: str = "0000000000000000000000000000000000099999"
 const FIRST_CALLBACK: str = "0"
 
 text_source: Signal[str] = Signal("initial")
@@ -283,6 +284,12 @@ class HandlerExtractionTests(TestCase) {
     def test_out_of_range_callback_id_is_ignored() {
         before: int = len(clicked)
         probe_dispatch(OUT_OF_RANGE_CALLBACK)
+        self.assertEqual(len(clicked), before)
+    }
+
+    def test_out_of_range_callback_id_too_long_to_fit_inline_is_ignored() {
+        before: int = len(clicked)
+        probe_dispatch(OUT_OF_RANGE_CALLBACK_TOO_LONG_TO_FIT_INLINE)
         self.assertEqual(len(clicked), before)
     }
 }
