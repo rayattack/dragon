@@ -34,17 +34,26 @@ static int dragon_utf8_decode_one(const unsigned char* p, int64_t remaining,
     return 0;
 }
 
+static inline int64_t dragon_ascii_prefix(const unsigned char* p, int64_t n) {
+    int64_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t word;
+        memcpy(&word, p + i, sizeof(word));
+        if (word & 0x8080808080808080ULL) break;
+    }
+    for (; i < n; ++i) {
+        if (p[i] >= 0x80) break;
+    }
+    return i;
+}
+
 const char* dragon_string_alloc(const char* src, int64_t byte_len) {
     if (byte_len <= 0) {
         DragonString* s = dragon_string_alloc_ascii(0);
         return s->data;
     }
     const unsigned char* p = (const unsigned char*)src;
-    int has_high = 0;
-    for (int64_t i = 0; i < byte_len; ++i) {
-        if (p[i] >= 0x80) { has_high = 1; break; }
-    }
-    if (!has_high) {
+    if (dragon_ascii_prefix(p, byte_len) == byte_len) {
         DragonString* s = dragon_string_alloc_ascii(byte_len);
         memcpy(s->data, src, (size_t)byte_len);
         return s->data;
@@ -75,27 +84,55 @@ const char* dragon_string_alloc(const char* src, int64_t byte_len) {
     return s->data;
 }
 
-static int dragon_enc_is(const char* enc, const char* lc_target) {
-    if (!enc) return 0;
-    const char* a = enc;
-    const char* b = lc_target;
-    while (*a && *b) {
-        char ca = *a;
-        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
-        if (ca != *b) return 0;
-        ++a; ++b;
+static inline __attribute__((always_inline))
+int dragon_name_is(const char* name, const char* lc_target, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != lc_target[i]) return 0;
     }
-    return *a == 0 && *b == 0;
+    return name[n] == 0;
 }
 
+#define dragon_enc_is(name, lit) dragon_name_is((name), (lit), sizeof(lit) - 1)
+
 static int dragon_errors_policy(const char* errors) {
-    if (!errors || dragon_enc_is(errors, "strict")) return 0;
-    if (dragon_enc_is(errors, "replace")) return 1;
+    if (!errors) return 0;
+    char first = errors[0];
+    if (first == 's' || first == 'S') return dragon_enc_is(errors, "strict") ? 0 : -1;
+    if (first == 'r' || first == 'R') return dragon_enc_is(errors, "replace") ? 1 : -1;
     return -1;
+}
+
+enum {
+    DRAGON_ENCODING_UNKNOWN = 0,
+    DRAGON_ENCODING_ASCII = 1,
+    DRAGON_ENCODING_UTF8 = 2
+};
+
+static int dragon_encoding_kind(const char* encoding) {
+    if (!encoding) return DRAGON_ENCODING_UNKNOWN;
+    char first = encoding[0];
+    if (first == 'u' || first == 'U') {
+        if (dragon_enc_is(encoding, "utf-8") || dragon_enc_is(encoding, "utf8") ||
+            dragon_enc_is(encoding, "u8"))
+            return DRAGON_ENCODING_UTF8;
+        return dragon_enc_is(encoding, "us-ascii") ? DRAGON_ENCODING_ASCII
+                                                   : DRAGON_ENCODING_UNKNOWN;
+    }
+    if (first == 'a' || first == 'A')
+        return dragon_enc_is(encoding, "ascii") ? DRAGON_ENCODING_ASCII
+                                                : DRAGON_ENCODING_UNKNOWN;
+    return DRAGON_ENCODING_UNKNOWN;
 }
 
 static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
                                          int ascii_only, int pol) {
+    if (dragon_ascii_prefix(p, n) == n) {
+        DragonString* s = dragon_string_alloc_ascii(n);
+        memcpy(s->data, p, (size_t)n);
+        return s->data;
+    }
     int64_t cp_count = 0;
     int has_high = 0;
     for (int64_t i = 0; i < n; ) {
@@ -154,15 +191,13 @@ const char* dragon_bytes_decode_ex(DragonBytes* b, const char* encoding,
         dragon_raise_exc_cstr(40, "unknown error handler name");
         return dragon_string_alloc("", 0);
     }
-    int is_ascii = dragon_enc_is(encoding, "ascii") || dragon_enc_is(encoding, "us-ascii");
-    int is_utf8  = dragon_enc_is(encoding, "utf-8") || dragon_enc_is(encoding, "utf8") ||
-                   dragon_enc_is(encoding, "u8");
-    if (!is_ascii && !is_utf8) {
+    int kind = dragon_encoding_kind(encoding);
+    if (kind == DRAGON_ENCODING_UNKNOWN) {
         dragon_raise_exc_cstr(40, "unknown encoding");
         return dragon_string_alloc("", 0);
     }
     if (!b || b->len == 0) return dragon_string_alloc("", 0);
-    return dragon_decode_checked(b->data, b->len, is_ascii ? 1 : 0, pol);
+    return dragon_decode_checked(b->data, b->len, kind == DRAGON_ENCODING_ASCII ? 1 : 0, pol);
 }
 
 DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
@@ -172,10 +207,9 @@ DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
         dragon_raise_exc_cstr(40, "unknown error handler name");
         return dragon_bytes_new(nullptr, 0);
     }
-    int is_ascii = dragon_enc_is(encoding, "ascii") || dragon_enc_is(encoding, "us-ascii");
-    int is_utf8  = dragon_enc_is(encoding, "utf-8") || dragon_enc_is(encoding, "utf8") ||
-                   dragon_enc_is(encoding, "u8");
-    if (!is_ascii && !is_utf8) {
+    int kind = dragon_encoding_kind(encoding);
+    int is_utf8 = kind == DRAGON_ENCODING_UTF8;
+    if (kind == DRAGON_ENCODING_UNKNOWN) {
         dragon_raise_exc_cstr(40, "unknown encoding");
         return dragon_bytes_new(nullptr, 0);
     }
@@ -188,11 +222,7 @@ DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
         if (enc) free(enc);
         return bts;
     }
-    int has_high = 0;
-    for (int64_t i = 0; i < blen; ++i) {
-        if ((unsigned char)src[i] >= 0x80) { has_high = 1; break; }
-    }
-    if (!has_high) {
+    if (dragon_ascii_prefix((const unsigned char*)src, blen) == blen) {
         DragonBytes* bts = dragon_bytes_new((const uint8_t*)src, blen);
         if (enc) free(enc);
         return bts;

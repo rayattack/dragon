@@ -2,16 +2,13 @@ type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
 
 from unittest import TestCase, main
 
-
 def _ord_two_chars() {
     ord("ab")
 }
 
-
 def _ord_empty() {
     ord("")
 }
-
 
 class Dog {
     name: str
@@ -19,7 +16,6 @@ class Dog {
         self.name = name
     }
 }
-
 
 class StringEmptyOperandTests(TestCase) {
     """Regression test for empty / NULL string-operand handling in the runtime.
@@ -92,7 +88,6 @@ class StringEmptyOperandTests(TestCase) {
     }
 }
 
-
 class StringLiteralHeaderTests(TestCase) {
     """Regression test for the string-literal DragonObjectHeader fix.
 
@@ -139,7 +134,6 @@ class StringLiteralHeaderTests(TestCase) {
         self.assertTrue("two" == xs[1])
     }
 }
-
 
 class StrSubstringInTests(TestCase) {
     def test_substring_present_and_absent() {
@@ -224,7 +218,6 @@ class StrSubstringInTests(TestCase) {
     }
 }
 
-
 class IntToStrTests(TestCase) {
     """str(int) - hand-rolled itoa fast path (replaced snprintf).
 
@@ -270,7 +263,6 @@ class IntToStrTests(TestCase) {
     }
 }
 
-
 class OrdTests(TestCase) {
     def test_ascii() {
         self.assertEqual(ord("A"), 65)
@@ -304,7 +296,6 @@ class OrdTests(TestCase) {
         self.assertRaises(TypeError, _ord_empty)
     }
 }
-
 
 class PredicateTests(TestCase) {
     def test_isalpha_nonascii() {
@@ -366,7 +357,6 @@ class PredicateTests(TestCase) {
     }
 }
 
-
 class ReprTests(TestCase) {
     def test_repr_ascii() {
         self.assertEqual(repr("hello"), "'hello'")
@@ -380,7 +370,6 @@ class ReprTests(TestCase) {
         self.assertEqual(len(repr("Āb")), 4)
     }
 }
-
 
 class HashTests(TestCase) {
     def test_equal_content_equal_hash() {
@@ -399,7 +388,6 @@ class HashTests(TestCase) {
         self.assertNotEqual(hash("é"), hash("éé"))
     }
 }
-
 
 class ConversionTests(TestCase) {
     """float(str) parsing + None/float boxing in Boxed.
@@ -438,7 +426,6 @@ class ConversionTests(TestCase) {
         self.assertIsNone(d["k"])
     }
 }
-
 
 class TypeBuiltinTests(TestCase) {
     """type(x) returns the type's NAME as a str (e.g. "int", "Dog"). Two root-cause
@@ -484,7 +471,6 @@ class TypeBuiltinTests(TestCase) {
     }
 }
 
-
 class ByteHolder {
     data: bytes
 
@@ -492,7 +478,6 @@ class ByteHolder {
         self.data = data
     }
 }
-
 
 class ByteWindow {
     data: bytes
@@ -518,7 +503,6 @@ class ByteWindow {
     }
 }
 
-
 def _first_high_byte(buf: bytes) -> int {
     for b in buf {
         if b > 127 {
@@ -527,7 +511,6 @@ def _first_high_byte(buf: bytes) -> int {
     }
     return -1
 }
-
 
 class BytesIterationTests(TestCase) {
     """A for loop over bytes yields each byte as an int (DRG-84).
@@ -621,7 +604,6 @@ class BytesIterationTests(TestCase) {
         self.assertEqual(total, 1023 * (ord("a") + ord("b") + ord("c") + ord("d")))
     }
 }
-
 
 class BytesElementAccessTests(TestCase) {
     """b[i] and len(b) read the DragonBytes header and buffer inline (DRG-187).
@@ -802,11 +784,9 @@ class BytesElementAccessTests(TestCase) {
     }
 }
 
-
 def _len_of(buf: bytes) -> int {
     return len(buf)
 }
-
 
 def _sum_of(buf: bytes) -> int {
     total: int = 0
@@ -815,7 +795,6 @@ def _sum_of(buf: bytes) -> int {
     }
     return total
 }
-
 
 class BytesEmptyAndSliceTests(TestCase) {
     """Every zero-length bytes is one immortal singleton, and a step-1 slice is a
@@ -1049,8 +1028,145 @@ class BytesEmptyAndSliceTests(TestCase) {
     }
 }
 
+class BytesDecodeTests(TestCase) {
+    """`b.decode()` scans for high bytes eight at a time and copies an all-ASCII
+    payload in one memcpy (DRG-200). Before, it called the UTF-8 decoder once per
+    byte to count code points and then copied the ASCII output a byte at a time.
+    Strict and replace behaviour, both encodings and every length class have to
+    come out identical."""
+
+    def test_ascii_at_each_length_class() {
+        self.assertEqual(bytes().decode("utf-8"), "")
+        self.assertEqual(b"a".decode("utf-8"), "a")
+        self.assertEqual(b"abcdefg".decode("utf-8"), "abcdefg")
+        self.assertEqual(b"abcdefgh".decode("utf-8"), "abcdefgh")
+        self.assertEqual(b"abcdefghi".decode("utf-8"), "abcdefghi")
+        self.assertEqual(len(b"abcdefg".decode("utf-8")), 7)
+        self.assertEqual(len(b"abcdefgh".decode("utf-8")), 8)
+        self.assertEqual(len(b"abcdefghi".decode("utf-8")), 9)
+    }
+
+    def test_a_four_kilobyte_ascii_payload() {
+        page: bytes = ("abcd" * 1024).encode("utf-8")
+        self.assertEqual(len(page), 4096)
+        text: str = page.decode("utf-8")
+        self.assertEqual(len(text), 4096)
+        self.assertEqual(text[0], "a")
+        self.assertEqual(text[4095], "d")
+        self.assertEqual(text == "abcd" * 1024, True)
+    }
+
+    def test_a_high_byte_at_every_position_of_a_word() {
+        i: int = 0
+        while i < 8 {
+            vals: list[int] = [65] * 9
+            vals[i] = 0xC3
+            vals[i + 1] = 0xA9
+            const decoded: str = bytes(vals).decode("utf-8")
+            self.assertEqual(len(decoded), 8)
+            self.assertEqual(ord(decoded[i]), 233)
+            i = i + 1
+        }
+    }
+
+    def test_multibyte_lengths_count_code_points() {
+        two: bytes = "é".encode("utf-8")
+        three: bytes = "€".encode("utf-8")
+        four: bytes = "𝄞".encode("utf-8")
+        self.assertEqual(len(two), 2)
+        self.assertEqual(len(three), 3)
+        self.assertEqual(len(four), 4)
+        self.assertEqual(len(two.decode("utf-8")), 1)
+        self.assertEqual(len(three.decode("utf-8")), 1)
+        self.assertEqual(len(four.decode("utf-8")), 1)
+        self.assertEqual(two.decode("utf-8"), "é")
+        self.assertEqual(three.decode("utf-8"), "€")
+        self.assertEqual(four.decode("utf-8"), "𝄞")
+        mixed: bytes = "aé€b".encode("utf-8")
+        self.assertEqual(len(mixed), 7)
+        self.assertEqual(len(mixed.decode("utf-8")), 4)
+        self.assertEqual(mixed.decode("utf-8"), "aé€b")
+    }
+
+    def test_invalid_utf8_raises_under_strict() {
+        bad: bytes = bytes([0xFF, 0x41])
+        caught: str = ""
+        try {
+            const text: str = bad.decode("utf-8")
+        } except UnicodeDecodeError {
+            caught = "decode"
+        }
+        self.assertEqual(caught, "decode")
+    }
+
+    def test_invalid_utf8_substitutes_under_replace() {
+        bad: bytes = bytes([0xFF, 0x41])
+        text: str = bad.decode("utf-8", "replace")
+        self.assertEqual(len(text), 2)
+        self.assertEqual(text[1], "A")
+        self.assertEqual(ord(text[0]), 65533)
+        truncated: bytes = bytes([0xE2, 0x82])
+        self.assertEqual(len(truncated.decode("utf-8", "replace")), 2)
+    }
+
+    def test_ascii_encoding_rejects_high_bytes() {
+        high: bytes = bytes([0x41, 0x80])
+        caught: str = ""
+        try {
+            const text: str = high.decode("ascii")
+        } except UnicodeDecodeError {
+            caught = "decode"
+        }
+        self.assertEqual(caught, "decode")
+        replaced: str = high.decode("ascii", "replace")
+        self.assertEqual(len(replaced), 2)
+        self.assertEqual(replaced[0], "A")
+        self.assertEqual(b"plain".decode("ascii"), "plain")
+    }
+
+    def test_encoding_names_are_case_insensitive_with_aliases() {
+        payload: bytes = b"abc"
+        self.assertEqual(payload.decode("UTF-8"), "abc")
+        self.assertEqual(payload.decode("utf8"), "abc")
+        self.assertEqual(payload.decode("u8"), "abc")
+        self.assertEqual(payload.decode("ascii"), "abc")
+        self.assertEqual(payload.decode("US-ASCII"), "abc")
+        self.assertEqual(payload.decode("Ascii"), "abc")
+    }
+
+    def test_unknown_encoding_and_handler_are_rejected() {
+        payload: bytes = b"abc"
+        caught: str = ""
+        try {
+            const text: str = payload.decode("latin-1")
+        } except LookupError {
+            caught = "encoding"
+        }
+        self.assertEqual(caught, "encoding")
+        caught = ""
+        try {
+            const text2: str = payload.decode("utf-8", "ignore")
+        } except LookupError {
+            caught = "handler"
+        }
+        self.assertEqual(caught, "handler")
+    }
+
+    def test_decoding_in_a_loop_stays_balanced() {
+        page: bytes = ("abcd" * 1023).encode("utf-8")
+        total: int = 0
+        i: int = 0
+        while i < 2000 {
+            total = total + len(page[8:16].decode("utf-8"))
+            total = total + len(bytes().decode("utf-8"))
+            total = total + len("é".encode("utf-8").decode("utf-8"))
+            i = i + 1
+        }
+        self.assertEqual(total, 2000 * 9)
+    }
+}
 
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
-      BytesElementAccessTests(), BytesEmptyAndSliceTests()])
+      BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests()])
