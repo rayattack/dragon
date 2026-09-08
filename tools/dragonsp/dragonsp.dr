@@ -1,0 +1,886 @@
+from json import Data, loads_obj, JsonWriter
+from sys import argv, exit, getenv
+from os import mkdir, unlink, rmdir, getcwd
+from os.path import dirname, basename, join, isdir
+from tempfile import mkdtemp
+
+from rpc import Transport, Request, field_str, field_int, field_obj, field_list
+from rpc import begin_response, end_message, error_response, begin_notification, write_range
+from rpc import METHOD_NOT_FOUND, INVALID_PARAMS, PARSE_ERROR
+from documents import Document, DocumentStore, utf16_col, cp_col, uri_to_path, path_to_uri
+from scan import ScanResult, Symbol, ImportDecl, word_at, qualifier_before, dotted_at, ident_at, is_ident_char
+from scan import KIND_MODULE, KIND_CLASS, KIND_METHOD, KIND_PROPERTY, KIND_FIELD, KIND_CONSTRUCTOR
+from scan import KIND_ENUM, KIND_FUNCTION, KIND_VARIABLE, KIND_CONSTANT, KIND_ENUM_MEMBER
+from check import Diagnostic, run_check
+from modules import ModuleIndex, find_stdlib, read_text
+from builtins import KEYWORDS, TYPE_NAMES, BUILTINS, Builtin, find_builtin, keyword_doc
+from builtins import ITEM_METHOD, ITEM_FUNCTION, ITEM_CONSTRUCTOR, ITEM_FIELD, ITEM_VARIABLE
+from builtins import ITEM_CLASS, ITEM_MODULE, ITEM_PROPERTY, ITEM_ENUM, ITEM_KEYWORD
+from builtins import ITEM_ENUM_MEMBER, ITEM_CONSTANT, ITEM_STRUCT
+
+const VERSION: str = "0.1.0"
+const SERVER_NAME: str = "dragonsp"
+const SYNC_FULL: int = 1
+
+
+def item_kind_for(symbol_kind: int) -> int {
+    if symbol_kind == KIND_CLASS { return ITEM_CLASS }
+    if symbol_kind == KIND_METHOD { return ITEM_METHOD }
+    if symbol_kind == KIND_PROPERTY { return ITEM_PROPERTY }
+    if symbol_kind == KIND_FIELD { return ITEM_FIELD }
+    if symbol_kind == KIND_CONSTRUCTOR { return ITEM_CONSTRUCTOR }
+    if symbol_kind == KIND_ENUM { return ITEM_ENUM }
+    if symbol_kind == KIND_FUNCTION { return ITEM_FUNCTION }
+    if symbol_kind == KIND_CONSTANT { return ITEM_CONSTANT }
+    if symbol_kind == KIND_ENUM_MEMBER { return ITEM_ENUM_MEMBER }
+    if symbol_kind == KIND_MODULE { return ITEM_MODULE }
+    return ITEM_VARIABLE
+}
+
+
+class Found {
+    symbol: Symbol
+    path: str
+    uri: str
+
+    def(symbol: Symbol, path: str, uri: str) {
+        self.symbol = symbol
+        self.path = path
+        self.uri = uri
+    }
+}
+
+
+class Server {
+    transport: Transport
+    store: DocumentStore
+    modules: ModuleIndex
+    compiler: str
+    scratch: str
+    scratch_files: list[str] = []
+    scratch_dirs: list[str] = []
+    root: str
+    shutdown_requested: bool = false
+    running: bool = true
+    exit_code: int = 0
+    dirty: dict[str, bool] = {}
+    workspace_indexed: bool = false
+
+    def(transport: Transport, compiler: str, stdlib_dir: str) {
+        self.transport = transport
+        self.store = DocumentStore()
+        self.modules = ModuleIndex(stdlib_dir)
+        self.compiler = compiler
+        self.scratch = mkdtemp("dragonsp-", "")
+        self.root = ""
+    }
+
+    def serve() {
+        while self.running {
+            const body: str = self.transport.read()
+            if len(body) == 0 { break }
+            msg: dict[str, Data] = {}
+            try {
+                msg = loads_obj(body)
+            } except Exception as e {
+                empty: dict[str, Data] = {}
+                self.transport.send(error_response(Request(empty), PARSE_ERROR, "invalid JSON: " + str(e)))
+                continue
+            }
+            self.dispatch(Request(msg))
+            if self.running and not self.transport.pending() { self.flush_dirty() }
+        }
+        self.cleanup()
+    }
+
+    def cleanup() {
+        for f in self.scratch_files { unlink(f) }
+        for d in self.scratch_dirs { rmdir(d) }
+        rmdir(self.scratch)
+        self.transport.close()
+    }
+
+    def dispatch(req: Request) {
+        const m: str = req.method
+        self.transport.trace("dragonsp <- " + m)
+        if req.is_request() {
+            if m == "initialize" {
+                self.reply_initialize(req)
+            } elif m == "shutdown" {
+                self.shutdown_requested = true
+                self.reply_null(req)
+            } elif m == "textDocument/documentSymbol" {
+                self.reply_document_symbol(req)
+            } elif m == "textDocument/hover" {
+                self.reply_hover(req)
+            } elif m == "textDocument/definition" {
+                self.reply_definition(req)
+            } elif m == "textDocument/completion" {
+                self.reply_completion(req)
+            } elif m == "workspace/symbol" {
+                self.reply_workspace_symbol(req)
+            } else {
+                self.transport.send(error_response(req, METHOD_NOT_FOUND, "method not supported: " + m))
+            }
+            return
+        }
+        if m == "exit" {
+            self.exit_code = 0 if self.shutdown_requested else 1
+            self.running = false
+        } elif m == "textDocument/didOpen" {
+            self.on_did_open(req)
+        } elif m == "textDocument/didChange" {
+            self.on_did_change(req)
+        } elif m == "textDocument/didSave" {
+            self.on_did_save(req)
+        } elif m == "textDocument/didClose" {
+            self.on_did_close(req)
+        }
+    }
+
+    def reply_null(req: Request) {
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.write_null()
+        self.transport.send(end_message(w))
+    }
+
+    def reply_initialize(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const root_uri: str = field_str(params, "rootUri")
+        if root_uri != "" {
+            self.root = uri_to_path(root_uri)
+        } else {
+            const root_path: str = field_str(params, "rootPath")
+            self.root = root_path if root_path != "" else getcwd()
+        }
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.begin_object()
+        w.key("capabilities")
+        w.begin_object()
+        w.key("positionEncoding")
+        w.write_str("utf-16")
+        w.key("textDocumentSync")
+        w.begin_object()
+        w.key("openClose")
+        w.write_bool(true)
+        w.key("change")
+        w.write_int(SYNC_FULL)
+        w.key("save")
+        w.begin_object()
+        w.key("includeText")
+        w.write_bool(false)
+        w.end_object()
+        w.end_object()
+        w.key("documentSymbolProvider")
+        w.write_bool(true)
+        w.key("hoverProvider")
+        w.write_bool(true)
+        w.key("definitionProvider")
+        w.write_bool(true)
+        w.key("workspaceSymbolProvider")
+        w.write_bool(true)
+        w.key("completionProvider")
+        w.begin_object()
+        w.key("triggerCharacters")
+        w.write_str_list(["."])
+        w.key("resolveProvider")
+        w.write_bool(false)
+        w.end_object()
+        w.end_object()
+        w.key("serverInfo")
+        w.begin_object()
+        w.key("name")
+        w.write_str(SERVER_NAME)
+        w.key("version")
+        w.write_str(VERSION)
+        w.end_object()
+        w.end_object()
+        self.transport.send(end_message(w))
+    }
+
+    def display_path(path: str) -> str {
+        if self.root != "" and path.startswith(self.root + "/") { return path[len(self.root) + 1:] }
+        return path
+    }
+
+    def text_document_uri(params: dict[str, Data]) -> str {
+        const td: dict[str, Data] | None = field_obj(params, "textDocument")
+        if td is None { return "" }
+        return field_str(td, "uri")
+    }
+
+    def position_of(params: dict[str, Data]) -> tuple[int, int] {
+        const pos: dict[str, Data] | None = field_obj(params, "position")
+        if pos is None { return (0, 0) }
+        return (field_int(pos, "line", 0), field_int(pos, "character", 0))
+    }
+
+    def on_did_open(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const td: dict[str, Data] | None = field_obj(params, "textDocument")
+        if td is None { return }
+        const uri: str = field_str(td, "uri")
+        if uri == "" { return }
+        const doc: Document = self.store.put(uri, uri_to_path(uri), field_int(td, "version", 0), field_str(td, "text"))
+        self.modules.forget(doc.path)
+        self.dirty[uri] = true
+    }
+
+    def on_did_change(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const td: dict[str, Data] | None = field_obj(params, "textDocument")
+        if td is None { return }
+        const uri: str = field_str(td, "uri")
+        const doc: Document | None = self.store.get(uri)
+        if doc is None { return }
+        const changes: list[Data] | None = field_list(params, "contentChanges")
+        if changes is None { return }
+        text: str = doc.text
+        for change in changes {
+            if isinstance(change, dict) {
+                const range: dict[str, Data] | None = field_obj(change, "range")
+                if range is None {
+                    text = field_str(change, "text")
+                } else {
+                    text = self.apply_incremental(doc, text, range, field_str(change, "text"))
+                }
+            }
+        }
+        doc.update(field_int(td, "version", doc.version + 1), text)
+        self.dirty[uri] = true
+    }
+
+    def apply_incremental(doc: Document, text: str, range: dict[str, Data], replacement: str) -> str {
+        const start: dict[str, Data] | None = field_obj(range, "start")
+        const end: dict[str, Data] | None = field_obj(range, "end")
+        if start is None or end is None { return text }
+        const scratch: Document = Document(doc.uri, doc.path, doc.version, text)
+        const from_off: int = self.offset_in(scratch, field_int(start, "line", 0), field_int(start, "character", 0))
+        const to_off: int = self.offset_in(scratch, field_int(end, "line", 0), field_int(end, "character", 0))
+        return text[:from_off] + replacement + text[to_off:]
+    }
+
+    def offset_in(doc: Document, line: int, character: int) -> int {
+        offset: int = 0
+        i: int = 0
+        while i < line and i < len(doc.lines) {
+            offset += len(doc.lines[i]) + 1
+            i += 1
+        }
+        if line < len(doc.lines) {
+            offset += cp_col(doc.lines[line], character)
+        }
+        if offset > len(doc.text) { offset = len(doc.text) }
+        return offset
+    }
+
+    def on_did_save(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const uri: str = self.text_document_uri(params)
+        const doc: Document | None = self.store.get(uri)
+        if doc is None { return }
+        const text: str = field_str(params, "text")
+        if text != "" { doc.update(doc.version, text) }
+        self.modules.forget(doc.path)
+        self.publish(doc)
+        if uri in self.dirty { del self.dirty[uri] }
+    }
+
+    def on_did_close(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const uri: str = self.text_document_uri(params)
+        if uri == "" { return }
+        self.store.drop(uri)
+        if uri in self.dirty { del self.dirty[uri] }
+        empty: list[Diagnostic] = []
+        self.send_diagnostics(uri, -1, empty, None)
+    }
+
+    def flush_dirty() {
+        if len(self.dirty) == 0 { return }
+        uris: list[str] = []
+        for uri in self.dirty { uris.append(uri) }
+        for uri in uris {
+            const doc: Document | None = self.store.get(uri)
+            if doc is not None { self.publish(doc) }
+            del self.dirty[uri]
+        }
+    }
+
+    def scratch_for(path: str) -> str {
+        const dir: str = join(self.scratch, str(abs(hash(path)) % 1000000007))
+        if not isdir(dir) {
+            mkdir(dir, 0o700)
+            self.scratch_dirs.append(dir)
+            self.scratch_files.append(join(dir, basename(path)))
+        }
+        return dir
+    }
+
+    def publish(doc: Document) {
+        if not doc.uri.startswith("file://") {
+            empty: list[Diagnostic] = []
+            self.send_diagnostics(doc.uri, doc.version, empty, doc)
+            return
+        }
+        const on_disk: bool = read_text(doc.path) == doc.text
+        const diags: list[Diagnostic] = run_check(self.compiler, doc.path, doc.text, self.scratch_for(doc.path), on_disk)
+        mine: list[Diagnostic] = []
+        others: dict[str, list[Diagnostic]] = {}
+        for d in diags {
+            if d.path == doc.path {
+                mine.append(d)
+            } else {
+                others.setdefault(d.path, []).append(d)
+            }
+        }
+        self.send_diagnostics(doc.uri, doc.version, mine, doc)
+        for p in others {
+            const other_doc: Document | None = self.store.by_path(p)
+            self.send_diagnostics(path_to_uri(p), -1, others[p], other_doc)
+        }
+    }
+
+    def send_diagnostics(uri: str, version: int, diags: list[Diagnostic], doc: Document | None) {
+        w: JsonWriter = JsonWriter()
+        begin_notification(w, "textDocument/publishDiagnostics")
+        w.begin_object()
+        w.key("uri")
+        w.write_str(uri)
+        if version >= 0 {
+            w.key("version")
+            w.write_int(version)
+        }
+        w.key("diagnostics")
+        w.begin_array()
+        for d in diags {
+            line_text: str = ""
+            if doc is not None { line_text = doc.line_at(d.line) }
+            start_cp: int = d.col
+            if start_cp > len(line_text) { start_cp = len(line_text) }
+            end_cp: int = start_cp + 1
+            if len(line_text) > 0 {
+                word, begin = word_at(line_text, start_cp)
+                if len(word) > 0 and begin <= start_cp { end_cp = begin + len(word) }
+                if end_cp <= start_cp { end_cp = start_cp + 1 }
+            }
+            w.begin_object()
+            w.key("range")
+            write_range(w, d.line, utf16_col(line_text, start_cp), d.line, utf16_col(line_text, end_cp))
+            w.key("severity")
+            w.write_int(d.severity)
+            w.key("source")
+            w.write_str("dragon")
+            w.key("message")
+            w.write_str(d.message)
+            w.end_object()
+        }
+        w.end_array()
+        w.end_object()
+        self.transport.send(end_message(w))
+    }
+
+    def write_symbol(w: JsonWriter, doc: Document, s: Symbol, children: list[Symbol]) {
+        const line_text: str = doc.line_at(s.line)
+        const end_text: str = doc.line_at(s.end_line)
+        w.begin_object()
+        w.key("name")
+        w.write_str(s.name)
+        w.key("kind")
+        w.write_int(s.kind)
+        w.key("detail")
+        w.write_str(s.detail)
+        w.key("range")
+        write_range(w, s.line, utf16_col(line_text, s.col), s.end_line, utf16_col(end_text, len(end_text)))
+        w.key("selectionRange")
+        write_range(w, s.line, utf16_col(line_text, s.col), s.line, utf16_col(line_text, s.col + len(s.name)))
+        if len(children) > 0 {
+            w.key("children")
+            w.begin_array()
+            empty: list[Symbol] = []
+            for c in children { self.write_symbol(w, doc, c, empty) }
+            w.end_array()
+        }
+        w.end_object()
+    }
+
+    def reply_document_symbol(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const doc: Document | None = self.store.get(self.text_document_uri(params))
+        if doc is None {
+            self.reply_null(req)
+            return
+        }
+        const scanned: ScanResult = doc.symbols()
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.begin_array()
+        for s in scanned.top_level() {
+            children: list[Symbol] = []
+            if s.kind == KIND_CLASS or s.kind == KIND_ENUM { children = scanned.members_of(s.name) }
+            self.write_symbol(w, doc, s, children)
+        }
+        w.end_array()
+        self.transport.send(end_message(w))
+    }
+
+    def module_scan(imp: ImportDecl, doc: Document) -> ScanResult | None {
+        const path: str = self.modules.resolve(imp.module, dirname(doc.path))
+        if path == "" { return None }
+        const open_doc: Document | None = self.store.by_path(path)
+        if open_doc is not None { return open_doc.symbols() }
+        return self.modules.scan_path(path)
+    }
+
+    def declared_type_of(doc: Document, name: str, line: int) -> str {
+        i: int = line
+        const needle: str = name + ":"
+        while i >= 0 {
+            const text: str = doc.lines[i]
+            at: int = text.find(needle)
+            while at >= 0 {
+                const boundary_ok: bool = at == 0 or not is_ident_char(text[at - 1])
+                if boundary_ok {
+                    const type_name: str = ident_at(text, at + len(needle))
+                    if type_name != "" { return type_name }
+                }
+                const next: int = text[at + 1:].find(needle)
+                at = -1 if next < 0 else at + 1 + next
+            }
+            i -= 1
+        }
+        return ""
+    }
+
+    def find_class(doc: Document, name: str) -> Found | None {
+        const scanned: ScanResult = doc.symbols()
+        const local: Symbol | None = scanned.find(name)
+        if local is not None and (local.kind == KIND_CLASS or local.kind == KIND_ENUM) {
+            return Found(local, doc.path, doc.uri)
+        }
+        for imp in scanned.imports {
+            i: int = 0
+            while i < len(imp.aliases) {
+                if imp.aliases[i] == name {
+                    const found: Found | None = self.lookup_in_module(imp, doc, imp.names[i])
+                    if found is not None { return found }
+                }
+                i += 1
+            }
+        }
+        return None
+    }
+
+    def lookup_in_module(imp: ImportDecl, doc: Document, name: str) -> Found | None {
+        const path: str = self.modules.resolve(imp.module, dirname(doc.path))
+        if path == "" { return None }
+        const scanned: ScanResult | None = self.module_scan(imp, doc)
+        if scanned is None { return None }
+        const s: Symbol | None = scanned.find(name)
+        if s is None { return None }
+        return Found(s, path, path_to_uri(path))
+    }
+
+    def members_for_qualifier(doc: Document, qualifier: str, line: int) -> list[Found] {
+        out: list[Found] = []
+        const scanned: ScanResult = doc.symbols()
+        if qualifier == "self" {
+            const cls: str = scanned.enclosing_class(line)
+            if cls != "" {
+                for s in scanned.members_of(cls) { out.append(Found(s, doc.path, doc.uri)) }
+            }
+            return out
+        }
+        const imp: ImportDecl | None = scanned.local_name_for(qualifier)
+        if imp is not None and len(imp.names) == 0 {
+            const module_path: str = self.modules.resolve(imp.module, dirname(doc.path))
+            const ms: ScanResult | None = self.module_scan(imp, doc)
+            if ms is not None {
+                for s in ms.top_level() {
+                    if not s.name.startswith("_") { out.append(Found(s, module_path, path_to_uri(module_path))) }
+                }
+            }
+            return out
+        }
+        class_name: str = qualifier
+        const direct: Found | None = self.find_class(doc, qualifier)
+        if direct is None {
+            class_name = self.declared_type_of(doc, qualifier, line)
+        }
+        if class_name == "" { return out }
+        const owner: Found | None = self.find_class(doc, class_name)
+        if owner is None { return out }
+        const owner_doc: Document | None = self.store.by_path(owner.path)
+        owner_scan: ScanResult | None = None
+        if owner_doc is not None {
+            owner_scan = owner_doc.symbols()
+        } else {
+            owner_scan = self.modules.scan_path(owner.path)
+        }
+        if owner_scan is not None {
+            for s in owner_scan.members_of(owner.symbol.name) { out.append(Found(s, owner.path, owner.uri)) }
+        }
+        return out
+    }
+
+    def resolve_word(doc: Document, line: int, cp: int) -> Found | None {
+        const text: str = doc.line_at(line)
+        word, start = word_at(text, cp)
+        if word == "" { return None }
+        const qualifier: str = qualifier_before(text, start)
+        if qualifier != "" {
+            for f in self.members_for_qualifier(doc, qualifier, line) {
+                if f.symbol.name == word { return f }
+            }
+            return None
+        }
+        const scanned: ScanResult = doc.symbols()
+        const local: Symbol | None = scanned.find(word)
+        if local is not None { return Found(local, doc.path, doc.uri) }
+        for imp in scanned.imports {
+            if len(imp.names) == 0 and imp.alias == word {
+                const path: str = self.modules.resolve(imp.module, dirname(doc.path))
+                if path == "" { return None }
+                return Found(Symbol(imp.module, KIND_MODULE, 0, 0, "module " + imp.module, ""), path, path_to_uri(path))
+            }
+            i: int = 0
+            while i < len(imp.aliases) {
+                if imp.aliases[i] == word {
+                    return self.lookup_in_module(imp, doc, imp.names[i])
+                }
+                i += 1
+            }
+        }
+        return None
+    }
+
+    def reply_hover(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const doc: Document | None = self.store.get(self.text_document_uri(params))
+        if doc is None {
+            self.reply_null(req)
+            return
+        }
+        line, character = self.position_of(params)
+        const text: str = doc.line_at(line)
+        const cp: int = cp_col(text, character)
+        word, start = word_at(text, cp)
+        if word == "" {
+            self.reply_null(req)
+            return
+        }
+        title: str = ""
+        body: str = ""
+        const found: Found | None = self.resolve_word(doc, line, cp)
+        if found is not None {
+            title = found.symbol.detail
+            body = found.symbol.doc
+            if found.path != doc.path { body = body + ("\n\n" if body != "" else "") + "Defined in " + self.display_path(found.path) }
+        } else {
+            const b: Builtin | None = find_builtin(word)
+            if b is not None {
+                title = b.detail
+                body = b.doc
+            } else {
+                const kd: str = keyword_doc(word)
+                if kd != "" {
+                    title = word
+                    body = kd
+                }
+            }
+        }
+        if title == "" {
+            self.reply_null(req)
+            return
+        }
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.begin_object()
+        w.key("contents")
+        w.begin_object()
+        w.key("kind")
+        w.write_str("markdown")
+        w.key("value")
+        w.write_str("```dragon\n" + title + "\n```" + ("\n\n" + body if body != "" else ""))
+        w.end_object()
+        w.key("range")
+        write_range(w, line, utf16_col(text, start), line, utf16_col(text, start + len(word)))
+        w.end_object()
+        self.transport.send(end_message(w))
+    }
+
+    def reply_definition(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const doc: Document | None = self.store.get(self.text_document_uri(params))
+        if doc is None {
+            self.reply_null(req)
+            return
+        }
+        line, character = self.position_of(params)
+        const text: str = doc.line_at(line)
+        const found: Found | None = self.resolve_word(doc, line, cp_col(text, character))
+        if found is None {
+            self.reply_null(req)
+            return
+        }
+        target_doc: Document | None = self.store.by_path(found.path)
+        target_line: str = ""
+        if target_doc is not None {
+            target_line = target_doc.line_at(found.symbol.line)
+        } else {
+            const lines: list[str] = read_text(found.path).split("\n")
+            if found.symbol.line < len(lines) { target_line = lines[found.symbol.line] }
+        }
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.begin_object()
+        w.key("uri")
+        w.write_str(found.uri)
+        w.key("range")
+        const col: int = utf16_col(target_line, found.symbol.col)
+        write_range(w, found.symbol.line, col, found.symbol.line, utf16_col(target_line, found.symbol.col + len(found.symbol.name)))
+        w.end_object()
+        self.transport.send(end_message(w))
+    }
+
+    def write_item(w: JsonWriter, label: str, kind: int, detail: str, doc: str) {
+        w.begin_object()
+        w.key("label")
+        w.write_str(label)
+        w.key("kind")
+        w.write_int(kind)
+        if detail != "" {
+            w.key("detail")
+            w.write_str(detail)
+        }
+        if doc != "" {
+            w.key("documentation")
+            w.write_str(doc)
+        }
+        w.end_object()
+    }
+
+    def write_symbol_items(w: JsonWriter, found: list[Found], seen: set[str]) {
+        for f in found {
+            if f.symbol.name in seen { continue }
+            seen.add(f.symbol.name)
+            self.write_item(w, f.symbol.name, item_kind_for(f.symbol.kind), f.symbol.detail, f.symbol.doc)
+        }
+    }
+
+    def write_module_items(w: JsonWriter, doc: Document, package: str, seen: set[str]) {
+        for name in self.modules.module_names(dirname(doc.path), package) {
+            if name in seen { continue }
+            seen.add(name)
+            self.write_item(w, name, ITEM_MODULE, "module " + (package + "." + name if package != "" else name), "")
+        }
+    }
+
+    def reply_completion(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const doc: Document | None = self.store.get(self.text_document_uri(params))
+        if doc is None {
+            self.reply_null(req)
+            return
+        }
+        line, character = self.position_of(params)
+        const text: str = doc.line_at(line)
+        const cp: int = cp_col(text, character)
+        const before: str = text[:cp]
+        const stripped: str = before.lstrip()
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.begin_object()
+        w.key("isIncomplete")
+        w.write_bool(false)
+        w.key("items")
+        w.begin_array()
+        seen: set[str] = set()
+        if stripped.startswith("import ") or (stripped.startswith("from ") and stripped.find(" import") < 0) {
+            const partial: str = dotted_at(stripped, 7 if stripped.startswith("import ") else 5)
+            const dot: int = partial.rfind(".")
+            self.write_module_items(w, doc, partial[:dot] if dot >= 0 else "", seen)
+        } elif stripped.startswith("from ") and stripped.find(" import") >= 0 {
+            const module: str = dotted_at(stripped, 5)
+            const imp: ImportDecl = ImportDecl(module, module, line)
+            const ms: ScanResult | None = self.module_scan(imp, doc)
+            if ms is not None {
+                const module_path: str = self.modules.resolve(module, dirname(doc.path))
+                found: list[Found] = []
+                for s in ms.top_level() {
+                    if not s.name.startswith("_") { found.append(Found(s, module_path, path_to_uri(module_path))) }
+                }
+                self.write_symbol_items(w, found, seen)
+            }
+        } else {
+            word, start = word_at(text, cp)
+            const qualifier: str = qualifier_before(text, start)
+            if qualifier != "" {
+                self.write_symbol_items(w, self.members_for_qualifier(doc, qualifier, line), seen)
+            } else {
+                self.write_scope_items(w, doc, line, seen)
+            }
+        }
+        w.end_array()
+        w.end_object()
+        self.transport.send(end_message(w))
+    }
+
+    def write_scope_items(w: JsonWriter, doc: Document, line: int, seen: set[str]) {
+        const scanned: ScanResult = doc.symbols()
+        local: list[Found] = []
+        for s in scanned.top_level() { local.append(Found(s, doc.path, doc.uri)) }
+        const cls: str = scanned.enclosing_class(line)
+        if cls != "" {
+            for s in scanned.members_of(cls) { local.append(Found(s, doc.path, doc.uri)) }
+        }
+        self.write_symbol_items(w, local, seen)
+        for imp in scanned.imports {
+            if len(imp.names) == 0 {
+                if imp.alias in seen { continue }
+                seen.add(imp.alias)
+                self.write_item(w, imp.alias, ITEM_MODULE, "module " + imp.module, "")
+                continue
+            }
+            const ms: ScanResult | None = self.module_scan(imp, doc)
+            i: int = 0
+            while i < len(imp.aliases) {
+                const alias: str = imp.aliases[i]
+                if alias not in seen {
+                    seen.add(alias)
+                    detail: str = "from " + imp.module
+                    doc_text: str = ""
+                    kind: int = ITEM_VARIABLE
+                    if ms is not None {
+                        const s: Symbol | None = ms.find(imp.names[i])
+                        if s is not None {
+                            detail = s.detail
+                            doc_text = s.doc
+                            kind = item_kind_for(s.kind)
+                        }
+                    }
+                    self.write_item(w, alias, kind, detail, doc_text)
+                }
+                i += 1
+            }
+        }
+        for b in BUILTINS {
+            if b.name in seen { continue }
+            seen.add(b.name)
+            self.write_item(w, b.name, ITEM_FUNCTION, b.detail, b.doc)
+        }
+        for t in TYPE_NAMES {
+            if t in seen { continue }
+            seen.add(t)
+            self.write_item(w, t, ITEM_STRUCT, "type", "")
+        }
+        for k in KEYWORDS {
+            if k in seen { continue }
+            seen.add(k)
+            self.write_item(w, k, ITEM_KEYWORD, "", keyword_doc(k))
+        }
+    }
+
+    def index_workspace() {
+        if self.workspace_indexed { return }
+        self.workspace_indexed = true
+        for path in self.modules.workspace_sources(self.root) {
+            if self.store.by_path(path) is None { self.modules.scan_path(path) }
+        }
+    }
+
+    def reply_workspace_symbol(req: Request) {
+        const params: dict[str, Data] = req.params_or_empty()
+        const query: str = field_str(params, "query").lower()
+        self.index_workspace()
+        w: JsonWriter = JsonWriter()
+        begin_response(w, req)
+        w.begin_array()
+        count: int = 0
+        for doc in self.store.all() {
+            count = self.write_workspace_matches(w, doc.symbols(), doc.path, doc.uri, query, count)
+        }
+        for path in self.modules.cache {
+            if self.store.by_path(path) is not None { continue }
+            const scanned: ScanResult | None = self.modules.cache.get(path)
+            if scanned is not None {
+                count = self.write_workspace_matches(w, scanned, path, path_to_uri(path), query, count)
+            }
+        }
+        w.end_array()
+        self.transport.send(end_message(w))
+    }
+
+    def write_workspace_matches(w: JsonWriter, scanned: ScanResult, path: str, uri: str, query: str, count: int) -> int {
+        n: int = count
+        for s in scanned.symbols {
+            if n >= 500 { return n }
+            if query != "" and s.name.lower().find(query) < 0 { continue }
+            w.begin_object()
+            w.key("name")
+            w.write_str(s.name)
+            w.key("kind")
+            w.write_int(s.kind)
+            if s.container != "" {
+                w.key("containerName")
+                w.write_str(s.container)
+            }
+            w.key("location")
+            w.begin_object()
+            w.key("uri")
+            w.write_str(uri)
+            w.key("range")
+            write_range(w, s.line, s.col, s.line, s.col + len(s.name))
+            w.end_object()
+            w.end_object()
+            n += 1
+        }
+        return n
+    }
+}
+
+
+def usage() -> str {
+    return "dragonsp [--stdio] [--compiler <path>] [--stdlib <dir>] [--verbose] [--version]"
+}
+
+
+def main() -> int {
+    compiler: str = getenv("DRAGONSP_COMPILER")
+    if compiler == "" { compiler = "dragon" }
+    stdlib_dir: str = ""
+    verbose: bool = getenv("DRAGONSP_LOG") != ""
+    const args: list[str] = argv()
+    i: int = 1
+    while i < len(args) {
+        const a: str = args[i]
+        if a == "--version" {
+            print(SERVER_NAME + " " + VERSION)
+            return 0
+        } elif a == "--help" or a == "-h" {
+            print(usage())
+            return 0
+        } elif a == "--compiler" and i + 1 < len(args) {
+            compiler = args[i + 1]
+            i += 1
+        } elif a == "--stdlib" and i + 1 < len(args) {
+            stdlib_dir = args[i + 1]
+            i += 1
+        } elif a == "--verbose" {
+            verbose = true
+        } elif a == "--stdio" {
+            verbose = verbose
+        }
+        i += 1
+    }
+    if stdlib_dir == "" { stdlib_dir = find_stdlib(compiler) }
+    transport: Transport = Transport(verbose)
+    transport.trace("dragonsp " + VERSION + " compiler=" + compiler + " stdlib=" + stdlib_dir)
+    server: Server = Server(transport, compiler, stdlib_dir)
+    server.serve()
+    return server.exit_code
+}
+
+exit(main())

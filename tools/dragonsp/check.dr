@@ -1,0 +1,117 @@
+from subprocess import run, CompletedProcess, TimeoutExpired
+from io import make, Writer
+from os.path import dirname, basename, join, isabs
+
+const SEVERITY_ERROR: int = 1
+const SEVERITY_WARNING: int = 2
+const ERROR_PREFIX: str = "DRAGON SCALE ERROR: "
+const WARNING_PREFIX: str = "DRAGON SCALE WARNING: "
+const LOCATION_MARK: str = " at ["
+const CHECK_TIMEOUT: int = 30000
+
+
+class Diagnostic {
+    path: str
+    line: int
+    col: int
+    severity: int
+    message: str
+
+    def(path: str, line: int, col: int, severity: int, message: str) {
+        self.path = path
+        self.line = line
+        self.col = col
+        self.severity = severity
+        self.message = message
+    }
+}
+
+
+def parse_int_or(text: str, default: int) -> int {
+    try {
+        return int(text)
+    } except ValueError as e {
+        return default
+    }
+    return default
+}
+
+
+def split_location(loc: str) -> tuple[str, int, int] {
+    const c2: int = loc.rfind(":")
+    if c2 < 0 { return (loc, 1, 1) }
+    const c1: int = loc[:c2].rfind(":")
+    if c1 < 0 { return (loc, 1, 1) }
+    return (loc[:c1], parse_int_or(loc[c1 + 1:c2], 1), parse_int_or(loc[c2 + 1:], 1))
+}
+
+
+def parse_check_output(output: str, scratch_path: str, real_path: str, returncode: int) -> list[Diagnostic] {
+    out: list[Diagnostic] = []
+    stray: list[str] = []
+    for raw in output.split("\n") {
+        const line: str = raw.rstrip()
+        if len(line) == 0 { continue }
+        severity: int = 0
+        rest: str = ""
+        if line.startswith(ERROR_PREFIX) {
+            severity = SEVERITY_ERROR
+            rest = line[len(ERROR_PREFIX):]
+        } elif line.startswith(WARNING_PREFIX) {
+            severity = SEVERITY_WARNING
+            rest = line[len(WARNING_PREFIX):]
+        } elif line.startswith("  ") and len(out) > 0 {
+            const last: Diagnostic = out[len(out) - 1]
+            last.message = last.message + "\n" + line.strip()
+            continue
+        } else {
+            stray.append(line)
+            continue
+        }
+        const at: int = rest.rfind(LOCATION_MARK)
+        if at < 0 or not rest.endswith("]") {
+            out.append(Diagnostic(real_path, 0, 0, severity, rest))
+            continue
+        }
+        const message: str = rest[:at]
+        path, lno, cno = split_location(rest[at + len(LOCATION_MARK):len(rest) - 1])
+        if path == scratch_path or path == basename(scratch_path) {
+            path = real_path
+        } elif not isabs(path) {
+            path = join(dirname(real_path), path)
+        }
+        out.append(Diagnostic(path, lno - 1 if lno > 0 else 0, cno - 1 if cno > 0 else 0, severity, message))
+    }
+    if len(out) == 0 and returncode != 0 and len(stray) > 0 {
+        out.append(Diagnostic(real_path, 0, 0, SEVERITY_ERROR, "\n".join(stray)))
+    }
+    return out
+}
+
+
+def run_check(compiler: str, doc_path: str, text: str, scratch_dir: str, use_disk: bool) -> list[Diagnostic] {
+    target: str = doc_path
+    args: list[str] = [compiler, "check"]
+    if not use_disk {
+        target = join(scratch_dir, basename(doc_path))
+        w: Writer = make(target)
+        w.write(text)
+        w.close()
+        const doc_dir: str = dirname(doc_path)
+        args.append("-I")
+        args.append(doc_dir)
+        args.append("-I")
+        args.append(dirname(doc_dir))
+    }
+    args.append(target)
+    try {
+        const proc: CompletedProcess = run(args, capture_output=true, timeout=CHECK_TIMEOUT)
+        const output: str = proc.stdout.decode("utf-8", "replace") + "\n" + proc.stderr.decode("utf-8", "replace")
+        return parse_check_output(output, target, doc_path, proc.returncode)
+    } except TimeoutExpired as e {
+        return [Diagnostic(doc_path, 0, 0, SEVERITY_ERROR, "dragon check timed out after 30 s")]
+    } except OSError as e {
+        return [Diagnostic(doc_path, 0, 0, SEVERITY_ERROR, f"cannot run the Dragon compiler '{compiler}': {str(e)}")]
+    }
+    return []
+}

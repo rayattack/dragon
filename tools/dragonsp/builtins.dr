@@ -1,0 +1,125 @@
+const ITEM_METHOD: int = 2
+const ITEM_FUNCTION: int = 3
+const ITEM_CONSTRUCTOR: int = 4
+const ITEM_FIELD: int = 5
+const ITEM_VARIABLE: int = 6
+const ITEM_CLASS: int = 7
+const ITEM_MODULE: int = 9
+const ITEM_PROPERTY: int = 10
+const ITEM_ENUM: int = 13
+const ITEM_KEYWORD: int = 14
+const ITEM_ENUM_MEMBER: int = 20
+const ITEM_CONSTANT: int = 21
+const ITEM_STRUCT: int = 22
+
+const KEYWORDS: list[str] = [
+    "def", "class", "enum", "const", "static", "type", "return", "if", "elif",
+    "else", "while", "for", "in", "not", "and", "or", "is", "none", "true",
+    "false", "break", "continue", "pass", "import", "from", "as", "try",
+    "except", "finally", "raise", "with", "defer", "del", "own", "dub", "fire",
+    "thread", "match", "case", "lambda", "global", "nonlocal", "yield",
+    "template", "extern", "assert", "self", "super"
+]
+
+const TYPE_NAMES: list[str] = [
+    "int", "float", "str", "bool", "bytes", "list", "dict", "set", "tuple",
+    "None", "Callable", "Task", "Data", "ptr", "intc", "type", "Exception",
+    "TypedDict", "NamedTuple", "Enum", "IntEnum", "StrEnum", "HTML", "JSON",
+    "SQL", "URL", "Lock", "Thread"
+]
+
+
+class Builtin {
+    name: str
+    detail: str
+    doc: str
+
+    def(name: str, detail: str, doc: str) {
+        self.name = name
+        self.detail = detail
+        self.doc = doc
+    }
+}
+
+
+def builtin_table() -> list[Builtin] {
+    return [
+        Builtin("print", "print(value: str) -> None", "Write a line to stdout."),
+        Builtin("len", "len(x) -> int", "Number of code points, bytes, or elements."),
+        Builtin("range", "range(stop) / range(start, stop[, step])", "Integer sequence for `for` loops."),
+        Builtin("str", "str(x) -> str", "Render a value as text."),
+        Builtin("int", "int(x) -> int", "Parse or truncate to a 64-bit integer; raises ValueError on bad text."),
+        Builtin("float", "float(x) -> float", "Convert to a 64-bit float."),
+        Builtin("bool", "bool(x) -> bool", "Truthiness of a value."),
+        Builtin("list", "list(xs) -> list[T]", "Copy an iterable into a new list."),
+        Builtin("dict", "dict() -> dict[K, V]", "Empty dictionary (or copy)."),
+        Builtin("set", "set(xs) -> set[T]", "Deduplicate into a set; `set()` is the empty set."),
+        Builtin("tuple", "tuple(xs)", "Fixed-size heterogeneous value."),
+        Builtin("bytes", "bytes.fromhex(s) -> bytes", "Immutable byte string; `b\"...\"` literal."),
+        Builtin("enumerate", "enumerate(xs) -> (index, item)", "Pairs each element with its index."),
+        Builtin("zip", "zip(xs, ys)", "Iterate two sequences in lockstep."),
+        Builtin("map", "map(fn, xs) -> list", "Apply a function to every element."),
+        Builtin("filter", "filter(fn, xs) -> list", "Keep the elements the predicate accepts."),
+        Builtin("sorted", "sorted(xs) -> list[T]", "New sorted list; `xs.sort()` sorts in place."),
+        Builtin("reversed", "reversed(xs) -> list[T]", "New reversed list."),
+        Builtin("sum", "sum(xs) -> T", "Sum of a numeric sequence."),
+        Builtin("min", "min(a, b) / min(xs)", "Smallest value."),
+        Builtin("max", "max(a, b) / max(xs)", "Largest value."),
+        Builtin("abs", "abs(x)", "Absolute value."),
+        Builtin("round", "round(x: float[, digits]) -> float", "Round half to even."),
+        Builtin("divmod", "divmod(a: int, b: int) -> tuple[int, int]", "Quotient and remainder."),
+        Builtin("pow", "pow(base, exp)", "Exponentiation."),
+        Builtin("ord", "ord(c: str) -> int", "Code point of a one-character string."),
+        Builtin("chr", "chr(n: int) -> str", "One-character string for a code point."),
+        Builtin("hex", "hex(n: int) -> str", "Hexadecimal text with 0x prefix."),
+        Builtin("oct", "oct(n: int) -> str", "Octal text with 0o prefix."),
+        Builtin("bin", "bin(n: int) -> str", "Binary text with 0b prefix."),
+        Builtin("isinstance", "isinstance(x, T) -> bool", "Type test; narrows the binding in the guarded block."),
+        Builtin("issubclass", "issubclass(A, B) -> bool", "Class hierarchy test."),
+        Builtin("repr", "repr(x) -> str", "Debug rendering of a value."),
+        Builtin("hash", "hash(x) -> int", "Hash of a hashable value."),
+        Builtin("id", "id(x) -> int", "Identity of a heap value."),
+        Builtin("type", "type(x) -> str", "The type NAME of a value, as text."),
+        Builtin("input", "input(prompt: str) -> str", "Read a line from stdin."),
+        Builtin("all", "all(xs: list[bool]) -> bool", "True when every element is true."),
+        Builtin("any", "any(xs: list[bool]) -> bool", "True when some element is true."),
+        Builtin("callable", "callable(x) -> bool", "Whether a value can be called."),
+        Builtin("format", "format(value, spec: str) -> str", "Apply a format spec (see f-strings)."),
+        Builtin("super", "super(...)", "Call the parent constructor or method."),
+        Builtin("assert", "assert cond, \"msg\"", "Raise AssertionError when the condition is false.")
+    ]
+}
+
+const BUILTINS: list[Builtin] = builtin_table()
+
+
+def find_builtin(name: str) -> Builtin | None {
+    for b in BUILTINS {
+        if b.name == name { return b }
+    }
+    return None
+}
+
+
+def keyword_doc(word: str) -> str {
+    if word == "def" { return "Define a function or method. `def(...)` inside a class is the constructor." }
+    if word == "class" { return "Define a class. Fields are declared in the body; the field set is fixed at compile time." }
+    if word == "enum" { return "Define an enumeration; members compare by identity." }
+    if word == "const" { return "Immutable binding; at module level it initializes once at startup." }
+    if word == "fire" { return "Run a call or block on a green thread. Bind `t: Task[T] = fire f()` and `t.join()` for the result." }
+    if word == "thread" { return "Run a block on a real OS thread, joined at scope exit." }
+    if word == "defer" { return "Run a call when the enclosing scope exits." }
+    if word == "own" { return "Sole ownership: on a field, a parameter, or at a call site (`f(own x)`)." }
+    if word == "dub" { return "Mint an independent deep copy (`dub xs`)." }
+    if word == "del" { return "Free a local now; compiles only when the compiler proves sole ownership." }
+    if word == "match" { return "Pattern matching statement: literals, type tests, sequences, class destructuring, guards." }
+    if word == "template" { return "Compile-time typed template (`template[HTML] { ... }`); `!{expr}` auto-escapes." }
+    if word == "extern" { return "Declare a foreign C function: `extern \"C\" def name(args) -> ret`." }
+    if word == "type" { return "Type alias: `type Name = int | str`." }
+    if word == "with" { return "Context manager block; `__exit__` runs on normal exit and on raise." }
+    if word == "global" { return "Declare that a function writes a module global." }
+    if word == "nonlocal" { return "Declare that a nested function rebinds an enclosing local." }
+    if word == "lambda" { return "Anonymous function; the braced form `lambda (n: int) -> int { ... }` can be annotated." }
+    if word == "static" { return "Class-level state shared by all instances." }
+    return ""
+}

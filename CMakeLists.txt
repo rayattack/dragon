@@ -297,6 +297,19 @@ add_custom_command(
     VERBATIM)
 add_custom_target(dragon_egg ALL DEPENDS ${DRAGON_EGG_OUT})
 
+set(DRAGONSP_OUT ${CMAKE_BINARY_DIR}/dragonsp${CMAKE_EXECUTABLE_SUFFIX})
+file(GLOB DRAGONSP_SRC_FILES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/tools/dragonsp/*.dr)
+add_custom_command(
+    OUTPUT ${DRAGONSP_OUT}
+    COMMAND $<TARGET_FILE:dragon> build ${CMAKE_SOURCE_DIR}/tools/dragonsp/dragonsp.dr -o ${DRAGONSP_OUT}
+    DEPENDS dragon ${DRAGONSP_SRC_FILES}
+        ${CMAKE_SOURCE_DIR}/stdlib/json.dr
+        ${CMAKE_SOURCE_DIR}/stdlib/subprocess.dr
+        ${CMAKE_SOURCE_DIR}/stdlib/io.dr
+    COMMENT "Building dragonsp (the Dragon language server)"
+    VERBATIM)
+add_custom_target(dragon_lsp ALL DEPENDS ${DRAGONSP_OUT})
+
 if(DRAGON_ASAN)
     add_dependencies(dragon dragon_runtime_asan)
 endif()
@@ -312,6 +325,9 @@ install(TARGETS dragon
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 install(PROGRAMS ${DRAGON_EGG_OUT}
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(PROGRAMS ${DRAGONSP_OUT}
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 install(TARGETS dragon_runtime dragon_sqlite3 dragon_llhttp dragon_mbedtls

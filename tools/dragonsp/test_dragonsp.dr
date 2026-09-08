@@ -1,0 +1,601 @@
+from unittest import TestCase, main
+from subprocess import Popen
+from sys import getenv
+from json import Data, loads_obj, JsonWriter
+from tempfile import mkdtemp
+from io import make, Writer
+from os.path import join
+from os import unlink, rmdir
+
+from scan import scan_source, ScanResult, Symbol, word_at, qualifier_before, signature_text, split_lines
+from scan import KIND_CLASS, KIND_METHOD, KIND_FIELD, KIND_CONSTRUCTOR, KIND_ENUM, KIND_FUNCTION
+from scan import KIND_VARIABLE, KIND_CONSTANT, KIND_ENUM_MEMBER, KIND_PROPERTY
+from documents import utf16_col, cp_col, uri_to_path, path_to_uri
+from check import parse_check_output, Diagnostic
+from rpc import field_str, field_int, field_obj, field_list
+
+const SAMPLE_UTIL: str = "\"\"\"Helpers for the sample project.\"\"\"\n\nconst GREETING: str = \"hello\"\n\n\nclass Counter {\n    \"\"\"Counts things.\"\"\"\n    total: int = 0\n\n    def(start: int) {\n        self.total = start\n    }\n\n    def bump() -> None {\n        \"\"\"Add one.\"\"\"\n        self.total = self.total + 1\n    }\n\n    @property\n    def value() -> int { return self.total }\n}\n\n\ndef shout(text: str) -> str {\n    \"\"\"Upper-case with a bang.\"\"\"\n    return text.upper() + \"!\"\n}\n"
+
+const SAMPLE_MAIN: str = "from util import Counter, shout\nimport math\n\nenum Color {\n    RED = 1\n    BLUE = 2\n}\n\ndef main() -> int {\n    c: Counter = Counter(1)\n    c.bump()\n    print(shout(\"héllo\"))\n    bad: int = \"nope\"\n    return math.gcd(12, 18)\n}\n\nmain()\n"
+
+const SAMPLE_PY: str = "class Dog:\n    name: str\n\n    def __init__(self, name: str):\n        self.name = name\n\n    def speak(self) -> str:\n        return \"woof\"\n\n\ndef top(x: int) -> int:\n    return x\n"
+
+
+class ScannerTests(TestCase) {
+    def test_symbols_and_containers() {
+        const r: ScanResult = scan_source(SAMPLE_UTIL, false)
+        const counter: Symbol | None = r.find("Counter")
+        self.assertIsNotNone(counter)
+        if counter is not None {
+            self.assertEqual(counter.kind, KIND_CLASS)
+            self.assertEqual(counter.line, 5)
+            self.assertEqual(counter.col, 6)
+            self.assertEqual(counter.end_line, 20)
+            self.assertEqual(counter.doc, "Counts things.")
+            self.assertEqual(counter.detail, "class Counter")
+        }
+        const bump: Symbol | None = r.find_in("Counter", "bump")
+        self.assertIsNotNone(bump)
+        if bump is not None {
+            self.assertEqual(bump.kind, KIND_METHOD)
+            self.assertEqual(bump.doc, "Add one.")
+            self.assertEqual(bump.detail, "def bump() -> None")
+            self.assertEqual(bump.end_line, 16)
+        }
+        const ctor: Symbol | None = r.find_in("Counter", "Counter")
+        self.assertIsNotNone(ctor)
+        if ctor is not None { self.assertEqual(ctor.kind, KIND_CONSTRUCTOR) }
+        const total: Symbol | None = r.find_in("Counter", "total")
+        self.assertIsNotNone(total)
+        if total is not None { self.assertEqual(total.kind, KIND_FIELD) }
+        const value: Symbol | None = r.find_in("Counter", "value")
+        self.assertIsNotNone(value)
+        if value is not None {
+            self.assertEqual(value.kind, KIND_PROPERTY)
+            self.assertEqual(value.detail, "def value() -> int")
+        }
+        const greeting: Symbol | None = r.find("GREETING")
+        self.assertIsNotNone(greeting)
+        if greeting is not None { self.assertEqual(greeting.kind, KIND_CONSTANT) }
+        const shout: Symbol | None = r.find("shout")
+        self.assertIsNotNone(shout)
+        if shout is not None {
+            self.assertEqual(shout.kind, KIND_FUNCTION)
+            self.assertEqual(shout.container, "")
+        }
+        self.assertEqual(len(r.members_of("Counter")), 4)
+    }
+
+    def test_enum_imports_and_scopes() {
+        const r: ScanResult = scan_source(SAMPLE_MAIN, false)
+        const color: Symbol | None = r.find("Color")
+        self.assertIsNotNone(color)
+        if color is not None { self.assertEqual(color.kind, KIND_ENUM) }
+        const red: Symbol | None = r.find_in("Color", "RED")
+        self.assertIsNotNone(red)
+        if red is not None { self.assertEqual(red.kind, KIND_ENUM_MEMBER) }
+        self.assertEqual(len(r.imports), 2)
+        self.assertEqual(r.imports[0].module, "util")
+        self.assertEqual(r.imports[0].names, ["Counter", "shout"])
+        self.assertEqual(r.imports[1].module, "math")
+        self.assertEqual(r.imports[1].alias, "math")
+        self.assertIsNone(r.find("c"))
+        self.assertIsNone(r.find("bad"))
+        self.assertEqual(r.enclosing_class(10), "")
+        const enclosing: Symbol | None = r.enclosing_callable(10)
+        self.assertIsNotNone(enclosing)
+        if enclosing is not None { self.assertEqual(enclosing.name, "main") }
+    }
+
+    def test_python_surface() {
+        const r: ScanResult = scan_source(SAMPLE_PY, true)
+        const dog: Symbol | None = r.find("Dog")
+        self.assertIsNotNone(dog)
+        if dog is not None {
+            self.assertEqual(dog.kind, KIND_CLASS)
+            self.assertEqual(dog.end_line, 7)
+        }
+        const init: Symbol | None = r.find_in("Dog", "__init__")
+        self.assertIsNotNone(init)
+        if init is not None { self.assertEqual(init.kind, KIND_CONSTRUCTOR) }
+        const speak: Symbol | None = r.find_in("Dog", "speak")
+        self.assertIsNotNone(speak)
+        if speak is not None { self.assertEqual(speak.detail, "def speak(self) -> str") }
+        const top: Symbol | None = r.find("top")
+        self.assertIsNotNone(top)
+        if top is not None { self.assertEqual(top.container, "") }
+    }
+
+    def test_braces_inside_strings_do_not_nest() {
+        const src: str = "def f() -> str {\n    return \"{ not a block\"\n}\ndef g() -> int {\n    return 1\n}\n"
+        const r: ScanResult = scan_source(src, false)
+        const f: Symbol | None = r.find("f")
+        self.assertIsNotNone(f)
+        if f is not None { self.assertEqual(f.end_line, 2) }
+        const g: Symbol | None = r.find("g")
+        self.assertIsNotNone(g)
+        if g is not None { self.assertEqual(g.line, 3) }
+    }
+
+    def test_word_helpers() {
+        word, start = word_at("    c.bump()", 7)
+        self.assertEqual(word, "bump")
+        self.assertEqual(start, 6)
+        self.assertEqual(qualifier_before("    c.bump()", 6), "c")
+        self.assertEqual(qualifier_before("    bump()", 4), "")
+        self.assertEqual(signature_text("def f() -> int { return 1 }", false), "def f() -> int")
+        self.assertEqual(signature_text("def f(self) -> int:", true), "def f(self) -> int")
+        self.assertEqual(split_lines("a\r\nb\n"), ["a", "b", ""])
+    }
+}
+
+
+class PositionTests(TestCase) {
+    def test_utf16_columns() {
+        const line: str = "x = \"😀\" + y"
+        self.assertEqual(utf16_col(line, 5), 5)
+        self.assertEqual(utf16_col(line, 6), 7)
+        self.assertEqual(cp_col(line, 7), 6)
+        self.assertEqual(cp_col(line, 5), 5)
+        self.assertEqual(utf16_col("abc", 10), 10)
+    }
+
+    def test_uri_round_trip() {
+        const path: str = "/home/me/my project/héllo.dr"
+        const uri: str = path_to_uri(path)
+        self.assertEqual(uri, "file:///home/me/my%20project/h%C3%A9llo.dr")
+        self.assertEqual(uri_to_path(uri), path)
+        self.assertEqual(uri_to_path("file:///plain/a.dr"), "/plain/a.dr")
+    }
+}
+
+
+class CheckOutputTests(TestCase) {
+    def test_parses_errors_and_maps_scratch_path() {
+        const output: str = "DRAGON SCALE ERROR: cannot assign 'str' to variable of type 'int' at [/tmp/s/main.dr:13:5]\nDRAGON SCALE ERROR: Missing type hint at [/tmp/s/main.dr:2:1]\n  Function parameter 'x' requires a type annotation\nDRAGON SCALE WARNING: unused at [/real/util.dr:4:2]\n"
+        const diags: list[Diagnostic] = parse_check_output(output, "/tmp/s/main.dr", "/real/main.dr", 1)
+        self.assertEqual(len(diags), 3)
+        self.assertEqual(diags[0].path, "/real/main.dr")
+        self.assertEqual(diags[0].line, 12)
+        self.assertEqual(diags[0].col, 4)
+        self.assertEqual(diags[0].severity, 1)
+        self.assertEqual(diags[1].message, "Missing type hint\nFunction parameter 'x' requires a type annotation")
+        self.assertEqual(diags[2].path, "/real/util.dr")
+        self.assertEqual(diags[2].severity, 2)
+    }
+
+    def test_stray_output_becomes_one_error() {
+        const diags: list[Diagnostic] = parse_check_output("Unknown option: --nope\n", "/tmp/s/a.dr", "/real/a.dr", 1)
+        self.assertEqual(len(diags), 1)
+        self.assertEqual(diags[0].message, "Unknown option: --nope")
+        self.assertEqual(len(parse_check_output("", "/tmp/s/a.dr", "/real/a.dr", 0)), 0)
+    }
+}
+
+
+def frame(body: str) -> bytes {
+    const payload: bytes = body.encode("utf-8")
+    return f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8") + payload
+}
+
+
+def bytes_find(hay: bytes, needle: bytes, start: int) -> int {
+    i: int = start
+    const n: int = len(hay)
+    const m: int = len(needle)
+    while i + m <= n {
+        j: int = 0
+        while j < m and hay[i + j] == needle[j] { j += 1 }
+        if j == m { return i }
+        i += 1
+    }
+    return -1
+}
+
+
+def parse_frames(data: bytes) -> list[dict[str, Data]] {
+    out: list[dict[str, Data]] = []
+    i: int = 0
+    const sep: bytes = b"\r\n\r\n"
+    while i < len(data) {
+        const end: int = bytes_find(data, sep, i)
+        if end < 0 { break }
+        const header: str = data[i:end].decode("utf-8")
+        const colon: int = header.find(":")
+        const length: int = int(header[colon + 1:].strip())
+        const body: bytes = data[end + 4:end + 4 + length]
+        out.append(loads_obj(body.decode("utf-8")))
+        i = end + 4 + length
+    }
+    return out
+}
+
+
+def message_header(w: JsonWriter, method: str, id: int) {
+    w.begin_object()
+    w.key("jsonrpc")
+    w.write_str("2.0")
+    if id >= 0 {
+        w.key("id")
+        w.write_int(id)
+    }
+    w.key("method")
+    w.write_str(method)
+    w.key("params")
+}
+
+
+def rpc_initialize(id: int, root_uri: str) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, "initialize", id)
+    w.begin_object()
+    w.key("rootUri")
+    w.write_str(root_uri)
+    w.key("capabilities")
+    w.begin_object()
+    w.end_object()
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def rpc_plain(method: str, id: int) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, method, id)
+    w.begin_object()
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def rpc_open(uri: str, text: str, version: int) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, "textDocument/didOpen", -1)
+    w.begin_object()
+    w.key("textDocument")
+    w.begin_object()
+    w.key("uri")
+    w.write_str(uri)
+    w.key("languageId")
+    w.write_str("dragon")
+    w.key("version")
+    w.write_int(version)
+    w.key("text")
+    w.write_str(text)
+    w.end_object()
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def rpc_change(uri: str, text: str, version: int) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, "textDocument/didChange", -1)
+    w.begin_object()
+    w.key("textDocument")
+    w.begin_object()
+    w.key("uri")
+    w.write_str(uri)
+    w.key("version")
+    w.write_int(version)
+    w.end_object()
+    w.key("contentChanges")
+    w.begin_array()
+    w.begin_object()
+    w.key("text")
+    w.write_str(text)
+    w.end_object()
+    w.end_array()
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def rpc_document(method: str, id: int, uri: str) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, method, id)
+    w.begin_object()
+    w.key("textDocument")
+    w.begin_object()
+    w.key("uri")
+    w.write_str(uri)
+    w.end_object()
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def rpc_at(method: str, id: int, uri: str, line: int, character: int) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, method, id)
+    w.begin_object()
+    w.key("textDocument")
+    w.begin_object()
+    w.key("uri")
+    w.write_str(uri)
+    w.end_object()
+    w.key("position")
+    w.begin_object()
+    w.key("line")
+    w.write_int(line)
+    w.key("character")
+    w.write_int(character)
+    w.end_object()
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def rpc_query(method: str, id: int, query: str) -> str {
+    w: JsonWriter = JsonWriter()
+    message_header(w, method, id)
+    w.begin_object()
+    w.key("query")
+    w.write_str(query)
+    w.end_object()
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def write_file(path: str, text: str) {
+    w: Writer = make(path)
+    w.write(text)
+    w.close()
+}
+
+
+class Session {
+    replies: list[dict[str, Data]]
+    returncode: int
+    stderr: str
+
+    def(replies: list[dict[str, Data]], returncode: int, stderr: str) {
+        self.replies = replies
+        self.returncode = returncode
+        self.stderr = stderr
+    }
+
+    def response(id: int) -> dict[str, Data] | None {
+        for m in self.replies {
+            if field_int(m, "id", -1) == id { return m }
+        }
+        return None
+    }
+
+    def result(id: int) -> dict[str, Data] {
+        const m: dict[str, Data] | None = self.response(id)
+        if m is None { raise AssertionError(f"no response with id {id}; stderr: {self.stderr}") }
+        const r: dict[str, Data] | None = field_obj(m, "result")
+        if r is None { raise AssertionError(f"response {id} has no object result") }
+        return r
+    }
+
+    def result_list(id: int) -> list[Data] {
+        const m: dict[str, Data] | None = self.response(id)
+        if m is None { raise AssertionError(f"no response with id {id}; stderr: {self.stderr}") }
+        const r: list[Data] | None = field_list(m, "result")
+        if r is None { raise AssertionError(f"response {id} has no list result") }
+        return r
+    }
+
+    def notifications(method: str) -> list[dict[str, Data]] {
+        out: list[dict[str, Data]] = []
+        for m in self.replies {
+            if field_str(m, "method") == method {
+                const p: dict[str, Data] | None = field_obj(m, "params")
+                if p is not None { out.append(p) }
+            }
+        }
+        return out
+    }
+}
+
+
+def labels_of(result: dict[str, Data]) -> list[str] {
+    out: list[str] = []
+    const items: list[Data] | None = field_list(result, "items")
+    if items is None { return out }
+    for item in items {
+        if isinstance(item, dict) { out.append(field_str(item, "label")) }
+    }
+    return out
+}
+
+
+def names_of(items: list[Data]) -> list[str] {
+    out: list[str] = []
+    for item in items {
+        if isinstance(item, dict) { out.append(field_str(item, "name")) }
+    }
+    return out
+}
+
+
+def run_session(messages: list[str], root: str) -> Session {
+    const bin: str = getenv("DRAGONSP_BIN")
+    if bin == "" { raise AssertionError("DRAGONSP_BIN must point at the built dragonsp binary") }
+    args: list[str] = [bin]
+    const compiler: str = getenv("DRAGONSP_COMPILER")
+    if compiler != "" {
+        args.append("--compiler")
+        args.append(compiler)
+    }
+    const stdlib: str = getenv("DRAGONSP_STDLIB")
+    if stdlib != "" {
+        args.append("--stdlib")
+        args.append(stdlib)
+    }
+    input: bytes = b""
+    for m in messages { input = input + frame(m) }
+    proc: Popen = Popen(args, root, true, true, true)
+    out, err = proc.communicate(input, 120000)
+    return Session(parse_frames(out), proc.returncode, err.decode("utf-8", "replace"))
+}
+
+
+class ProtocolTests(TestCase) {
+    def test_full_session() {
+        const root: str = mkdtemp("dragonsp-test-", "")
+        const main_path: str = join(root, "main.dr")
+        const util_path: str = join(root, "util.dr")
+        write_file(main_path, SAMPLE_MAIN)
+        write_file(util_path, SAMPLE_UTIL)
+        const main_uri: str = path_to_uri(main_path)
+        const util_uri: str = path_to_uri(util_path)
+        const probe_uri: str = path_to_uri(join(root, "probe.dr"))
+        const fixed: str = SAMPLE_MAIN.replace("bad: int = \"nope\"", "bad: int = 5")
+        const messages: list[str] = [
+            rpc_initialize(1, path_to_uri(root)),
+            rpc_plain("initialized", -1),
+            rpc_open(main_uri, SAMPLE_MAIN, 1),
+            rpc_document("textDocument/didSave", -1, main_uri),
+            rpc_at("textDocument/hover", 2, main_uri, 10, 7),
+            rpc_at("textDocument/definition", 3, main_uri, 9, 8),
+            rpc_at("textDocument/completion", 4, main_uri, 10, 6),
+            rpc_open(probe_uri, "from os.path import \n", 1),
+            rpc_at("textDocument/completion", 5, probe_uri, 0, 20),
+            rpc_document("textDocument/documentSymbol", 6, main_uri),
+            rpc_at("textDocument/definition", 7, main_uri, 13, 12),
+            rpc_query("workspace/symbol", 8, "shout"),
+            rpc_change(main_uri, fixed, 2),
+            rpc_document("textDocument/didSave", -1, main_uri),
+            rpc_at("textDocument/completion", 9, main_uri, 13, 16),
+            rpc_at("textDocument/hover", 10, main_uri, 11, 5),
+            rpc_plain("nonsense/method", 11),
+            rpc_plain("shutdown", 12),
+            rpc_plain("exit", -1)
+        ]
+        const s: Session = run_session(messages, root)
+        self.assertEqual(s.returncode, 0, s.stderr)
+
+        const caps: dict[str, Data] | None = field_obj(s.result(1), "capabilities")
+        self.assertIsNotNone(caps)
+        if caps is not None {
+            self.assertEqual(field_str(caps, "positionEncoding"), "utf-16")
+            self.assertTrue(field_bool_of(caps, "hoverProvider"))
+        }
+
+        const published: list[dict[str, Data]] = s.notifications("textDocument/publishDiagnostics")
+        self.assertEqual(len(published), 2)
+        self.assertEqual(field_str(published[0], "uri"), main_uri)
+        self.assertEqual(field_int(published[0], "version", -1), 1)
+        const diags: list[Data] | None = field_list(published[0], "diagnostics")
+        self.assertIsNotNone(diags)
+        if diags is not None {
+            self.assertEqual(len(diags), 1)
+            const d: Data = diags[0]
+            if isinstance(d, dict) {
+                self.assertIn("cannot assign 'str'", field_str(d, "message"))
+                const range: dict[str, Data] | None = field_obj(d, "range")
+                self.assertIsNotNone(range)
+                if range is not None {
+                    const start: dict[str, Data] | None = field_obj(range, "start")
+                    self.assertIsNotNone(start)
+                    if start is not None {
+                        self.assertEqual(field_int(start, "line", -1), 12)
+                        self.assertEqual(field_int(start, "character", -1), 4)
+                    }
+                }
+            }
+        }
+        self.assertEqual(field_int(published[1], "version", -1), 2)
+        const clean: list[Data] | None = field_list(published[1], "diagnostics")
+        self.assertIsNotNone(clean)
+        if clean is not None { self.assertEqual(len(clean), 0) }
+
+        const hover: dict[str, Data] | None = field_obj(s.result(2), "contents")
+        self.assertIsNotNone(hover)
+        if hover is not None {
+            self.assertIn("def bump() -> None", field_str(hover, "value"))
+            self.assertIn("Add one.", field_str(hover, "value"))
+        }
+
+        const definition: dict[str, Data] = s.result(3)
+        self.assertEqual(field_str(definition, "uri"), util_uri)
+        const def_range: dict[str, Data] | None = field_obj(definition, "range")
+        self.assertIsNotNone(def_range)
+        if def_range is not None {
+            const start: dict[str, Data] | None = field_obj(def_range, "start")
+            if start is not None { self.assertEqual(field_int(start, "line", -1), 5) }
+        }
+
+        const members: list[str] = labels_of(s.result(4))
+        self.assertIn("bump", members)
+        self.assertIn("total", members)
+        self.assertIn("value", members)
+        self.assertNotIn("shout", members)
+
+        const path_members: list[str] = labels_of(s.result(5))
+        self.assertIn("join", path_members)
+        self.assertIn("dirname", path_members)
+
+        const symbols: list[Data] = s.result_list(6)
+        const top: list[str] = names_of(symbols)
+        self.assertIn("Color", top)
+        self.assertIn("main", top)
+        for item in symbols {
+            if isinstance(item, dict) and field_str(item, "name") == "Color" {
+                const children: list[Data] | None = field_list(item, "children")
+                self.assertIsNotNone(children)
+                if children is not None { self.assertIn("RED", names_of(children)) }
+            }
+        }
+
+        self.assertTrue(field_str(s.result(7), "uri").endswith("/math.dr"))
+
+        const found: list[str] = names_of(s.result_list(8))
+        self.assertIn("shout", found)
+
+        const math_members: list[str] = labels_of(s.result(9))
+        self.assertIn("gcd", math_members)
+        self.assertNotIn("Color", math_members)
+
+        const builtin_hover: dict[str, Data] | None = field_obj(s.result(10), "contents")
+        self.assertIsNotNone(builtin_hover)
+        if builtin_hover is not None { self.assertIn("print(", field_str(builtin_hover, "value")) }
+
+        const unknown: dict[str, Data] | None = s.response(11)
+        self.assertIsNotNone(unknown)
+        if unknown is not None {
+            const err: dict[str, Data] | None = field_obj(unknown, "error")
+            self.assertIsNotNone(err)
+            if err is not None { self.assertEqual(field_int(err, "code", 0), -32601) }
+        }
+
+        unlink(main_path)
+        unlink(util_path)
+        rmdir(root)
+    }
+
+    def test_exit_without_shutdown_is_status_one() {
+        const root: str = mkdtemp("dragonsp-test-", "")
+        const s: Session = run_session([rpc_initialize(1, path_to_uri(root)), rpc_plain("exit", -1)], root)
+        self.assertEqual(s.returncode, 1)
+        rmdir(root)
+    }
+
+    def test_stdin_close_ends_the_server() {
+        const root: str = mkdtemp("dragonsp-test-", "")
+        const s: Session = run_session([rpc_initialize(1, path_to_uri(root))], root)
+        self.assertEqual(s.returncode, 0)
+        self.assertIsNotNone(s.response(1))
+        rmdir(root)
+    }
+}
+
+
+def field_bool_of(d: dict[str, Data], key: str) -> bool {
+    const v: Data | None = d.get(key)
+    if v is not None and isinstance(v, bool) { return v }
+    return false
+}
+
+
+main([ScannerTests(), PositionTests(), CheckOutputTests(), ProtocolTests()])

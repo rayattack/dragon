@@ -1,0 +1,159 @@
+from scan import ScanResult, scan_source, split_lines
+
+const HEX_DIGITS: str = "0123456789ABCDEF"
+const URI_SAFE: str = "-._~/"
+
+
+class Document {
+    uri: str
+    path: str
+    version: int
+    text: str
+    lines: list[str]
+    is_py: bool
+    scanned: ScanResult | None
+
+    def(uri: str, path: str, version: int, text: str) {
+        self.uri = uri
+        self.path = path
+        self.version = version
+        self.text = text
+        self.lines = split_lines(text)
+        self.is_py = path.endswith(".py")
+        self.scanned = None
+    }
+
+    def update(version: int, text: str) {
+        self.version = version
+        self.text = text
+        self.lines = split_lines(text)
+        self.scanned = None
+    }
+
+    def symbols() -> ScanResult {
+        const cached: ScanResult | None = self.scanned
+        if cached is not None { return cached }
+        const fresh: ScanResult = scan_source(self.text, self.is_py)
+        self.scanned = fresh
+        return fresh
+    }
+
+    def line_at(line: int) -> str {
+        if line < 0 or line >= len(self.lines) { return "" }
+        return self.lines[line]
+    }
+}
+
+
+class DocumentStore {
+    docs: dict[str, Document] = {}
+
+    def put(uri: str, path: str, version: int, text: str) -> Document {
+        const existing: Document | None = self.docs.get(uri)
+        if existing is not None {
+            existing.update(version, text)
+            return existing
+        }
+        doc: Document = Document(uri, path, version, text)
+        self.docs[uri] = doc
+        return doc
+    }
+
+    def get(uri: str) -> Document | None {
+        return self.docs.get(uri)
+    }
+
+    def by_path(path: str) -> Document | None {
+        for uri in self.docs {
+            const d: Document = self.docs[uri]
+            if d.path == path { return d }
+        }
+        return None
+    }
+
+    def drop(uri: str) {
+        if uri in self.docs { del self.docs[uri] }
+    }
+
+    def all() -> list[Document] {
+        out: list[Document] = []
+        for uri in self.docs { out.append(self.docs[uri]) }
+        return out
+    }
+}
+
+
+def utf16_col(line: str, cp: int) -> int {
+    n: int = 0
+    i: int = 0
+    const limit: int = cp if cp < len(line) else len(line)
+    while i < limit {
+        n += 2 if ord(line[i]) >= 65536 else 1
+        i += 1
+    }
+    if cp > len(line) { n += cp - len(line) }
+    return n
+}
+
+
+def cp_col(line: str, u16: int) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(line) and n < u16 {
+        n += 2 if ord(line[i]) >= 65536 else 1
+        i += 1
+    }
+    return i
+}
+
+
+def hex_value(c: str) -> int {
+    const upper: str = c.upper()
+    const at: int = HEX_DIGITS.find(upper)
+    return at
+}
+
+
+def uri_to_path(uri: str) -> str {
+    rest: str = uri
+    if rest.startswith("file://") {
+        rest = rest[7:]
+        if rest.startswith("localhost/") { rest = rest[9:] }
+    }
+    if rest.find("%") < 0 { return rest }
+    out: bytes = b""
+    i: int = 0
+    const n: int = len(rest)
+    while i < n {
+        const c: str = rest[i]
+        if c == "%" and i + 2 < n {
+            const hi: int = hex_value(rest[i + 1])
+            const lo: int = hex_value(rest[i + 2])
+            if hi >= 0 and lo >= 0 {
+                out = out + bytes.fromhex(rest[i + 1:i + 3])
+                i += 3
+                continue
+            }
+        }
+        out = out + c.encode("utf-8")
+        i += 1
+    }
+    return out.decode("utf-8", "replace")
+}
+
+
+def path_to_uri(path: str) -> str {
+    parts: list[str] = ["file://"]
+    for c in path {
+        if c.isalnum() and ord(c) < 128 {
+            parts.append(c)
+        } elif URI_SAFE.find(c) >= 0 {
+            parts.append(c)
+        } else {
+            for b in c.encode("utf-8") {
+                parts.append(f"%{b:02X}")
+            }
+        }
+    }
+    return "".join(parts)
+}

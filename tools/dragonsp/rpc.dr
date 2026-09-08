@@ -1,0 +1,265 @@
+from json import Data, loads_obj, JsonWriter
+
+extern "C" def fdopen(fd: intc, mode: str) -> ptr
+extern "C" def setvbuf(handle: ptr, buf: ptr, mode: intc, size: int) -> intc
+extern "C" def fflush(handle: ptr) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def dragon_file_readline(handle: ptr) -> str
+extern "C" def dragon_file_read_text(handle: ptr, size: int) -> str
+extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def select(nfds: intc, readfds: ptr, writefds: ptr, exceptfds: ptr, timeout: ptr) -> intc
+
+const UNBUFFERED: int = 2
+const FD_SET_BYTES: int = 128
+const TIMEVAL_BYTES: int = 16
+
+const PARSE_ERROR: int = -32700
+const INVALID_REQUEST: int = -32600
+const METHOD_NOT_FOUND: int = -32601
+const INVALID_PARAMS: int = -32602
+const INTERNAL_ERROR: int = -32603
+
+const ID_NONE: int = 0
+const ID_INT: int = 1
+const ID_STR: int = 2
+
+
+class Transport {
+    inp: ptr
+    out: ptr
+    err: ptr
+    verbose: bool
+    read_set: ptr
+    empty_set: ptr
+    zero_wait: ptr
+
+    def(verbose: bool) {
+        self.inp = fdopen(0, "r")
+        setvbuf(self.inp, malloc(16), UNBUFFERED, 0)
+        self.out = fdopen(1, "w")
+        self.err = fdopen(2, "w")
+        self.verbose = verbose
+        self.read_set = malloc(FD_SET_BYTES)
+        self.empty_set = malloc(FD_SET_BYTES)
+        self.zero_wait = malloc(TIMEVAL_BYTES)
+    }
+
+    def read() -> str {
+        while true {
+            length: int = -1
+            saw_header: bool = false
+            while true {
+                const line: str = dragon_file_readline(self.inp)
+                if len(line) == 0 { return "" }
+                const header: str = line.strip()
+                if len(header) == 0 { break }
+                saw_header = true
+                const colon: int = header.find(":")
+                if colon < 0 { continue }
+                if header[:colon].strip().lower() == "content-length" {
+                    length = self._parse_length(header[colon + 1:].strip())
+                }
+            }
+            if length < 0 {
+                if saw_header { self.log("dragonsp: header block without Content-Length, skipped") }
+                continue
+            }
+            if length == 0 { continue }
+            return dragon_file_read_text(self.inp, length)
+        }
+        return ""
+    }
+
+    def _parse_length(text: str) -> int {
+        try {
+            return int(text)
+        } except ValueError as e {
+            return -1
+        }
+        return -1
+    }
+
+    def pending() -> bool {
+        memset(self.read_set, 0, FD_SET_BYTES)
+        memset(self.read_set, 1, 1)
+        memset(self.empty_set, 0, FD_SET_BYTES)
+        memset(self.zero_wait, 0, TIMEVAL_BYTES)
+        return select(1, self.read_set, self.empty_set, self.empty_set, self.zero_wait) > 0
+    }
+
+    def send(payload: str) {
+        const size: int = len(payload.encode("utf-8"))
+        dragon_file_write_text(self.out, f"Content-Length: {size}\r\n\r\n")
+        dragon_file_write_text(self.out, payload)
+        fflush(self.out)
+    }
+
+    def close() {
+        fflush(self.out)
+        fflush(self.err)
+        free(self.read_set)
+        free(self.empty_set)
+        free(self.zero_wait)
+    }
+
+    def log(text: str) {
+        dragon_file_write_text(self.err, text + "\n")
+        fflush(self.err)
+    }
+
+    def trace(text: str) {
+        if self.verbose { self.log(text) }
+    }
+}
+
+
+class Request {
+    method: str
+    id_kind: int
+    id_int: int
+    id_str: str
+    params: dict[str, Data] | None
+
+    def(msg: dict[str, Data]) {
+        self.method = field_str(msg, "method")
+        self.id_kind = ID_NONE
+        self.id_int = 0
+        self.id_str = ""
+        self.params = field_obj(msg, "params")
+        const idv: Data | None = msg.get("id")
+        if idv is not None {
+            if isinstance(idv, int) {
+                self.id_kind = ID_INT
+                self.id_int = idv
+            } elif isinstance(idv, str) {
+                self.id_kind = ID_STR
+                self.id_str = idv
+            }
+        }
+    }
+
+    def is_request() -> bool {
+        return self.id_kind != ID_NONE
+    }
+
+    def params_or_empty() -> dict[str, Data] {
+        const p: dict[str, Data] | None = self.params
+        if p is not None { return p }
+        empty: dict[str, Data] = {}
+        return empty
+    }
+}
+
+
+def field_str(d: dict[str, Data], key: str) -> str {
+    const v: Data | None = d.get(key)
+    if v is not None and isinstance(v, str) { return v }
+    return ""
+}
+
+
+def field_int(d: dict[str, Data], key: str, default: int) -> int {
+    const v: Data | None = d.get(key)
+    if v is not None {
+        if isinstance(v, int) { return v }
+        if isinstance(v, float) { return int(v) }
+    }
+    return default
+}
+
+
+def field_bool(d: dict[str, Data], key: str, default: bool) -> bool {
+    const v: Data | None = d.get(key)
+    if v is not None and isinstance(v, bool) { return v }
+    return default
+}
+
+
+def field_obj(d: dict[str, Data], key: str) -> dict[str, Data] | None {
+    const v: Data | None = d.get(key)
+    if v is not None and isinstance(v, dict) { return v }
+    return None
+}
+
+
+def field_list(d: dict[str, Data], key: str) -> list[Data] | None {
+    const v: Data | None = d.get(key)
+    if v is not None and isinstance(v, list) { return v }
+    return None
+}
+
+
+def write_id(w: JsonWriter, req: Request) {
+    w.key("id")
+    if req.id_kind == ID_INT {
+        w.write_int(req.id_int)
+    } elif req.id_kind == ID_STR {
+        w.write_str(req.id_str)
+    } else {
+        w.write_null()
+    }
+}
+
+
+def begin_response(w: JsonWriter, req: Request) {
+    w.begin_object()
+    w.key("jsonrpc")
+    w.write_str("2.0")
+    write_id(w, req)
+    w.key("result")
+}
+
+
+def end_message(w: JsonWriter) -> str {
+    w.end_object()
+    return w.finish().decode("utf-8")
+}
+
+
+def error_response(req: Request, code: int, message: str) -> str {
+    w: JsonWriter = JsonWriter()
+    w.begin_object()
+    w.key("jsonrpc")
+    w.write_str("2.0")
+    write_id(w, req)
+    w.key("error")
+    w.begin_object()
+    w.key("code")
+    w.write_int(code)
+    w.key("message")
+    w.write_str(message)
+    w.end_object()
+    return end_message(w)
+}
+
+
+def begin_notification(w: JsonWriter, method: str) {
+    w.begin_object()
+    w.key("jsonrpc")
+    w.write_str("2.0")
+    w.key("method")
+    w.write_str(method)
+    w.key("params")
+}
+
+
+def write_position(w: JsonWriter, line: int, character: int) {
+    w.begin_object()
+    w.key("line")
+    w.write_int(line)
+    w.key("character")
+    w.write_int(character)
+    w.end_object()
+}
+
+
+def write_range(w: JsonWriter, start_line: int, start_char: int, end_line: int, end_char: int) {
+    w.begin_object()
+    w.key("start")
+    write_position(w, start_line, start_char)
+    w.key("end")
+    write_position(w, end_line, end_char)
+    w.end_object()
+}

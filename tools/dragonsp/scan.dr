@@ -1,0 +1,561 @@
+const KIND_MODULE: int = 2
+const KIND_CLASS: int = 5
+const KIND_METHOD: int = 6
+const KIND_PROPERTY: int = 7
+const KIND_FIELD: int = 8
+const KIND_CONSTRUCTOR: int = 9
+const KIND_ENUM: int = 10
+const KIND_FUNCTION: int = 12
+const KIND_VARIABLE: int = 13
+const KIND_CONSTANT: int = 14
+const KIND_ENUM_MEMBER: int = 22
+
+const RESERVED_WORDS: set[str] = {
+    "if", "elif", "else", "while", "for", "in", "not", "and", "or", "is",
+    "return", "break", "continue", "pass", "try", "except", "catch", "finally",
+    "raise", "with", "defer", "del", "match", "case", "lambda", "global",
+    "nonlocal", "yield", "async", "await", "fire", "thread", "assert",
+    "print", "template", "extern", "super", "self", "none", "None", "true",
+    "false", "True", "False"
+}
+
+const TRIPLE_DOUBLE: str = "\"\"\""
+const TRIPLE_SINGLE: str = "'''"
+
+
+class Symbol {
+    name: str
+    kind: int
+    line: int
+    col: int
+    end_line: int
+    detail: str
+    container: str
+    doc: str
+
+    def(name: str, kind: int, line: int, col: int, detail: str, container: str) {
+        self.name = name
+        self.kind = kind
+        self.line = line
+        self.col = col
+        self.end_line = line
+        self.detail = detail
+        self.container = container
+        self.doc = ""
+    }
+
+    def __str__() -> str {
+        return f"{self.detail} @ {self.line}:{self.col}"
+    }
+
+    def is_scope() -> bool {
+        return self.kind == KIND_CLASS or self.kind == KIND_ENUM or self.is_callable()
+    }
+
+    def is_callable() -> bool {
+        return self.kind == KIND_METHOD or self.kind == KIND_FUNCTION or self.kind == KIND_CONSTRUCTOR or self.kind == KIND_PROPERTY
+    }
+
+    def contains_line(line: int) -> bool {
+        return self.line <= line and line <= self.end_line
+    }
+}
+
+
+class ImportDecl {
+    module: str
+    alias: str
+    names: list[str]
+    aliases: list[str]
+    line: int
+
+    def(module: str, alias: str, line: int) {
+        self.module = module
+        self.alias = alias
+        self.names = []
+        self.aliases = []
+        self.line = line
+    }
+}
+
+
+class ScanResult {
+    symbols: list[Symbol] = []
+    imports: list[ImportDecl] = []
+
+    def find(name: str) -> Symbol | None {
+        for s in self.symbols {
+            if s.name == name and s.container == "" { return s }
+        }
+        for s in self.symbols {
+            if s.name == name { return s }
+        }
+        return None
+    }
+
+    def find_in(container: str, name: str) -> Symbol | None {
+        for s in self.symbols {
+            if s.name == name and s.container == container { return s }
+        }
+        return None
+    }
+
+    def members_of(container: str) -> list[Symbol] {
+        out: list[Symbol] = []
+        for s in self.symbols {
+            if s.container == container { out.append(s) }
+        }
+        return out
+    }
+
+    def top_level() -> list[Symbol] {
+        out: list[Symbol] = []
+        for s in self.symbols {
+            if s.container == "" { out.append(s) }
+        }
+        return out
+    }
+
+    def enclosing_class(line: int) -> str {
+        best: str = ""
+        best_line: int = -1
+        for s in self.symbols {
+            if s.kind == KIND_CLASS and s.contains_line(line) and s.line > best_line {
+                best = s.name
+                best_line = s.line
+            }
+        }
+        return best
+    }
+
+    def enclosing_callable(line: int) -> Symbol | None {
+        best: Symbol | None = None
+        best_line: int = -1
+        for s in self.symbols {
+            if s.is_callable() and s.contains_line(line) and s.line > best_line {
+                best = s
+                best_line = s.line
+            }
+        }
+        return best
+    }
+
+    def local_name_for(name: str) -> ImportDecl | None {
+        for imp in self.imports {
+            if len(imp.names) == 0 and imp.alias == name { return imp }
+            i: int = 0
+            while i < len(imp.aliases) {
+                if imp.aliases[i] == name { return imp }
+                i += 1
+            }
+        }
+        return None
+    }
+}
+
+
+def split_lines(text: str) -> list[str] {
+    out: list[str] = []
+    for line in text.split("\n") {
+        if line.endswith("\r") {
+            out.append(line[:len(line) - 1])
+        } else {
+            out.append(line)
+        }
+    }
+    return out
+}
+
+
+def is_ident_char(c: str) -> bool {
+    return c == "_" or c.isalnum()
+}
+
+
+def is_ident_start(c: str) -> bool {
+    return c == "_" or c.isalpha()
+}
+
+
+def ident_at(s: str, start: int) -> str {
+    i: int = start
+    const n: int = len(s)
+    while i < n and s[i] == " " { i += 1 }
+    const begin: int = i
+    if i < n and is_ident_start(s[i]) {
+        i += 1
+        while i < n and is_ident_char(s[i]) { i += 1 }
+    }
+    return s[begin:i]
+}
+
+
+def ident_start_at(s: str, start: int) -> int {
+    i: int = start
+    while i < len(s) and s[i] == " " { i += 1 }
+    return i
+}
+
+
+def dotted_at(s: str, start: int) -> str {
+    i: int = start
+    const n: int = len(s)
+    while i < n and s[i] == " " { i += 1 }
+    const begin: int = i
+    while i < n and (is_ident_char(s[i]) or s[i] == ".") { i += 1 }
+    return s[begin:i]
+}
+
+
+def word_at(line: str, col: int) -> tuple[str, int] {
+    const n: int = len(line)
+    if n == 0 { return ("", 0) }
+    start: int = col
+    if start > n { start = n }
+    while start > 0 and is_ident_char(line[start - 1]) { start -= 1 }
+    end: int = start
+    while end < n and is_ident_char(line[end]) { end += 1 }
+    return (line[start:end], start)
+}
+
+
+def qualifier_before(line: str, start: int) -> str {
+    if start == 0 or line[start - 1] != "." { return "" }
+    i: int = start - 1
+    while i > 0 and is_ident_char(line[i - 1]) { i -= 1 }
+    return line[i:start - 1]
+}
+
+
+def signature_text(stripped: str, is_py: bool) -> str {
+    s: str = stripped
+    if is_py {
+        if s.endswith(":") { s = s[:len(s) - 1] }
+    } else {
+        const brace: int = s.find("{")
+        if brace >= 0 { s = s[:brace] }
+    }
+    return s.strip()
+}
+
+
+class BraceCounter {
+    depth: int = 0
+    string_state: int = 0
+
+    def feed(line: str) {
+        i: int = 0
+        const n: int = len(line)
+        while i < n {
+            if self.string_state != 0 {
+                const q: str = TRIPLE_DOUBLE if self.string_state == 1 else TRIPLE_SINGLE
+                if i + 3 <= n and line[i:i + 3] == q {
+                    self.string_state = 0
+                    i += 3
+                    continue
+                }
+                i += 1
+                continue
+            }
+            const c: str = line[i]
+            if c == "#" { return }
+            if c == "\"" or c == "'" {
+                const triple: str = c + c + c
+                if i + 3 <= n and line[i:i + 3] == triple {
+                    const rel: int = line[i + 3:].find(triple)
+                    if rel < 0 {
+                        self.string_state = 1 if c == "\"" else 2
+                        return
+                    }
+                    i = i + 3 + rel + 3
+                    continue
+                }
+                i += 1
+                while i < n {
+                    const d: str = line[i]
+                    if d == "\\" {
+                        i += 2
+                        continue
+                    }
+                    if d == c { break }
+                    i += 1
+                }
+                i += 1
+                continue
+            }
+            if c == "{" {
+                self.depth += 1
+            } elif c == "}" {
+                self.depth -= 1
+            }
+            i += 1
+        }
+    }
+}
+
+
+class Scanner {
+    result: ScanResult
+    is_py: bool
+    braces: BraceCounter
+    open_syms: list[int] = []
+    open_levels: list[int] = []
+    want_doc: int = -1
+    in_doc: bool = false
+    doc_quote: str = ""
+    doc_lines: list[str] = []
+    last_decorator: str = ""
+    last_code_line: int = -1
+
+    def(is_py: bool) {
+        self.result = ScanResult()
+        self.is_py = is_py
+        self.braces = BraceCounter()
+    }
+
+    def innermost() -> Symbol | None {
+        if len(self.open_syms) == 0 { return None }
+        return self.result.symbols[self.open_syms[len(self.open_syms) - 1]]
+    }
+
+    def container_name() -> str {
+        i: int = len(self.open_syms) - 1
+        while i >= 0 {
+            const s: Symbol = self.result.symbols[self.open_syms[i]]
+            if s.kind == KIND_CLASS or s.kind == KIND_ENUM { return s.name }
+            i -= 1
+        }
+        return ""
+    }
+
+    def close_to(level: int, end_line: int) {
+        while len(self.open_syms) > 0 and self.open_levels[len(self.open_levels) - 1] >= level {
+            const idx: int = self.open_syms.pop()
+            self.open_levels.pop()
+            self.result.symbols[idx].end_line = end_line
+        }
+    }
+
+    def push(idx: int, level: int) {
+        self.open_syms.append(idx)
+        self.open_levels.append(level)
+    }
+
+    def add(name: str, kind: int, line: int, col: int, detail: str, container: str) -> int {
+        self.result.symbols.append(Symbol(name, kind, line, col, detail, container))
+        return len(self.result.symbols) - 1
+    }
+
+    def feed_doc_line(raw: str, stripped: str) -> str {
+        const close: int = raw.find(self.doc_quote)
+        if close < 0 {
+            self.doc_lines.append(stripped)
+            return ""
+        }
+        self.doc_lines.append(raw[:close].strip())
+        self.result.symbols[self.want_doc].doc = "\n".join(self.doc_lines).strip()
+        self.want_doc = -1
+        self.in_doc = false
+        return raw[close + 3:]
+    }
+
+    def try_docstring(stripped: str) -> bool {
+        if not (stripped.startswith(TRIPLE_DOUBLE) or stripped.startswith(TRIPLE_SINGLE)) {
+            self.want_doc = -1
+            return false
+        }
+        self.doc_quote = stripped[:3]
+        const rest: str = stripped[3:]
+        const close: int = rest.find(self.doc_quote)
+        if close >= 0 {
+            self.result.symbols[self.want_doc].doc = rest[:close].strip()
+            self.want_doc = -1
+            return true
+        }
+        self.doc_lines = []
+        if len(rest.strip()) > 0 { self.doc_lines.append(rest.strip()) }
+        self.in_doc = true
+        return true
+    }
+
+    def parse_import(stripped: str, line: int) {
+        if stripped.startswith("from ") {
+            const module: str = dotted_at(stripped, 5)
+            const at: int = stripped.find(" import ")
+            if len(module) == 0 or at < 0 { return }
+            imp: ImportDecl = ImportDecl(module, module, line)
+            spec: str = stripped[at + 8:].strip()
+            if spec.startswith("(") { spec = spec[1:] }
+            if spec.endswith(")") { spec = spec[:len(spec) - 1] }
+            for part in spec.split(",") {
+                const item: str = part.strip()
+                if len(item) == 0 { continue }
+                const as_at: int = item.find(" as ")
+                if as_at >= 0 {
+                    imp.names.append(item[:as_at].strip())
+                    imp.aliases.append(item[as_at + 4:].strip())
+                } else {
+                    imp.names.append(item)
+                    imp.aliases.append(item)
+                }
+            }
+            self.result.imports.append(imp)
+            return
+        }
+        const body: str = stripped[7:]
+        for part in body.split(",") {
+            const item: str = part.strip()
+            if len(item) == 0 { continue }
+            const as_at: int = item.find(" as ")
+            if as_at >= 0 {
+                self.result.imports.append(ImportDecl(item[:as_at].strip(), item[as_at + 4:].strip(), line))
+            } else {
+                self.result.imports.append(ImportDecl(item, item, line))
+            }
+        }
+    }
+
+    def opens_block(stripped: str) -> bool {
+        if self.is_py { return stripped.endswith(":") }
+        return stripped.endswith("{")
+    }
+
+    def classify(raw: str, stripped: str, line: int, indent: int) -> int {
+        const word: str = ident_at(stripped, 0)
+        const after_word: int = ident_start_at(stripped, 0) + len(word)
+        const inner: Symbol | None = self.innermost()
+        in_class: bool = false
+        in_enum: bool = false
+        in_def: bool = false
+        if inner is not None {
+            in_class = inner.kind == KIND_CLASS
+            in_enum = inner.kind == KIND_ENUM
+            in_def = inner.is_callable()
+        }
+        const container: str = self.container_name()
+        const detail: str = signature_text(stripped, self.is_py)
+        if stripped.startswith("@") {
+            self.last_decorator = stripped
+            return -1
+        }
+        const decorator: str = self.last_decorator
+        self.last_decorator = ""
+        if word == "def" {
+            const rest: str = stripped[after_word:]
+            const name_col: int = indent + after_word + (len(rest) - len(rest.lstrip()))
+            if rest.lstrip().startswith("(") {
+                return self.add(container if in_class else "__init__", KIND_CONSTRUCTOR, line, indent, detail, container)
+            }
+            const name: str = ident_at(stripped, after_word)
+            if len(name) == 0 { return -1 }
+            kind: int = KIND_FUNCTION
+            if in_class {
+                kind = KIND_METHOD
+                if name == "__init__" { kind = KIND_CONSTRUCTOR }
+                if decorator.startswith("@property") { kind = KIND_PROPERTY }
+            }
+            return self.add(name, kind, line, name_col, detail, container if in_class else "")
+        }
+        if word == "class" or word == "enum" {
+            const name: str = ident_at(stripped, after_word)
+            if len(name) == 0 { return -1 }
+            const rest: str = stripped[after_word:]
+            const name_col: int = indent + after_word + (len(rest) - len(rest.lstrip()))
+            return self.add(name, KIND_CLASS if word == "class" else KIND_ENUM, line, name_col, detail, container if in_class else "")
+        }
+        if word == "from" or word == "import" {
+            self.parse_import(stripped, line)
+            return -1
+        }
+        if in_def { return -1 }
+        if word == "const" or word == "static" or word == "own" {
+            const name: str = ident_at(stripped, after_word)
+            if len(name) == 0 { return -1 }
+            const rest: str = stripped[after_word:]
+            const name_col: int = indent + after_word + (len(rest) - len(rest.lstrip()))
+            kind: int = KIND_CONSTANT if word == "const" else KIND_VARIABLE
+            if in_class { kind = KIND_FIELD }
+            return self.add(name, kind, line, name_col, detail, container)
+        }
+        if word == "type" {
+            const rest: str = stripped[after_word:].lstrip()
+            if len(rest) > 0 and is_ident_start(rest[0]) {
+                const name: str = ident_at(rest, 0)
+                const name_col: int = indent + after_word + (len(stripped[after_word:]) - len(rest))
+                return self.add(name, KIND_CLASS, line, name_col, detail, container)
+            }
+        }
+        if len(word) == 0 or word in RESERVED_WORDS { return -1 }
+        const after: str = stripped[after_word:].lstrip()
+        if in_enum {
+            if len(after) == 0 or after.startswith("=") {
+                return self.add(word, KIND_ENUM_MEMBER, line, indent, detail, container)
+            }
+            return -1
+        }
+        if after.startswith(":") and not after.startswith("::") {
+            if in_class {
+                return self.add(word, KIND_FIELD, line, indent, detail, container)
+            }
+            if len(self.open_syms) == 0 {
+                return self.add(word, KIND_VARIABLE, line, indent, detail, "")
+            }
+        }
+        return -1
+    }
+
+    def feed(raw: str, line: int) {
+        const stripped: str = raw.strip()
+        if self.in_doc {
+            const remainder: str = self.feed_doc_line(raw, stripped)
+            if len(remainder) > 0 and not self.is_py { self.account(remainder, line, -1) }
+            return
+        }
+        if self.braces.string_state != 0 {
+            self.account(raw, line, -1)
+            return
+        }
+        if len(stripped) == 0 or stripped.startswith("#") { return }
+        if self.want_doc >= 0 and self.try_docstring(stripped) { return }
+        const indent: int = len(raw) - len(raw.lstrip())
+        if self.is_py { self.close_to(indent, self.last_code_line) }
+        const idx: int = self.classify(raw, stripped, line, indent)
+        self.last_code_line = line
+        if self.is_py {
+            if idx >= 0 and self.result.symbols[idx].is_scope() and self.opens_block(stripped) {
+                self.push(idx, indent)
+                self.want_doc = idx
+            }
+            return
+        }
+        self.account(raw, line, idx)
+    }
+
+    def account(raw: str, line: int, idx: int) {
+        const before: int = self.braces.depth
+        self.braces.feed(raw)
+        const after: int = self.braces.depth
+        if idx >= 0 and after > before and self.result.symbols[idx].is_scope() {
+            self.push(idx, before + 1)
+            self.want_doc = idx
+        }
+        self.close_to(after + 1, line)
+    }
+
+    def finish(last_line: int) -> ScanResult {
+        self.close_to(-1000000, last_line)
+        return self.result
+    }
+}
+
+
+def scan_source(text: str, is_py: bool) -> ScanResult {
+    const lines: list[str] = split_lines(text)
+    scanner: Scanner = Scanner(is_py)
+    i: int = 0
+    while i < len(lines) {
+        scanner.feed(lines[i], i)
+        i += 1
+    }
+    return scanner.finish(len(lines) - 1 if len(lines) > 0 else 0)
+}

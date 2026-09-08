@@ -1,0 +1,168 @@
+from os import listdir, walk_files
+from os.path import isfile, isdir, dirname, join, basename
+from io import open as open_file
+from sys import getenv
+from shutil import which
+from scan import ScanResult, scan_source
+
+extern "C" def realpath(path: str, resolved: ptr) -> ptr
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def strlen(s: ptr) -> int
+extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
+
+const PATH_MAX: int = 4096
+const MAX_WORKSPACE_FILES: int = 2000
+
+
+def real_path(path: str) -> str {
+    const buf: ptr = malloc(PATH_MAX)
+    const r: ptr = realpath(path, buf)
+    result: str = path
+    if r { result = dragon_string_alloc(r, strlen(r)) }
+    free(buf)
+    return result
+}
+
+
+def read_text(path: str) -> str {
+    try {
+        return open_file(path).text()
+    } except Exception as e {
+        return ""
+    }
+    return ""
+}
+
+
+def find_stdlib(compiler: str) -> str {
+    const pinned: str = getenv("DRAGONSP_STDLIB")
+    if pinned != "" { return pinned }
+    const env: str = getenv("DRAGON_STDLIB_PATH")
+    if env != "" { return env }
+    const exe: str = compiler if compiler.find("/") >= 0 else which(compiler)
+    if exe == "" { return "" }
+    const prefix: str = dirname(dirname(real_path(exe)))
+    const candidates: list[str] = [
+        join(prefix, "stdlib"),
+        join(prefix, "share/dragon/stdlib"),
+        join(prefix, "lib/dragon/stdlib"),
+        "/usr/local/share/dragon/stdlib",
+        "/usr/share/dragon/stdlib"
+    ]
+    for cand in candidates {
+        if isdir(cand) { return cand }
+    }
+    return ""
+}
+
+
+def is_source_file(name: str) -> bool {
+    return name.endswith(".dr") or name.endswith(".py")
+}
+
+
+def strip_extension(name: str) -> str {
+    const dot: int = name.rfind(".")
+    if dot < 0 { return name }
+    return name[:dot]
+}
+
+
+class ModuleIndex {
+    stdlib_dir: str
+    cache: dict[str, ScanResult] = {}
+
+    def(stdlib_dir: str) {
+        self.stdlib_dir = stdlib_dir
+    }
+
+    def roots(doc_dir: str) -> list[str] {
+        out: list[str] = []
+        if doc_dir != "" { out.append(doc_dir) }
+        if self.stdlib_dir != "" { out.append(self.stdlib_dir) }
+        return out
+    }
+
+    def resolve_in(root: str, segs: list[str]) -> str {
+        base: str = root
+        i: int = 0
+        while i < len(segs) - 1 {
+            base = join(base, segs[i])
+            i += 1
+        }
+        const last: str = segs[len(segs) - 1]
+        const flat: str = join(base, last + ".dr")
+        if isfile(flat) { return flat }
+        const pkg: str = join(join(base, last), last + ".dr")
+        if isfile(pkg) { return pkg }
+        const flat_py: str = join(base, last + ".py")
+        if isfile(flat_py) { return flat_py }
+        const init_py: str = join(join(base, last), "__init__.py")
+        if isfile(init_py) { return init_py }
+        return ""
+    }
+
+    def resolve(name: str, doc_dir: str) -> str {
+        if name == "" { return "" }
+        const segs: list[str] = name.split(".")
+        for root in self.roots(doc_dir) {
+            const found: str = self.resolve_in(root, segs)
+            if found != "" { return found }
+        }
+        return ""
+    }
+
+    def scan_path(path: str) -> ScanResult | None {
+        const cached: ScanResult | None = self.cache.get(path)
+        if cached is not None { return cached }
+        const text: str = read_text(path)
+        if text == "" { return None }
+        const fresh: ScanResult = scan_source(text, path.endswith(".py"))
+        self.cache[path] = fresh
+        return fresh
+    }
+
+    def forget(path: str) {
+        if path in self.cache { del self.cache[path] }
+    }
+
+    def module_names(doc_dir: str, package: str) -> list[str] {
+        seen: set[str] = set()
+        names: list[str] = []
+        const rel: str = package.replace(".", "/")
+        const last: str = package[package.rfind(".") + 1:] if package != "" else ""
+        for root in self.roots(doc_dir) {
+            const dir: str = root if package == "" else join(root, rel)
+            if not isdir(dir) { continue }
+            for entry in listdir(dir) {
+                if entry.startswith(".") or entry.startswith("_") { continue }
+                name: str = ""
+                if is_source_file(entry) {
+                    name = strip_extension(entry)
+                    if name == last { continue }
+                } elif isdir(join(dir, entry)) {
+                    if isfile(join(join(dir, entry), entry + ".dr")) or isfile(join(join(dir, entry), "__init__.py")) {
+                        name = entry
+                    }
+                }
+                if name == "" or name in seen { continue }
+                seen.add(name)
+                names.append(name)
+            }
+        }
+        return sorted(names)
+    }
+
+    def workspace_sources(root: str) -> list[str] {
+        out: list[str] = []
+        if root == "" or not isdir(root) { return out }
+        for path in walk_files(root) {
+            if not path.endswith(".dr") { continue }
+            if path.find("/.") >= 0 or path.find("/build") >= 0 { continue }
+            out.append(path)
+            if len(out) >= MAX_WORKSPACE_FILES { break }
+        }
+        return out
+    }
+}

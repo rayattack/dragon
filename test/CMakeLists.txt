@@ -348,3 +348,8 @@ foreach(_t
     target_compile_options(${_t} PRIVATE ${DRAGON_WARNINGS})
 endforeach()
 
+add_test(NAME dragonsp
+    COMMAND $<TARGET_FILE:dragon> run ${CMAKE_SOURCE_DIR}/tools/dragonsp/test_dragonsp.dr)
+set_tests_properties(dragonsp PROPERTIES
+    ENVIRONMENT "DRAGONSP_BIN=${DRAGONSP_OUT};DRAGONSP_COMPILER=${CMAKE_BINARY_DIR}/dragon${CMAKE_EXECUTABLE_SUFFIX};DRAGONSP_STDLIB=${CMAKE_SOURCE_DIR}/stdlib"
+    TIMEOUT 300)
