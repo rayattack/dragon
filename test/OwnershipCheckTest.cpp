@@ -503,3 +503,27 @@ TEST(OwnershipCheckTest, ImmutableOwnFieldsAreNotSealed) {
 TEST(OwnershipCheckTest, PlainCollectionFieldStaysUnsealed) {
     EXPECT_TRUE(ownAccepts(code("plain_collection_field_stays_unsealed")));
 }
+
+TEST(OwnershipCheckTest, TaskJoinThroughModuleGlobalRejected) {
+    std::string e = ownError(code("task_join_through_module_global_rejected"));
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, TaskJoinThroughSubscriptRejected) {
+    std::string e = ownError(code("task_join_through_subscript_rejected"));
+    EXPECT_NE(e.find("not a binding"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, TaskJoinThroughFieldRejected) {
+    std::string e = ownError(code("task_join_through_field_rejected"));
+    EXPECT_NE(e.find("not a binding"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, TaskReboundToSecondHandleRejected) {
+    std::string e = ownError(code("task_rebound_to_second_handle_rejected"));
+    EXPECT_NE(e.find("single-owner"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, TaskIsAliveThroughAnyReceiverOk) {
+    EXPECT_TRUE(ownAccepts(code("task_is_alive_through_any_receiver_ok")));
+}

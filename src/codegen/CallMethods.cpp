@@ -405,15 +405,29 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         return impl_->emitContractMethodCall(*this, node, attr);
     }
 
-    if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
-        auto tIt = impl_->varClassNames.find(objName->name);
-        if (tIt != impl_->varClassNames.end() && tIt->second == "__Thread") {
-            if (method == "join") {
-                llvm::Value* localSlot = impl_->lookupVar(objName->name);
+    if (method == "join" || method == "is_alive") {
+        auto* objName = dynamic_cast<NameExpr*>(attr.object.get());
+        bool taskRecv = (attr.object && attr.object->type &&
+                         attr.object->type->kind() == Type::Kind::Task) ||
+                        impl_->exprHasBuiltinClass(attr.object.get(), "__Thread");
+        if (taskRecv) {
+            llvm::Value* localSlot = objName ? impl_->lookupVar(objName->name) : nullptr;
+            llvm::Value* handle = nullptr;
+            if (objName) {
                 llvm::Value* handlePtr = localSlot;
                 if (!handlePtr) handlePtr = impl_->lookupModuleGlobal(objName->name);
-                if (handlePtr) {
-                    auto* handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "vthread.handle");
+                if (handlePtr)
+                    handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr,
+                                                        "vthread.handle");
+            } else {
+                attr.object->accept(*this);
+                handle = impl_->lastValue;
+                if (handle && !handle->getType()->isPointerTy())
+                    handle = impl_->builder->CreateIntToPtr(handle, impl_->i8PtrType,
+                                                            "vthread.handle");
+            }
+            if (handle) {
+                if (method == "join") {
                     auto* raw = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_vthread_join"], {handle}, "vthread.join");
                     impl_->lastValue = impl_->taskResultFromI64(raw, node.type.get());
@@ -424,18 +438,11 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             localSlot);
                     return true;
                 }
-            }
-            if (method == "is_alive") {
-                llvm::Value* handlePtr = impl_->lookupVar(objName->name);
-                if (!handlePtr) handlePtr = impl_->lookupModuleGlobal(objName->name);
-                if (handlePtr) {
-                    auto* handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "vthread.handle");
-                    auto* raw = impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_vthread_is_alive"], {handle}, "vthread.alive");
-                    impl_->lastValue = impl_->builder->CreateICmpNE(
-                        raw, llvm::ConstantInt::get(impl_->i64Type, 0), "vthread.alive.b");
-                    return true;
-                }
+                auto* raw = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_vthread_is_alive"], {handle}, "vthread.alive");
+                impl_->lastValue = impl_->builder->CreateICmpNE(
+                    raw, llvm::ConstantInt::get(impl_->i64Type, 0), "vthread.alive.b");
+                return true;
             }
         }
     }

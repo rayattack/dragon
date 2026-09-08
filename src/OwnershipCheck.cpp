@@ -916,10 +916,22 @@ struct OwnershipCheck::Impl {
         return false;
     }
 
+    static bool isTaskExpr(Expr* e) {
+        return e && e->type && e->type->kind() == Type::Kind::Task;
+    }
+
     void consumeTaskHandle(NameExpr* tn, Flow& flow) {
-        if (!tn->type || tn->type->kind() != Type::Kind::Task) return;
+        if (!isTaskExpr(tn)) return;
         VarSlot* s = resolve(tn->name);
-        if (!s) return;
+        if (!s || globalNames.count(tn->name)) {
+            error(tn->location(),
+                  "'" + tn->name +
+                      "' is a module global or an outer binding; a task's "
+                      "result moves out exactly once and that move cannot be "
+                      "tracked here (v1: locals only). Join it where it is "
+                      "bound, or fire the task into a local");
+            return;
+        }
         auto it = flow.states.find(s->id);
         if (it != flow.states.end() && it->second.st == St::Dead) return;
         BindState d;
@@ -1198,11 +1210,18 @@ struct OwnershipCheck::Impl {
                 calleeDesc = "'" + ca->attribute + "()'";
             if (auto* jat = dynamic_cast<AttributeExpr*>(call->callee.get()))
                 if (jat->attribute == "join" && call->args.empty() &&
-                    call->kwArgs.empty())
+                    call->kwArgs.empty()) {
                     if (auto* jt = dynamic_cast<NameExpr*>(jat->object.get())) {
                         reviveLends(jt->name, flow);
                         consumeTaskHandle(jt, flow);
+                    } else if (isTaskExpr(jat->object.get())) {
+                        error(jat->object->location(),
+                              "a task's result moves out exactly once, and "
+                              "this receiver is not a binding the move can be "
+                              "tracked through. Bind the task first, then join "
+                              "the binding");
                     }
+                }
             for (auto& a : call->args) {
                 if (auto* mv = dynamic_cast<NameExpr*>(a.get());
                     mv && mv->isMoveMarked) {
@@ -1343,6 +1362,14 @@ struct OwnershipCheck::Impl {
         auto* mvRhs = dynamic_cast<NameExpr*>(value);
         bool rhsIsMove = mvRhs && mvRhs->isMoveMarked;
         if (auto* n = dynamic_cast<NameExpr*>(target)) {
+            if (mvRhs && isTaskExpr(mvRhs) && !rhsIsMove) {
+                error(value->location(),
+                      "a task handle is single-owner; binding '" +
+                          mvRhs->name + "' again would give the same task a "
+                          "second joiner. Join it through the binding that "
+                          "owns it");
+                return;
+            }
             if (rhsIsMove) {
                 error(value->location(),
                       "a move needs a consuming destination (an own field or "

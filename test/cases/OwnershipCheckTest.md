@@ -1042,3 +1042,104 @@ def run() -> None {
     fire bump(g)
 }
 ```
+
+
+#### :task_join_through_module_global_rejected
+
+A task's result moves out exactly once. The checker tracks that move over local
+bindings, so a global joined inside a function escapes the rule entirely and a
+second join reads the freed handle. It is refused where it cannot be tracked.
+
+```dr
+def quick(n: int) -> int { return n * n }
+
+solo: Task[int] = fire quick(6)
+
+class Probe {
+    def once() -> int { return solo.join() }
+    def twice() -> int { return solo.join() }
+}
+
+p: Probe = Probe()
+print(f"{p.once()} {p.twice()}")
+```
+
+#### :task_join_through_subscript_rejected
+
+The receiver is an element of a list, not a binding, so nothing records that the
+result already moved out. `for t in tasks { t.join() }` is the spelling that owns
+its handle.
+
+```dr
+def quick(n: int) -> int { return n * n }
+
+pool: list[Task[int]] = [fire quick(7)]
+a: int = pool[0].join()
+b: int = pool[0].join()
+print(f"{a} {b}")
+```
+
+#### :task_join_through_field_rejected
+
+Same rule through an instance field.
+
+```dr
+def quick(n: int) -> int { return n * n }
+
+class Box {
+    held: Task[int]
+    def (t: Task[int]) {
+        self.held = t
+    }
+}
+
+box: Box = Box(fire quick(8))
+print(box.held.join())
+```
+
+#### :task_rebound_to_second_handle_rejected
+
+A task handle is single-owner. Binding it a second time hands the same task two
+joiners, which is the `dub` refusal without the keyword.
+
+```dr
+def quick(n: int) -> int { return n * n }
+
+solo: Task[int] = fire quick(6)
+
+def take() -> int {
+    t: Task[int] = solo
+    return t.join()
+}
+
+print(take())
+```
+
+#### :task_is_alive_through_any_receiver_ok
+
+`is_alive` observes and moves nothing, so every receiver may ask it.
+
+```dr
+def quick(n: int) -> int { return n * n }
+
+solo: Task[int] = fire quick(6)
+pool: list[Task[int]] = [fire quick(7)]
+
+class Box {
+    held: Task[int]
+    def (t: Task[int]) {
+        self.held = t
+    }
+}
+
+box: Box = Box(fire quick(8))
+
+class Probe {
+    def a() -> bool { return solo.is_alive() }
+    def b() -> bool { return pool[0].is_alive() }
+    def c() -> bool { return box.held.is_alive() }
+}
+
+p: Probe = Probe()
+print(f"{p.a()} {p.b()} {p.c()}")
+```

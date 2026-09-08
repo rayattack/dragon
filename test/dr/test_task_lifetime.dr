@@ -166,6 +166,83 @@ def thread_str_capture() -> int {
 }
 
 
+gate_open: int = 0
+
+
+def gate_is_open() -> bool {
+    n: int = 0
+    with effect_lock { n = gate_open }
+    return n == 1
+}
+
+
+def open_gate() -> None {
+    global gate_open
+    with effect_lock { gate_open = 1 }
+}
+
+
+def gated_square(n: int) -> int {
+    spins: int = 0
+    while not gate_is_open() and spins < 60000 {
+        sleep_ms(1)
+        spins = spins + 1
+    }
+    return n * n
+}
+
+
+class TaskBox {
+    held: Task[int]
+
+    def (t: Task[int]) {
+        self.held = t
+    }
+}
+
+
+module_task: Task[int] = fire gated_square(6)
+module_pool: list[Task[int]] = [fire gated_square(7)]
+module_box: TaskBox = TaskBox(fire gated_square(8))
+
+
+class ModuleTaskProbe {
+    """Every method reads a module-level binding declared before this class."""
+
+    def still_running() -> bool {
+        return module_task.is_alive()
+    }
+
+    def pooled_running() -> bool {
+        return module_pool[0].is_alive()
+    }
+
+    def boxed_running() -> bool {
+        return module_box.held.is_alive()
+    }
+
+    def settled() -> bool {
+        spins: int = 0
+        while spins < 60000 {
+            live: int = 0
+            if module_task.is_alive() { live = live + 1 }
+            if module_pool[0].is_alive() { live = live + 1 }
+            if module_box.held.is_alive() { live = live + 1 }
+            if live == 0 { return True }
+            sleep_ms(1)
+            spins = spins + 1
+        }
+        return False
+    }
+
+    def guarded_sum(a: int, b: int) -> int {
+        total: int = 0
+        with effect_lock { total = a + b }
+        return total
+    }
+}
+
+
 class TaskDetachRcTests(TestCase) {
     """Task scope-exit lifetime - bound-Task tail + conditional-await.
 
@@ -459,6 +536,36 @@ class FireReadOnlyShareTests(TestCase) {
 }
 
 
+class ModuleTaskInMethodTests(TestCase) {
+    """A module-level Task reached from inside a class method.
+
+    The Task receiver used to be classified from a bare-name table that is only
+    written when the binding's own statement is lowered, and class bodies are
+    lowered before the module body runs. So `module_task.is_alive()` inside a
+    method matched no dispatch path and the build stopped on a program that
+    `dragon check` had just accepted. The receiver's checked type answers first
+    now, so a Task dispatches wherever it is reached from: a module global, an
+    element of a module-level list, a field of a module-level instance. The gate
+    keeps every handle unfinished until this case opens it, so `is_alive` is
+    True by construction rather than by timing.
+
+    `is_alive` observes and moves nothing, so it is legal on every receiver.
+    `join` moves the result out exactly once and is legal only through the
+    binding that owns the task; the refusals live in TypeCheckerTest.
+    """
+
+    def test_module_task_reached_from_a_method() {
+        probe: ModuleTaskProbe = ModuleTaskProbe()
+        self.assertTrue(probe.still_running())
+        self.assertTrue(probe.pooled_running())
+        self.assertTrue(probe.boxed_running())
+        self.assertEqual(probe.guarded_sum(20, 22), 42)
+        open_gate()
+        self.assertTrue(probe.settled())
+    }
+}
+
+
 class ConcurrencyCaptureTests(TestCase) {
     def test_fire_captures_int() { self.assertEqual(fire_int_capture(), 11) }
     def test_fire_captures_str() { self.assertEqual(fire_str_capture(), 5) }
@@ -468,5 +575,5 @@ class ConcurrencyCaptureTests(TestCase) {
 }
 
 
-main([TaskDetachRcTests(), TaskOwnershipTests(), FireForgetTests(),
-      FireReadOnlyShareTests(), ConcurrencyCaptureTests()])
+main([ModuleTaskInMethodTests(), TaskDetachRcTests(), TaskOwnershipTests(),
+      FireForgetTests(), FireReadOnlyShareTests(), ConcurrencyCaptureTests()])
