@@ -1,6 +1,7 @@
 #ifndef DRAGON_PARSER_IMPL_H
 #define DRAGON_PARSER_IMPL_H
 
+#include <cstdint>
 #include "dragon/Parser.h"
 #include "dragon/AST.h"
 #include <optional>

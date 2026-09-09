@@ -1,6 +1,7 @@
 #ifndef DRAGON_AST_H
 #define DRAGON_AST_H
 
+#include <cstdint>
 #include "dragon/Token.h"
 #include <memory>
 #include <string>

@@ -39,6 +39,28 @@ static void dragon_image_bounds_init(void) {
         __dragon_image_hi = (const char*)hi;
     }
 }
+#elif defined(_WIN32)
+// PE has no _end/__executable_start either. __ImageBase is the linker-provided
+// base of the module the runtime is linked into; SizeOfImage in that module's
+// PE headers gives the span. Same fail-SAFE defaults as the Mach-O path above:
+// an uninitialized read reports "inside the image", which keeps
+// dragon_str_is_heap conservative rather than letting it write to rodata.
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+const char* __dragon_image_lo = (const char*)0;
+const char* __dragon_image_hi = (const char*)UINTPTR_MAX;
+__attribute__((constructor))
+static void dragon_image_bounds_init(void) {
+    const char* base = (const char*)&__ImageBase;
+    if (__ImageBase.e_magic != IMAGE_DOS_SIGNATURE) return;
+    const IMAGE_NT_HEADERS* nt =
+        (const IMAGE_NT_HEADERS*)(base + __ImageBase.e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    const uintptr_t span = (uintptr_t)nt->OptionalHeader.SizeOfImage;
+    if (span == 0) return;
+    __dragon_image_lo = base;
+    __dragon_image_hi = base + span;
+}
 #endif
 
 extern "C" {

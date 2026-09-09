@@ -1,16 +1,27 @@
 #include <gtest/gtest.h>
 #include "TestHelpers.h"
 #include "dragon/ModuleResolver.h"
+#include "dragon/Platform.h"
 #include <fstream>
 #include <cstdlib>
 #include <cstdio>
 #include <sys/stat.h>
+#ifdef _WIN32
+  #include <direct.h>
+  #define dragon_test_mkdir(p) _mkdir(p)
+#else
+  #define dragon_test_mkdir(p) mkdir((p), 0755)
+#endif
 
 using namespace dragon;
 using namespace dragon::test;
 
 static std::string makeTempDir(const std::string& suffix) {
-    std::string tmpl = "/tmp/dragon_test_" + suffix + "_XXXXXX";
+    // Not a hardcoded /tmp: a native Windows binary has no such directory, so
+    // mkdtemp returned null and every test here died on ASSERT_FALSE(empty).
+    std::string tmpl = platform::getTempDir() +
+                       std::string(1, platform::pathSeparator()) +
+                       "dragon_test_" + suffix + "_XXXXXX";
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     char* result = mkdtemp(buf.data());
@@ -272,7 +283,7 @@ TEST(ModuleResolver, RootlessDirectoryDoesNotShadowALaterSearchPath) {
     auto libDir = makeTempDir("shadow_lib");
     ASSERT_FALSE(shadowDir.empty());
     ASSERT_FALSE(libDir.empty());
-    ASSERT_EQ(mkdir((shadowDir + "/sysx").c_str(), 0755), 0);
+    ASSERT_EQ(dragon_test_mkdir((shadowDir + "/sysx").c_str()), 0);
     writeFile(shadowDir + "/sysx/types.h", "struct s { int x; };\n");
     writeFile(libDir + "/sysx.dr", "def pid() -> int { return 1 }");
 
@@ -295,7 +306,7 @@ TEST(ModuleResolver, RootlessDirectoryReportsEveryLocationWhenNothingResolves) {
     auto libDir = makeTempDir("rootless_lib");
     ASSERT_FALSE(shadowDir.empty());
     ASSERT_FALSE(libDir.empty());
-    ASSERT_EQ(mkdir((shadowDir + "/sysx").c_str(), 0755), 0);
+    ASSERT_EQ(dragon_test_mkdir((shadowDir + "/sysx").c_str()), 0);
     writeFile(shadowDir + "/sysx/types.h", "struct s { int x; };\n");
 
     ModuleResolverOptions opts;

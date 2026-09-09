@@ -2,33 +2,32 @@
 #
 # 
 # Dragon builds against a RELEASED LLVM (>= 21; see the floor check in the root
-# CMakeLists.txt). On Linux and macOS that is a one-shot package install, so the
-# old "build LLVM trunk from source and cache it" dance (45-90 min on a cold
-# cache) is gone for those platforms.
+# CMakeLists.txt). On every platform that is now a one-shot package install, so
+# the old "build LLVM from source and cache it" dance (45-90 min on a cold
+# cache) is gone everywhere.
 #
-#   * Linux  -> apt.llvm.org dev package        (llvm-<major>-dev), ~1 min
-#   * macOS  -> Homebrew                         (llvm@<major>),     ~1-2 min
-#   * Windows-> built from the release/<major>.x branch and cached, because no
-#              Windows package ships LLVM *with* the CMake config + static libs
-#              Dragon needs to link against. (Still experimental in release.yml.)
+#   * Linux  -> apt.llvm.org dev package  (llvm-<major>-dev),              ~1 min
+#   * macOS  -> Homebrew                  (llvm@<major>),                ~1-2 min
+#   * Windows-> MSYS2/UCRT64              (mingw-w64-ucrt-x86_64-llvm),  ~1-2 min
+#
+# The Windows entry used to build from source on the belief that no Windows
+# package ships LLVM with the CMake config Dragon links against. That is not
+# true of MSYS2: its mingw-w64-llvm runs a full `cmake --install`, so
+# lib/cmake/llvm/LLVMConfig.cmake and the libLLVM import library are both there.
 #
 # The output `llvm-dir` is the directory holding LLVMConfig.cmake; pass it as
 # -DLLVM_DIR=. To move onto a newer LLVM, bump `llvm-major` (and confirm the
-# CMakeLists floor still holds).
+# CMakeLists floor still holds, and that MSYS2 has caught up).
 #
 
 name: 'Setup LLVM'
-description: 'Install (Linux/macOS) or build+cache (Windows) the released LLVM Dragon links against'
+description: 'Install the released LLVM Dragon links against (apt.llvm.org / Homebrew / MSYS2)'
 
 inputs:
   llvm-major:
     description: 'LLVM major version to provide (a released series, >= 21)'
     required: false
     default: '22'
-  install-dir:
-    description: 'Windows only: directory the built LLVM is installed into (and cached)'
-    required: false
-    default: ${{ github.workspace }}/.llvm-install
 
 outputs:
   llvm-dir:
@@ -67,47 +66,24 @@ runs:
         PREFIX="$(brew --prefix "llvm@${MAJOR}")"
         echo "llvm-dir=${PREFIX}/lib/cmake/llvm" >> "$GITHUB_OUTPUT"
 
-    # ---- Windows: build the release branch from source, cached ---------------
-    - name: Restore LLVM from cache (Windows)
-      id: cache
-      if: runner.os == 'Windows'
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-      with:
-        path: ${{ inputs.install-dir }}
-        key: llvm-${{ runner.os }}-${{ runner.arch }}-release-${{ inputs.llvm-major }}-v1
-
-    - name: Build LLVM (Windows, cache miss only)
-      if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        SRC="${RUNNER_TEMP}/llvm-src"
-        # Shallow-fetch the tip of the released series (e.g. release/22.x).
-        git init -q "$SRC"
-        cd "$SRC"
-        git remote add origin https://github.com/llvm/llvm-project.git
-        git fetch --depth 1 origin "release/${{ inputs.llvm-major }}.x"
-        git checkout -q FETCH_HEAD
-        cmake -S llvm -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DLLVM_ENABLE_PROJECTS="" \
-          -DLLVM_TARGETS_TO_BUILD=Native \
-          -DBUILD_SHARED_LIBS=OFF \
-          -DLLVM_INCLUDE_TESTS=OFF \
-          -DLLVM_INCLUDE_BENCHMARKS=OFF \
-          -DLLVM_INCLUDE_EXAMPLES=OFF \
-          -DLLVM_ENABLE_ZLIB=OFF \
-          -DLLVM_ENABLE_ZSTD=OFF \
-          -DLLVM_ENABLE_TERMINFO=OFF \
-          -DLLVM_ENABLE_LIBXML2=OFF \
-          -DLLVM_ENABLE_LIBEDIT=OFF \
-          -DLLVM_ENABLE_ASSERTIONS=OFF \
-          -DLLVM_PARALLEL_LINK_JOBS=1 \
-          -DCMAKE_INSTALL_PREFIX="${{ inputs.install-dir }}"
-        cmake --build build --target install -j
-
-    - name: Export LLVM_DIR (Windows)
+    # ---- Windows: MSYS2/UCRT64 package ---------------------------------------
+    # mingw-w64-ucrt-x86_64-llvm ships the headers, LLVMConfig.cmake and the
+    # libLLVM import library, so there is nothing to build here. The calling job
+    # must run msys2/setup-msys2 first: that provides pacman and registers the
+    # `msys2 {0}` shell used below.
+    - name: Install LLVM (Windows)
       id: windows
       if: runner.os == 'Windows'
-      shell: bash
-      run: echo "llvm-dir=${{ inputs.install-dir }}/lib/cmake/llvm" >> "$GITHUB_OUTPUT"
+      shell: msys2 {0}
+      run: |
+        set -euxo pipefail
+        MAJOR="${{ inputs.llvm-major }}"
+        pacman --noconfirm -S --needed mingw-w64-ucrt-x86_64-llvm
+        HAVE="$(llvm-config --version | cut -d. -f1)"
+        # MSYS2 carries one LLVM series at a time. Fail loudly rather than
+        # silently building against a major the CMakeLists floor did not expect.
+        if [ "$HAVE" != "$MAJOR" ]; then
+          echo "::error::MSYS2 ships LLVM ${HAVE}, but llvm-major is ${MAJOR}"
+          exit 1
+        fi
+        echo "llvm-dir=$(cygpath -m "$(llvm-config --cmakedir)")" >> "$GITHUB_OUTPUT"

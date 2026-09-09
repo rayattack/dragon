@@ -987,6 +987,11 @@ static bool runTool(const std::vector<std::string>& args) {
     std::vector<const char*> argv;
     for (const auto& a : args) argv.push_back(a.c_str());
     argv.push_back(nullptr);
+    if (getenv("DRAGON_TRACE_TOOLS")) {
+        fprintf(stderr, "[dragon] exec:");
+        for (const auto& a : args) fprintf(stderr, " %s", a.c_str());
+        fprintf(stderr, "\n");
+    }
 #if defined(_WIN32)
     intptr_t rc = _spawnvp(_P_WAIT, argv[0],
                            const_cast<const char* const*>(argv.data()));
@@ -1253,6 +1258,12 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
 #ifdef DRAGON_ASAN_BUILD
     useCxxDriver = true;
 #endif
+#if defined(_WIN32)
+    // The runtime's Windows path pulls in <vector>/<chrono> (runtime_concurrency),
+    // so the link needs libstdc++ plus the SEH personality routine. MinGW's C
+    // driver links neither; the C++ driver does.
+    useCxxDriver = true;
+#endif
     std::vector<std::string> args;
 #if defined(_WIN32)
     args.push_back(useCxxDriver ? "g++" : "gcc");
@@ -1333,6 +1344,13 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     args.push_back("-liphlpapi");
     args.push_back("-lpsapi");
     args.push_back("-luserenv");
+    // dragon_urandom / the hash seed call BCryptGenRandom out of bcrypt.dll.
+    args.push_back("-lbcrypt");
+    // Compiled programs must run on a machine with no MSYS2 install, so fold
+    // the GCC/libstdc++ support libraries into the executable rather than
+    // leaving it looking for libstdc++-6.dll next to it.
+    args.push_back("-static-libgcc");
+    args.push_back("-static-libstdc++");
 #elif defined(__APPLE__)
     args.push_back("-lpthread");
 #else

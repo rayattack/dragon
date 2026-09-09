@@ -7,6 +7,7 @@
   #include <chrono>
   #include <algorithm>
   #include <io.h>
+  #include <semaphore.h>
   #define poll WSAPoll
   #ifndef _SSIZE_T_DEFINED
     typedef intptr_t ssize_t;

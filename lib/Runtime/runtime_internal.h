@@ -22,9 +22,22 @@
     #define EAGAIN WSAEWOULDBLOCK
   #endif
   #define dragon_sock_errno() WSAGetLastError()
+  // Winsock reports through WSAGetLastError() with WSAE* codes, which do NOT
+  // match the POSIX E* values UCRT's <errno.h> defines. Socket error checks
+  // must compare against these, never against the bare errno constants.
+  #define DRAGON_SOCK_EINTR       WSAEINTR
+  #define DRAGON_SOCK_EAGAIN      WSAEWOULDBLOCK
+  #define DRAGON_SOCK_EWOULDBLOCK WSAEWOULDBLOCK
+  #define DRAGON_SOCK_ECONNRESET  WSAECONNRESET
+  #define DRAGON_SOCK_EPIPE       WSAESHUTDOWN
 #else
   #include <errno.h>
   #define dragon_sock_errno() errno
+  #define DRAGON_SOCK_EINTR       EINTR
+  #define DRAGON_SOCK_EAGAIN      EAGAIN
+  #define DRAGON_SOCK_EWOULDBLOCK EWOULDBLOCK
+  #define DRAGON_SOCK_ECONNRESET  ECONNRESET
+  #define DRAGON_SOCK_EPIPE       EPIPE
 #endif
 #include <pthread.h>
 #include <unistd.h>
@@ -564,7 +577,7 @@ static inline DragonString* dragon_string_from_data(const char* data) {
     return (DragonString*)((char*)data - offsetof(DragonString, data));
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
 extern const char* __dragon_image_lo;
 extern const char* __dragon_image_hi;
 #define DRAGON_IMAGE_LO (__dragon_image_lo)

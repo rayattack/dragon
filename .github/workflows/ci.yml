@@ -170,6 +170,52 @@ jobs:
       - name: Smoke check
         run: ./build/dragon check examples/hello.dr
 
+  windows:
+    name: Windows build + test
+    runs-on: windows-2025
+    timeout-minutes: 60
+    # New platform: report status without blocking merges yet.
+    continue-on-error: true
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # UCRT64 is the environment Dragon targets on Windows: the runtime is
+      # written against pthreads/unistd.h, which winpthreads and the mingw-w64
+      # headers provide, and its GCC links native PE binaries. MSVC is not a
+      # target. zlib/zstd are REQUIRED by Dragon's CMake, as on Linux.
+      - name: Setup MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          pacboy: >-
+            gcc:p cmake:p ninja:p zlib:p zstd:p
+
+      - name: Setup LLVM
+        id: llvm
+        uses: ./.github/actions/setup-llvm
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDRAGON_BUILD_TESTS=ON \
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Smoke check
+        run: ./build/dragon.exe run examples/hello.dr
+
+      # dr_oom_* drive `sh -c "... ulimit -v ..."`, which has no Windows
+      # equivalent, so they are excluded rather than left to time out.
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -E '^dr_oom_'
+
   freebsd:
     name: FreeBSD build + test
     runs-on: ubuntu-latest

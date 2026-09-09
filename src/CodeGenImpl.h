@@ -2,7 +2,6 @@
 #define DRAGON_CODEGEN_IMPL_H
 
 #include "dragon/ValueTags.h"
-#include <execinfo.h>
 #include <limits>
 #include <optional>
 #include "dragon/CodeGen.h"

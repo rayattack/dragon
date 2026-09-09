@@ -168,7 +168,9 @@ TEST(CodeGenTest, NonBlockingSendRecvE2E) {
 }
 
 #include "dragon/Driver.h"
-#include <sys/wait.h>
+#ifndef _WIN32
+  #include <sys/wait.h>
+#endif
 
 static std::string driverBuildAndRun(const std::string& source) {
     std::string srcFile = "/tmp/dragon_drvtest_" + std::to_string(getpid()) + ".dr";
