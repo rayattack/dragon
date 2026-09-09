@@ -48,10 +48,34 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
     return statement();
 }
 
+// Backslash is a legal character in a POSIX filename, so it only counts as a
+// separator (and a drive letter only counts as a root) on Windows.
+static bool isAbsoluteTemplatePath(const std::string& p) {
+    if (p.empty()) return false;
+    if (p[0] == '/') return true;
+#if defined(_WIN32)
+    if (p[0] == '\\') return true;                    // UNC or root-relative
+    if (p.size() >= 3 && std::isalpha((unsigned char)p[0]) && p[1] == ':' &&
+        (p[2] == '/' || p[2] == '\\')) return true;   // C:\... or C:/...
+#endif
+    return false;
+}
+
+static size_t lastTemplatePathSeparator(const std::string& p) {
+#if defined(_WIN32)
+    return p.find_last_of("/\\");
+#else
+    return p.find_last_of('/');
+#endif
+}
+
 static std::string resolveTemplateFilePath(const std::string& filePath,
                                            const std::string& sourceFile) {
-    if (filePath.empty() || filePath[0] == '/') return filePath;
-    size_t lastSlash = sourceFile.find_last_of('/');
+    if (filePath.empty() || isAbsoluteTemplatePath(filePath)) return filePath;
+    // A nested include resolves against the directory of the file including it.
+    // Missing the Windows separator left the include as a bare name, so it
+    // matched nothing in openFiles and include cycles went undetected.
+    size_t lastSlash = lastTemplatePathSeparator(sourceFile);
     if (lastSlash == std::string::npos) return filePath;
     return sourceFile.substr(0, lastSlash + 1) + filePath;
 }

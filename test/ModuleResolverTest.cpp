@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "TestHelpers.h"
 #include "dragon/ModuleResolver.h"
+#include "dragon/Platform.h"
 #include <fstream>
 #include <cstdlib>
 #include <cstdio>
@@ -16,7 +17,11 @@ using namespace dragon;
 using namespace dragon::test;
 
 static std::string makeTempDir(const std::string& suffix) {
-    std::string tmpl = "/tmp/dragon_test_" + suffix + "_XXXXXX";
+    // Not a hardcoded /tmp: a native Windows binary has no such directory, so
+    // mkdtemp returned null and every test here died on ASSERT_FALSE(empty).
+    std::string tmpl = platform::getTempDir() +
+                       std::string(1, platform::pathSeparator()) +
+                       "dragon_test_" + suffix + "_XXXXXX";
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     char* result = mkdtemp(buf.data());
