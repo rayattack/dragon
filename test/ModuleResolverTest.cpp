@@ -5,6 +5,12 @@
 #include <cstdlib>
 #include <cstdio>
 #include <sys/stat.h>
+#ifdef _WIN32
+  #include <direct.h>
+  #define dragon_test_mkdir(p) _mkdir(p)
+#else
+  #define dragon_test_mkdir(p) mkdir((p), 0755)
+#endif
 
 using namespace dragon;
 using namespace dragon::test;
@@ -272,7 +278,7 @@ TEST(ModuleResolver, RootlessDirectoryDoesNotShadowALaterSearchPath) {
     auto libDir = makeTempDir("shadow_lib");
     ASSERT_FALSE(shadowDir.empty());
     ASSERT_FALSE(libDir.empty());
-    ASSERT_EQ(mkdir((shadowDir + "/sysx").c_str(), 0755), 0);
+    ASSERT_EQ(dragon_test_mkdir((shadowDir + "/sysx").c_str()), 0);
     writeFile(shadowDir + "/sysx/types.h", "struct s { int x; };\n");
     writeFile(libDir + "/sysx.dr", "def pid() -> int { return 1 }");
 
@@ -295,7 +301,7 @@ TEST(ModuleResolver, RootlessDirectoryReportsEveryLocationWhenNothingResolves) {
     auto libDir = makeTempDir("rootless_lib");
     ASSERT_FALSE(shadowDir.empty());
     ASSERT_FALSE(libDir.empty());
-    ASSERT_EQ(mkdir((shadowDir + "/sysx").c_str(), 0755), 0);
+    ASSERT_EQ(dragon_test_mkdir((shadowDir + "/sysx").c_str()), 0);
     writeFile(shadowDir + "/sysx/types.h", "struct s { int x; };\n");
 
     ModuleResolverOptions opts;

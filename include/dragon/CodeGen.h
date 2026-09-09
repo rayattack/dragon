@@ -1,6 +1,7 @@
 #ifndef DRAGON_CODEGEN_H
 #define DRAGON_CODEGEN_H
 
+#include <cstdint>
 #include "dragon/AST.h"
 #include <functional>
 #include <memory>

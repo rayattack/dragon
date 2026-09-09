@@ -1,6 +1,7 @@
 #include "dragon/OwnershipCheck.h"
 #include "dragon/Dubable.h"
 #include "dragon/TypeChecker.h"
+#include <cstdint>
 
 #include <unordered_map>
 #include <unordered_set>

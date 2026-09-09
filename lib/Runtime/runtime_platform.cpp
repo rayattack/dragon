@@ -32,6 +32,11 @@ extern "C" {
 
 #ifdef _WIN32
 extern "C" void dragon_win_wsa_startup(void);
+// Declared here rather than pulling in <bcrypt.h>. A linkage-specification is
+// only legal at namespace scope, so this cannot live inside the functions that
+// call it. Resolved against bcrypt.dll (see the WIN32 link libs in CMakeLists).
+extern "C" long __stdcall BCryptGenRandom(void* hAlgorithm, unsigned char* pbBuffer,
+                                          unsigned long cbBuffer, unsigned long dwFlags);
 #endif
 
 void* dragon_sockaddr_in_new(int64_t port, const char* addr) {
@@ -414,10 +419,6 @@ uint64_t __dragon_hash_k1 = 0;
 static int64_t dragon_fill_os_random(unsigned char* buf, int64_t n) {
     int64_t got = 0;
 #ifdef _WIN32
-    extern "C" {
-        long __stdcall BCryptGenRandom(void* hAlgorithm, unsigned char* pbBuffer,
-                                       unsigned long cbBuffer, unsigned long dwFlags);
-    }
     if (BCryptGenRandom(nullptr, buf, (unsigned long)n, 2) >= 0) got = n;
 #else
     #if defined(__linux__) && defined(SYS_getrandom)
@@ -470,10 +471,6 @@ DragonBytes* dragon_urandom(int64_t n) {
     auto* buf = (uint8_t*)dragon_xmalloc((size_t)n);
     int64_t got = 0;
 #ifdef _WIN32
-    extern "C" {
-        long __stdcall BCryptGenRandom(void* hAlgorithm, unsigned char* pbBuffer,
-                                       unsigned long cbBuffer, unsigned long dwFlags);
-    }
     long st = BCryptGenRandom(nullptr, buf, (unsigned long)n,
                               2 );
     if (st >= 0) got = n;

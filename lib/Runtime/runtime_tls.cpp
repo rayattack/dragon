@@ -13,7 +13,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
-#include <sys/socket.h>
+#include <climits>
+#ifndef _WIN32
+  #include <sys/socket.h>
+#endif
 
 
 static const uint16_t kDragonTlsGroups[] = {
@@ -69,17 +72,39 @@ struct DragonTlsConn {
 #define MSG_NOSIGNAL 0
 #endif
 
+// Winsock's send/recv take a SOCKET, char*, and an int length, and report via
+// WSAGetLastError() rather than errno; these keep that difference in one place.
+static inline intptr_t dragon_tls_raw_send(int fd, const unsigned char* buf, size_t len) {
+#ifdef _WIN32
+    int n = (int)(len > (size_t)INT_MAX ? (size_t)INT_MAX : len);
+    return (intptr_t)::send((SOCKET)fd, (const char*)buf, n, 0);
+#else
+    return (intptr_t)::send(fd, buf, len, MSG_NOSIGNAL);
+#endif
+}
+
+static inline intptr_t dragon_tls_raw_recv(int fd, unsigned char* buf, size_t len) {
+#ifdef _WIN32
+    int n = (int)(len > (size_t)INT_MAX ? (size_t)INT_MAX : len);
+    return (intptr_t)::recv((SOCKET)fd, (char*)buf, n, 0);
+#else
+    return (intptr_t)::recv(fd, buf, len, 0);
+#endif
+}
+
 static int dragon_tls_bio_send(void* ctx, const unsigned char* buf, size_t len) {
     int fd = ((DragonTlsConn*)ctx)->fd;
     for (;;) {
-        ssize_t n = ::send(fd, buf, len, MSG_NOSIGNAL);
+        intptr_t n = dragon_tls_raw_send(fd, buf, len);
         if (n >= 0) return (int)n;
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        const int err = dragon_sock_errno();
+        if (err == DRAGON_SOCK_EINTR) continue;
+        if (err == DRAGON_SOCK_EAGAIN || err == DRAGON_SOCK_EWOULDBLOCK) {
             if (dragon_io_wait_writable(fd) < 0) return MBEDTLS_ERR_NET_SEND_FAILED;
             continue;
         }
-        if (errno == EPIPE || errno == ECONNRESET) return MBEDTLS_ERR_NET_CONN_RESET;
+        if (err == DRAGON_SOCK_EPIPE || err == DRAGON_SOCK_ECONNRESET)
+            return MBEDTLS_ERR_NET_CONN_RESET;
         return MBEDTLS_ERR_NET_SEND_FAILED;
     }
 }
@@ -88,10 +113,11 @@ static int dragon_tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
     DragonTlsConn* conn = (DragonTlsConn*)ctx;
     int fd = conn->fd;
     for (;;) {
-        ssize_t n = ::recv(fd, buf, len, 0);
+        intptr_t n = dragon_tls_raw_recv(fd, buf, len);
         if (n >= 0) return (int)n;
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        const int err = dragon_sock_errno();
+        if (err == DRAGON_SOCK_EINTR) continue;
+        if (err == DRAGON_SOCK_EAGAIN || err == DRAGON_SOCK_EWOULDBLOCK) {
             if (conn->read_deadline_ms > 0) {
                 int wr = dragon_io_wait_readable_timeout(fd, conn->read_deadline_ms);
                 if (wr != 0) {
@@ -103,7 +129,7 @@ static int dragon_tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
             }
             continue;
         }
-        if (errno == ECONNRESET) return MBEDTLS_ERR_NET_CONN_RESET;
+        if (err == DRAGON_SOCK_ECONNRESET) return MBEDTLS_ERR_NET_CONN_RESET;
         return MBEDTLS_ERR_NET_RECV_FAILED;
     }
 }

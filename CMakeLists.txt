@@ -117,6 +117,17 @@ llvm_map_components_to_libnames(LLVM_LIBS
     runtimedyld
 )
 
+# llvm_map_components_to_libnames always names the per-component static
+# archives. On Windows that hands BFD ld ~67 of them (libLLVMCore.a alone is
+# 12MB) and it dies with exit status 5 and no diagnostic. Where the LLVM
+# install ships the dylib, link that single import library instead. Scoped to
+# WIN32 so Linux and macOS keep statically linking LLVM into the shipped
+# binaries, which is what the .deb/.rpm/.tar.gz depend on.
+if(WIN32 AND LLVM_LINK_LLVM_DYLIB)
+    message(STATUS "Linking the LLVM dylib (libLLVM) instead of component archives")
+    set(LLVM_LIBS LLVM)
+endif()
+
 target_link_libraries(dragon_lib PUBLIC ${LLVM_LIBS})
 target_link_libraries(dragon_lib PUBLIC dragon_runtime)
 
@@ -162,6 +173,7 @@ add_library(dragon_runtime STATIC
     lib/Runtime/runtime_subprocess.cpp
     lib/Runtime/runtime_argon2id.cpp
     lib/Runtime/runtime_term.cpp
+    lib/Runtime/runtime_win_posix.cpp
     lib/ed25519/ed25519.c)
 target_include_directories(dragon_runtime PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Minicoro
@@ -183,6 +195,13 @@ endif()
 find_path(ZSTD_INCLUDE_DIR NAMES zstd.h REQUIRED)
 target_include_directories(dragon_runtime PRIVATE ${ZSTD_INCLUDE_DIR})
 target_link_libraries(dragon_runtime PRIVATE ZLIB::ZLIB ${ZSTD_LIBRARY})
+
+# Windows has no libc socket/entropy layer: sockets come from ws2_32 and
+# dragon_urandom calls BCryptGenRandom out of bcrypt.dll. PUBLIC so compiled
+# user programs, which link the runtime, inherit them too.
+if(WIN32)
+    target_link_libraries(dragon_runtime PUBLIC ws2_32 bcrypt)
+endif()
 
 set(DRAGON_RUNTIME_FOR_PROGRAMS dragon_runtime)
 if(DRAGON_ASAN)
@@ -263,6 +282,13 @@ if(APPLE)
     set(DRAGON_RUNTIME_WHOLE
         "LINKER:-force_load,$<TARGET_FILE:dragon_runtime>")
     set(DRAGON_EXPORT_DYNAMIC "LINKER:-export_dynamic")
+elseif(WIN32)
+    set(DRAGON_RUNTIME_WHOLE
+        "LINKER:--whole-archive,$<TARGET_FILE:dragon_runtime>,--no-whole-archive")
+    # PE has no -rdynamic (gcc rejects it outright on MinGW). --export-all-symbols
+    # is ld's equivalent: it puts the executable's symbols in its export table so
+    # runtime lookup can find them.
+    set(DRAGON_EXPORT_DYNAMIC "LINKER:--export-all-symbols")
 else()
     set(DRAGON_RUNTIME_WHOLE
         "LINKER:--whole-archive,$<TARGET_FILE:dragon_runtime>,--no-whole-archive")
