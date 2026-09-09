@@ -3,9 +3,17 @@
 
 from unittest import TestCase, main
 from collections import deque
+from threading import Lock, Thread
+import os
+import time
 
 extern "C" def dragon_gc_collect() -> int
 extern "C" def dragon_gc_set_threshold(n: int) -> None
+extern "C" def dragon_gc_collections() -> int
+extern "C" def dragon_gc_deferred_collections() -> int
+extern "C" def usleep(usec: intc) -> intc
+
+const _gc_carriers: int = os.setenv("DRAGON_WORKER_THREADS", "4", 0)
 
 
 def mk(n: int) -> Callable[[int], int] {
@@ -545,4 +553,313 @@ class ContainerClosureCycleTests(TestCase) {
 }
 
 
-main([ClosureRcTests(), ClosureEscapeTests(), SetCallableRcTests(), TupleCallableRcTests(), ClosureCycleTests(), DequeGcTests(), ContainerClosureCycleTests()])
+
+
+class GcItem {
+    name: str
+    n: int
+    def(name: str, n: int) {
+        self.name = name
+        self.n = n
+    }
+}
+
+
+class GcStore {
+    own lock: Lock
+
+    def() {
+        self.lock = Lock()
+        self.entries: dict[str, list[GcItem]] = {}
+    }
+
+    def replace(key: str) -> None {
+        lst: list[GcItem] = []
+        i: int = 0
+        while i < 10 {
+            lst.append(GcItem("name-" + str(i), i))
+            i = i + 1
+        }
+        with self.lock {
+            self.entries[key] = lst
+        }
+    }
+
+    def keys_seen() -> int {
+        n: int = 0
+        with self.lock {
+            n = len(self.entries)
+        }
+        return n
+    }
+}
+
+
+const GC_STORE: GcStore = GcStore()
+const GC_ROUNDS: int = 400
+
+
+def gc_replace_worker(key: str) -> int {
+    i: int = 0
+    while i < GC_ROUNDS {
+        GC_STORE.replace(key)
+        i = i + 1
+    }
+    return GC_ROUNDS
+}
+
+
+def gc_thread_worker_1() -> None { gc_replace_worker("t1") }
+def gc_thread_worker_2() -> None { gc_replace_worker("t2") }
+def gc_thread_worker_3() -> None { gc_replace_worker("t3") }
+def gc_thread_worker_4() -> None { gc_replace_worker("t4") }
+
+
+const GC_SPIN_ROUNDS: int = 40000000
+const GC_SHUFFLE_ROUNDS: int = 2000000
+GC_SHUFFLE: list[GcItem] = []
+
+
+def gc_fill_shuffle() -> None {
+    while len(GC_SHUFFLE) < 8 {
+        GC_SHUFFLE.append(GcItem("shuffle", 1))
+    }
+}
+
+
+def gc_spin_worker() -> int {
+    x: int = 0
+    i: int = 0
+    while i < GC_SPIN_ROUNDS {
+        x = x + GC_SHUFFLE[i % 8].n
+        i = i + 1
+    }
+    return x % 7
+}
+
+
+def gc_shuffle_worker() -> int {
+    i: int = 0
+    while i < GC_SHUFFLE_ROUNDS {
+        a: int = i % 8
+        b: int = (i + 1) % 8
+        held: GcItem = GC_SHUFFLE[a]
+        GC_SHUFFLE[a] = GC_SHUFFLE[b]
+        GC_SHUFFLE[b] = held
+        i = i + 1
+    }
+    return i
+}
+
+
+def gc_spin_thread() -> None { gc_spin_worker() }
+def gc_shuffle_thread() -> None { gc_shuffle_worker() }
+
+
+def gc_sleep_worker(key: str) -> int {
+    i: int = 0
+    while i < 40 {
+        time.sleep_ms(1)
+        GC_STORE.replace(key)
+        i = i + 1
+    }
+    return i
+}
+
+
+def gc_join_worker_1() -> int {
+    t: Thread = Thread(target=gc_thread_worker_1)
+    t.start()
+    t.join()
+    return 1
+}
+
+
+def gc_join_worker_2() -> int {
+    t: Thread = Thread(target=gc_thread_worker_2)
+    t.start()
+    t.join()
+    return 1
+}
+
+
+def gc_alloc_batch() -> int {
+    total: int = 0
+    i: int = 0
+    while i < 1000 {
+        d: dict[str, int] = {"k": i}
+        total = total + len(d)
+        i = i + 1
+    }
+    return total
+}
+
+
+def gc_extern_napper() -> int {
+    i: int = 0
+    while i < 40 {
+        usleep(2000)
+        i = i + 1
+    }
+    return i
+}
+
+class CollectorStopTheWorldTests(TestCase) {
+    def test_shared_store_replace_survives_concurrent_collection() {
+        dragon_gc_set_threshold(64)
+        w1: Task[int] = fire gc_replace_worker("k1")
+        w2: Task[int] = fire gc_replace_worker("k2")
+        w3: Task[int] = fire gc_replace_worker("k3")
+        w4: Task[int] = fire gc_replace_worker("k4")
+        w5: Task[int] = fire gc_replace_worker("k5")
+        w6: Task[int] = fire gc_replace_worker("k6")
+        w7: Task[int] = fire gc_replace_worker("k7")
+        w8: Task[int] = fire gc_replace_worker("k8")
+        done: int = w1.join()
+        done = done + w2.join()
+        done = done + w3.join()
+        done = done + w4.join()
+        done = done + w5.join()
+        done = done + w6.join()
+        done = done + w7.join()
+        done = done + w8.join()
+        dragon_gc_set_threshold(700)
+        self.assertEqual(done, GC_ROUNDS * 8)
+        self.assertTrue(GC_STORE.keys_seen() >= 8)
+    }
+
+    def test_os_threads_replace_survives_concurrent_collection() {
+        dragon_gc_set_threshold(64)
+        t1: Thread = Thread(target=gc_thread_worker_1)
+        t2: Thread = Thread(target=gc_thread_worker_2)
+        t3: Thread = Thread(target=gc_thread_worker_3)
+        t4: Thread = Thread(target=gc_thread_worker_4)
+        t1.start()
+        t2.start()
+        t3.start()
+        t4.start()
+        t1.join()
+        t2.join()
+        t3.join()
+        t4.join()
+        dragon_gc_set_threshold(700)
+        self.assertTrue(GC_STORE.keys_seen() >= 4)
+    }
+
+    def test_non_allocating_spin_defers_collection_then_recovers() {
+        gc_fill_shuffle()
+        before_deferred: int = dragon_gc_deferred_collections()
+        dragon_gc_set_threshold(64)
+        spin: Thread = Thread(target=gc_spin_thread)
+        spin.start()
+        a1: Task[int] = fire gc_replace_worker("s1")
+        a2: Task[int] = fire gc_replace_worker("s2")
+        a1.join()
+        a2.join()
+        spin.join()
+        dragon_gc_set_threshold(700)
+        self.assertTrue(dragon_gc_deferred_collections() > before_deferred)
+        before_collections: int = dragon_gc_collections()
+        dragon_gc_collect()
+        self.assertTrue(dragon_gc_collections() > before_collections)
+    }
+
+    def test_pointer_shuffle_without_allocation_defers_collection() {
+        gc_fill_shuffle()
+        before_deferred: int = dragon_gc_deferred_collections()
+        dragon_gc_set_threshold(64)
+        sh: Thread = Thread(target=gc_shuffle_thread)
+        sh.start()
+        a1: Task[int] = fire gc_replace_worker("h1")
+        a2: Task[int] = fire gc_replace_worker("h2")
+        a1.join()
+        a2.join()
+        sh.join()
+        dragon_gc_set_threshold(700)
+        names: int = 0
+        i: int = 0
+        while i < 8 {
+            names = names + len(GC_SHUFFLE[i].name)
+            i = i + 1
+        }
+        self.assertEqual(names, 56)
+        self.assertTrue(dragon_gc_deferred_collections() > before_deferred)
+        before_collections: int = dragon_gc_collections()
+        dragon_gc_collect()
+        self.assertTrue(dragon_gc_collections() > before_collections)
+    }
+
+    def test_deferred_attempts_back_off_instead_of_stalling_every_allocation() {
+        gc_fill_shuffle()
+        before_deferred: int = dragon_gc_deferred_collections()
+        dragon_gc_set_threshold(64)
+        spin: Thread = Thread(target=gc_spin_thread)
+        spin.start()
+        started: float = time.monotonic()
+        batch: Task[int] = fire gc_alloc_batch()
+        allocated: int = batch.join()
+        elapsed: float = time.monotonic() - started
+        spin.join()
+        dragon_gc_set_threshold(700)
+        attempts: int = dragon_gc_deferred_collections() - before_deferred
+        self.assertEqual(allocated, 1000)
+        self.assertTrue(attempts > 0)
+        self.assertTrue(attempts <= 10)
+        self.assertTrue(elapsed < 2.0)
+    }
+
+    def test_green_park_inside_an_extern_call_leaves_its_carrier_running() {
+        dragon_gc_set_threshold(64)
+        s1: Task[int] = fire gc_sleep_worker("z1")
+        s2: Task[int] = fire gc_sleep_worker("z2")
+        c1: Task[int] = fire gc_replace_worker("z3")
+        c2: Task[int] = fire gc_replace_worker("z4")
+        c3: Task[int] = fire gc_replace_worker("z5")
+        c4: Task[int] = fire gc_replace_worker("z6")
+        slept: int = s1.join()
+        slept = slept + s2.join()
+        churned: int = c1.join()
+        churned = churned + c2.join()
+        churned = churned + c3.join()
+        churned = churned + c4.join()
+        dragon_gc_set_threshold(700)
+        self.assertEqual(slept, 80)
+        self.assertEqual(churned, GC_ROUNDS * 4)
+    }
+
+    def test_green_thread_joining_os_thread_stays_running_on_its_carrier() {
+        dragon_gc_set_threshold(64)
+        j1: Task[int] = fire gc_join_worker_1()
+        j2: Task[int] = fire gc_join_worker_2()
+        c1: Task[int] = fire gc_replace_worker("j1")
+        c2: Task[int] = fire gc_replace_worker("j2")
+        c3: Task[int] = fire gc_replace_worker("j3")
+        c4: Task[int] = fire gc_replace_worker("j4")
+        joined: int = j1.join()
+        joined = joined + j2.join()
+        churned: int = c1.join()
+        churned = churned + c2.join()
+        churned = churned + c3.join()
+        churned = churned + c4.join()
+        dragon_gc_set_threshold(700)
+        self.assertEqual(joined, 2)
+        self.assertEqual(churned, GC_ROUNDS * 4)
+    }
+
+    def test_blocked_extern_call_does_not_stall_collection() {
+        before_collections: int = dragon_gc_collections()
+        dragon_gc_set_threshold(64)
+        nap: Task[int] = fire gc_extern_napper()
+        a1: Task[int] = fire gc_replace_worker("e1")
+        a2: Task[int] = fire gc_replace_worker("e2")
+        a1.join()
+        a2.join()
+        self.assertEqual(nap.join(), 40)
+        dragon_gc_set_threshold(700)
+        self.assertTrue(dragon_gc_collections() > before_collections)
+    }
+}
+
+
+main([ClosureRcTests(), ClosureEscapeTests(), SetCallableRcTests(), TupleCallableRcTests(), ClosureCycleTests(), DequeGcTests(), ContainerClosureCycleTests(),
+      CollectorStopTheWorldTests()])

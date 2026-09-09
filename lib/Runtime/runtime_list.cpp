@@ -63,6 +63,7 @@ DragonList* dragon_list_new(int64_t capacity) {
 }
 
 void dragon_list_append(DragonList* list, int64_t value) {
+    dragon_gc_assert_mutable("list mutate");
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
@@ -93,6 +94,7 @@ int64_t dragon_list_get(DragonList* list, int64_t index) {
 }
 
 void dragon_list_set(DragonList* list, int64_t index, int64_t value) {
+    dragon_gc_assert_mutable("list mutate");
     if (index < 0) index += list->size;
     if (index < 0 || index >= list->size) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
@@ -694,6 +696,7 @@ void* dragon_list_get_ptr(DragonListPtr* list, int64_t index) {
 }
 
 void dragon_list_set_ptr(DragonListPtr* list, int64_t index, void* value) {
+    dragon_gc_assert_mutable("list mutate");
     if (index < 0) index += list->size;
     if (index < 0 || index >= list->size) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
@@ -720,6 +723,7 @@ void dragon_list_set_ptr(DragonListPtr* list, int64_t index, void* value) {
 }
 
 void dragon_list_append_ptr(DragonListPtr* list, void* value) {
+    dragon_gc_assert_mutable("list mutate");
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;

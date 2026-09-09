@@ -8,6 +8,10 @@
 #define DRAGON_DBG(...) do { if (getenv("DRAGON_UI_DEBUG")) { fprintf(stderr, "[shell] " __VA_ARGS__); fflush(stderr); } } while (0)
 
 extern "C" const char* dragon_string_dup_cstr(const char* s);
+extern "C" void dragon_foreign_enter(void);
+extern "C" void dragon_foreign_exit(void);
+extern "C" int64_t dragon_safe_region_suspend(void);
+extern "C" void dragon_safe_region_resume(int64_t token);
 
 extern "C" char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
@@ -130,7 +134,11 @@ static void dragon__stop_app(void) {
         : [NSString stringWithFormat:@"%@", message.body];
     const char* utf8 = [body UTF8String];
     DRAGON_DBG("script-message: '%s' handler=%p\n", utf8 ? utf8 : "(null)", (void*) self.handler);
-    if (self.handler && utf8) self.handler(dragon_string_dup_cstr(utf8));
+    if (self.handler && utf8) {
+        const int64_t region = dragon_safe_region_suspend();
+        self.handler(dragon_string_dup_cstr(utf8));
+        dragon_safe_region_resume(region);
+    }
 }
 
 - (void)webView:(WKWebView*)webView startURLSchemeTask:(id<WKURLSchemeTask>)task {
@@ -344,14 +352,18 @@ const char* dragon_webview_pick_folder(const char* title, const char* start_dir)
 }
 
 void dragon_webview_run(void) {
+    dragon_foreign_enter();
     [NSApp run];
+    dragon_foreign_exit();
 }
 
 void dragon_webview_run_timeout(int ms) {
     DRAGON_DBG("run_timeout: entering NSApp run for %d ms\n", ms);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) ms * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{ dragon__stop_app(); });
+    dragon_foreign_enter();
     [NSApp run];
+    dragon_foreign_exit();
     DRAGON_DBG("run_timeout: NSApp run returned\n");
 }
 

@@ -803,6 +803,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(voidType, {}, false));
     getOrDeclareRuntime("dragon_extern_exit",
         llvm::FunctionType::get(voidType, {}, false));
+    getOrDeclareRuntime("dragon_foreign_enter",
+        llvm::FunctionType::get(voidType, {}, false));
+    getOrDeclareRuntime("dragon_foreign_exit",
+        llvm::FunctionType::get(voidType, {}, false));
     getOrDeclareRuntime("dragon_lock_new",
         llvm::FunctionType::get(i8PtrType, {}, false));
     getOrDeclareRuntime("dragon_lock_acquire",

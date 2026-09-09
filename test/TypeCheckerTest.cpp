@@ -1999,6 +1999,10 @@ TEST(TypeCheckerTest, IntcFieldRejected) {
     EXPECT_TRUE(checkHasErrors(code("intc_field_rejected")));
 }
 
+TEST(TypeCheckerTest, ExternFromLibCannotClaimDragonPrefix) {
+    EXPECT_TRUE(checkHasErrors(code("extern_from_lib_cannot_claim_dragon_prefix")));
+}
+
 TEST(TypeCheckerTest, IntcParamInDragonFnRejected) {
     EXPECT_TRUE(checkHasErrors(code("intc_param_in_dragon_fn_rejected")));
 }

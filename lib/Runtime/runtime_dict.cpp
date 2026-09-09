@@ -165,6 +165,7 @@ static inline void dragon_dict_retain_key(const DragonDict* d, const char* key) 
 }
 
 void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64_t tag) {
+    dragon_gc_assert_mutable("dict set");
     bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     if (d->key_kind != DRAGON_DICT_KEY_OBJ) d->key_kind = DRAGON_DICT_KEY_STR;
     if (value && dragon_value_tag_is_traceable((int8_t)tag) &&

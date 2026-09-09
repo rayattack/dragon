@@ -4138,3 +4138,16 @@ print(hash(b"abc"))
 print(hash(None))
 print(hash(Weighed(3)))
 ```
+
+#### :extern_from_lib_cannot_claim_dragon_prefix
+
+A library symbol cannot be one of ours. `dragon_` is the runtime's reserved
+namespace: the compiler treats a callee with that prefix as runtime code and
+keeps its carrier running, so a foreign symbol wearing the prefix would be
+counted stopped while it runs.
+
+```dr
+extern "C" from "mylib" {
+    def dragon_list_append(l: ptr, v: int)
+}
+```

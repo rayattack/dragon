@@ -2352,12 +2352,16 @@ llvm::Type* CodeGen::Impl::inferExprLLVMType(Expr* expr) {
 llvm::Value* CodeGen::Impl::emitExternAwareCall(
         llvm::Function* func, const std::vector<llvm::Value*>& args,
         const std::string& name) {
-    const bool isExtern = externDeclaredFuncs.count(func->getName().str()) > 0;
-    if (isExtern) builder->CreateCall(runtimeFuncs["dragon_extern_enter"], {});
+    const std::string symbol = func->getName().str();
+    const bool isExtern = externDeclaredFuncs.count(symbol) > 0;
+    const bool isRuntimeCallee = symbol.rfind("dragon_", 0) == 0;
+    const char* enterFn = isRuntimeCallee ? "dragon_extern_enter" : "dragon_foreign_enter";
+    const char* exitFn = isRuntimeCallee ? "dragon_extern_exit" : "dragon_foreign_exit";
+    if (isExtern) builder->CreateCall(runtimeFuncs[enterFn], {});
     llvm::Value* call = (func->getReturnType() == voidType || name.empty())
         ? builder->CreateCall(func, args)
         : builder->CreateCall(func, args, name);
-    if (isExtern) builder->CreateCall(runtimeFuncs["dragon_extern_exit"], {});
+    if (isExtern) builder->CreateCall(runtimeFuncs[exitFn], {});
     return call;
 }
 

@@ -400,22 +400,30 @@ void dragon_incref_str(const char* s) {
     ds->header.refcount++;
 }
 
+static void dragon_str_free_now(DragonString* ds) {
+    int collecting = __atomic_load_n(&gc_collecting, __ATOMIC_ACQUIRE);
+    if (!collecting || ds->header.gc_track_idx < 0) free(ds);
+}
+
+static __attribute__((noinline)) void dragon_str_free_at_safepoint(DragonString* ds) {
+    dragon_gc_safepoint();
+    dragon_str_free_now(ds);
+}
+
 void dragon_decref_str(const char* s) {
     if (!s) return;
     if (!dragon_is_heap_string(s)) return;
     DragonString* ds = dragon_string_from_data(s);
     if (dragon_refcount_load(&ds->header) >= DRAGON_IMMORTAL_REFCOUNT) return;
     if (dragon_gc_flags_load(&ds->header) & GC_FLAG_SHARED) {
-        if (__atomic_sub_fetch(&ds->header.refcount, 1, __ATOMIC_ACQ_REL) == 0) {
-            int collecting = __atomic_load_n(&gc_collecting, __ATOMIC_ACQUIRE);
-            if (!collecting || ds->header.gc_track_idx < 0) free(ds);
-        }
+        if (__atomic_sub_fetch(&ds->header.refcount, 1, __ATOMIC_ACQ_REL) != 0) return;
+        if (dragon_gc_stop_pending()) dragon_str_free_at_safepoint(ds);
+        else dragon_str_free_now(ds);
         return;
     }
-    if (--ds->header.refcount == 0) {
-        int collecting = __atomic_load_n(&gc_collecting, __ATOMIC_ACQUIRE);
-        if (!collecting || ds->header.gc_track_idx < 0) free(ds);
-    }
+    if (--ds->header.refcount != 0) return;
+    if (dragon_gc_stop_pending()) dragon_str_free_at_safepoint(ds);
+    else dragon_str_free_now(ds);
 }
 
 void dragon_incref_str_atomic(const char* s) {

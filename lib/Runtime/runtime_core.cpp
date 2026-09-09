@@ -1,4 +1,6 @@
 #include "runtime_internal.h"
+#include <errno.h>
+#include <time.h>
 
 thread_local const void* __dragon_walk_seen[DRAGON_WALK_MAX];
 thread_local int __dragon_walk_depth = 0;
@@ -60,6 +62,242 @@ int gc_concurrent = 0;
 
 void dragon_gc_go_concurrent(void) {
     __atomic_store_n(&gc_concurrent, 1, __ATOMIC_RELEASE);
+}
+
+int gc_stop_requested = 0;
+__thread DragonMutator* __dragon_mutator = nullptr;
+
+static pthread_mutex_t gc_stop_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  gc_stop_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t  gc_safe_cond = PTHREAD_COND_INITIALIZER;
+static DragonMutator*  gc_mutator_list = nullptr;
+
+static int64_t gc_stat_collections = 0;
+static int64_t gc_stat_deferred = 0;
+static int64_t gc_stat_max_pause_ns = 0;
+static int64_t gc_stat_last_pause_ns = 0;
+
+static const int64_t GC_STOP_WAIT_NS = 20000000;
+
+void dragon_gc_mutator_register(void) {
+    if (__dragon_mutator) return;
+    DragonMutator* m = (DragonMutator*)dragon_xcalloc_n(1, sizeof(DragonMutator));
+    m->state = DRAGON_MUTATOR_RUNNING;
+    pthread_mutex_lock(&gc_stop_lock);
+    while (gc_stop_requested) pthread_cond_wait(&gc_stop_cond, &gc_stop_lock);
+    m->next = gc_mutator_list;
+    gc_mutator_list = m;
+    pthread_mutex_unlock(&gc_stop_lock);
+    __dragon_mutator = m;
+}
+
+void dragon_gc_mutator_register_foreign(void) {
+    if (__dragon_mutator) return;
+    dragon_gc_go_concurrent();
+    DragonMutator* m = (DragonMutator*)dragon_xcalloc_n(1, sizeof(DragonMutator));
+    m->state = DRAGON_MUTATOR_SAFE;
+    m->safe_depth = 1;
+    pthread_mutex_lock(&gc_stop_lock);
+    m->next = gc_mutator_list;
+    gc_mutator_list = m;
+    pthread_mutex_unlock(&gc_stop_lock);
+    __dragon_mutator = m;
+}
+
+void dragon_gc_mutator_unregister(void) {
+    DragonMutator* m = __dragon_mutator;
+    if (!m) return;
+    __dragon_mutator = nullptr;
+    pthread_mutex_lock(&gc_stop_lock);
+    DragonMutator** link = &gc_mutator_list;
+    while (*link && *link != m) link = &(*link)->next;
+    if (*link) *link = m->next;
+    pthread_cond_signal(&gc_safe_cond);
+    pthread_mutex_unlock(&gc_stop_lock);
+    free(m);
+}
+
+__attribute__((constructor))
+static void dragon_gc_register_main_thread(void) {
+#if !defined(__APPLE__) && !defined(_WIN32)
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&gc_safe_cond, &attr);
+    pthread_condattr_destroy(&attr);
+#endif
+    dragon_gc_mutator_register();
+}
+
+void dragon_fatal_unregistered_mutation(const char* where) {
+    fprintf(stderr,
+        "DRAGON FATAL: unregistered thread mutated the object graph (%s)\n"
+        "\n"
+        "A thread the runtime never created ran Dragon code without going\n"
+        "through dragon_safe_region_suspend, so the collector cannot stop it.\n"
+        "Wrap every C-to-Dragon callback with the suspend/resume pair.\n",
+        where);
+    fflush(stderr);
+    abort();
+}
+
+void dragon_fatal_mutation_in_safe_region(const char* where) {
+    fprintf(stderr,
+        "DRAGON FATAL: container mutation inside a safe region (%s)\n"
+        "\n"
+        "This carrier is counted stopped by the collector and mutated the\n"
+        "object graph anyway. A SAFE region may only wrap foreign code or a\n"
+        "blocking call that touches no Dragon object.\n",
+        where);
+    fflush(stderr);
+    abort();
+}
+
+void dragon_fatal_safe_region_yield(const char* where) {
+    fprintf(stderr,
+        "DRAGON FATAL: safe region spans a yield (%s)\n"
+        "\n"
+        "A carrier resumed Dragon code while the collector counted it as\n"
+        "stopped. A runtime safe region must never span an mco_yield: the\n"
+        "depth lives on the carrier, the green thread migrates.\n",
+        where);
+    fflush(stderr);
+    abort();
+}
+
+void dragon_gc_safepoint(void) {
+    DragonMutator* m = __dragon_mutator;
+    if (!m || m->is_collector || m->safe_depth) return;
+    pthread_mutex_lock(&gc_stop_lock);
+    if (gc_stop_requested) {
+        __atomic_store_n(&m->state, DRAGON_MUTATOR_HELD, __ATOMIC_RELEASE);
+        pthread_cond_signal(&gc_safe_cond);
+        while (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == DRAGON_MUTATOR_HELD)
+            pthread_cond_wait(&gc_stop_cond, &gc_stop_lock);
+        __atomic_store_n(&m->state, DRAGON_MUTATOR_RUNNING, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&gc_stop_lock);
+}
+
+void dragon_gc_safe_begin_slow(DragonMutator* m) {
+    (void)m;
+    pthread_mutex_lock(&gc_stop_lock);
+    pthread_cond_signal(&gc_safe_cond);
+    pthread_mutex_unlock(&gc_stop_lock);
+}
+
+void dragon_gc_safe_end_slow(DragonMutator* m) {
+    pthread_mutex_lock(&gc_stop_lock);
+    for (;;) {
+        int32_t st = __atomic_load_n(&m->state, __ATOMIC_ACQUIRE);
+        if (st == DRAGON_MUTATOR_HELD) {
+            pthread_cond_wait(&gc_stop_cond, &gc_stop_lock);
+            continue;
+        }
+        if (!gc_stop_requested || m->is_collector) break;
+        __atomic_store_n(&m->state, DRAGON_MUTATOR_HELD, __ATOMIC_RELEASE);
+        pthread_cond_signal(&gc_safe_cond);
+    }
+    __atomic_store_n(&m->state, DRAGON_MUTATOR_RUNNING, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&gc_stop_lock);
+}
+
+static int gc_claim_stopped(DragonMutator* self) {
+    int all_stopped = 1;
+    for (DragonMutator* m = gc_mutator_list; m; m = m->next) {
+        if (m == self) continue;
+        int32_t st = __atomic_load_n(&m->state, __ATOMIC_ACQUIRE);
+        if (st == DRAGON_MUTATOR_HELD) continue;
+        if (st == DRAGON_MUTATOR_SAFE &&
+            __atomic_compare_exchange_n(&m->state, &st, DRAGON_MUTATOR_HELD, false,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            continue;
+        all_stopped = 0;
+    }
+    return all_stopped;
+}
+
+static void gc_release_world(DragonMutator* self) {
+    __atomic_store_n(&gc_stop_requested, 0, __ATOMIC_SEQ_CST);
+    self->is_collector = 0;
+    for (DragonMutator* m = gc_mutator_list; m; m = m->next) {
+        if (__atomic_load_n(&m->state, __ATOMIC_ACQUIRE) == DRAGON_MUTATOR_HELD)
+            __atomic_store_n(&m->state, DRAGON_MUTATOR_SAFE, __ATOMIC_RELEASE);
+    }
+    pthread_cond_broadcast(&gc_stop_cond);
+}
+
+static void gc_retune_threshold(int64_t collected) {
+    int32_t live = gc_tracked_size;
+    int64_t next = (collected == 0) ? (int64_t)gc_threshold * 2 : GC_BASE_THRESHOLD;
+    int64_t cap = (int64_t)GC_BASE_THRESHOLD + (int64_t)live * 8;
+    if (next > cap) next = cap;
+    if (next < GC_BASE_THRESHOLD) next = GC_BASE_THRESHOLD;
+    if (next > INT32_MAX) next = INT32_MAX;
+    __atomic_store_n(&gc_threshold, (int32_t)next, __ATOMIC_RELAXED);
+}
+
+static int64_t gc_now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    return (int64_t)t.tv_sec * 1000000000LL + (int64_t)t.tv_nsec;
+}
+
+static int gc_stop_the_world(DragonMutator* self) {
+    struct timespec deadline;
+#if !defined(__APPLE__) && !defined(_WIN32)
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+#else
+    clock_gettime(CLOCK_REALTIME, &deadline);
+#endif
+    deadline.tv_nsec += (long)GC_STOP_WAIT_NS;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&gc_stop_lock);
+    while (gc_stop_requested) pthread_cond_wait(&gc_stop_cond, &gc_stop_lock);
+    __atomic_store_n(&gc_stop_requested, 1, __ATOMIC_SEQ_CST);
+    self->is_collector = 1;
+
+    int stopped = gc_claim_stopped(self);
+    while (!stopped) {
+        int rc = pthread_cond_timedwait(&gc_safe_cond, &gc_stop_lock, &deadline);
+        stopped = gc_claim_stopped(self);
+        if (!stopped && rc == ETIMEDOUT) break;
+    }
+    if (!stopped) {
+        gc_release_world(self);
+        gc_stat_deferred++;
+    }
+    pthread_mutex_unlock(&gc_stop_lock);
+    return stopped;
+}
+
+static void gc_resume_the_world(DragonMutator* self, int64_t pause_ns) {
+    pthread_mutex_lock(&gc_stop_lock);
+    gc_release_world(self);
+    gc_stat_collections++;
+    gc_stat_last_pause_ns = pause_ns;
+    if (pause_ns > gc_stat_max_pause_ns) gc_stat_max_pause_ns = pause_ns;
+    pthread_mutex_unlock(&gc_stop_lock);
+}
+
+int64_t dragon_gc_collections() {
+    return __atomic_load_n(&gc_stat_collections, __ATOMIC_RELAXED);
+}
+
+int64_t dragon_gc_deferred_collections() {
+    return __atomic_load_n(&gc_stat_deferred, __ATOMIC_RELAXED);
+}
+
+int64_t dragon_gc_max_pause_ns() {
+    return __atomic_load_n(&gc_stat_max_pause_ns, __ATOMIC_RELAXED);
+}
+
+int64_t dragon_gc_last_pause_ns() {
+    return __atomic_load_n(&gc_stat_last_pause_ns, __ATOMIC_RELAXED);
 }
 
 void dragon_fatal_concurrent_mutation(const char* kind) {
@@ -137,6 +375,7 @@ void dragon_env_dealloc(DragonEnv* env);
 
 static void dragon_dealloc(void* obj) {
     if (!obj) return;
+    dragon_gc_assert_mutable("dealloc");
     DragonObjectHeader* h = (DragonObjectHeader*)obj;
     if (h->gc_flags & GC_FLAG_TRACKED) dragon_gc_untrack(obj);
     switch (h->type_tag) {
@@ -209,7 +448,9 @@ void dragon_decref(void* obj) {
         // schedule dealloc concurrently -> double-free). Serialize through gc_lock: either we decrement+dealloc under the lock, or the lock blocks us until GC finishes and clears TRACKED.
         bool tracked = (h->gc_flags & GC_FLAG_TRACKED) != 0;
         if (!tracked) {
-            if (--h->refcount == 0) dragon_dealloc(obj);
+            if (--h->refcount != 0) return;
+            dragon_gc_poll();
+            dragon_dealloc(obj);
             return;
         }
         // Cycle-collector ownership guard: the collector marks unreachable objects IN_TO_FREE
@@ -233,6 +474,7 @@ void dragon_decref(void* obj) {
         if (--h->refcount == 0) {
             gc_tracked_remove(h);
             pthread_mutex_unlock(&gc_lock);
+            dragon_gc_poll();
             dragon_dealloc(obj);
             return;
         }
@@ -280,6 +522,7 @@ void dragon_decref_atomic(void* obj) {
                 h->gc_track_idx = -1;
                 pthread_mutex_unlock(&gc_lock);
             }
+            dragon_gc_poll();
             int saved = __dragon_atomic_context;
             __dragon_atomic_context = 1;
             dragon_dealloc(obj);
@@ -297,6 +540,7 @@ int64_t dragon_is_immortal_obj(void* obj) {
 }
 
 static inline void gc_tracked_append(DragonObjectHeader* h, void* obj) {
+    dragon_gc_assert_mutable("gc track");
     if (gc_tracked_size >= gc_tracked_cap) {
         int64_t new_cap = gc_tracked_cap ? (int64_t)gc_tracked_cap * 2 : 256;
         if (new_cap > INT32_MAX) new_cap = INT32_MAX;
@@ -357,6 +601,7 @@ void dragon_gc_track(void* obj) {
     }
     gc_tracked_append(h, obj);
     pthread_mutex_unlock(&gc_lock);
+    dragon_gc_poll();
     dragon_gc_age_one();
 }
 
@@ -724,8 +969,30 @@ static void gc_visit_reachable(void* child, void* arg) {
 }
 
 int64_t dragon_gc_collect() {
+    DragonMutator* stw_self = nullptr;
+    if (__atomic_load_n(&gc_concurrent, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_lock(&gc_lock);
+        if (gc_in_progress) {
+            pthread_mutex_unlock(&gc_lock);
+            return 0;
+        }
+        gc_in_progress = 1;
+        pthread_mutex_unlock(&gc_lock);
+        dragon_gc_mutator_register();
+        stw_self = __dragon_mutator;
+        if (!gc_stop_the_world(stw_self)) {
+            pthread_mutex_lock(&gc_lock);
+            __atomic_store_n(&gc_alloc_counter, 0, __ATOMIC_RELAXED);
+            gc_retune_threshold(0);
+            gc_in_progress = 0;
+            pthread_mutex_unlock(&gc_lock);
+            return 0;
+        }
+    }
+    const int64_t pause_start = gc_now_ns();
+
     pthread_mutex_lock(&gc_lock);
-    if (gc_in_progress) {
+    if (!stw_self && gc_in_progress) {
         pthread_mutex_unlock(&gc_lock);
         return 0;
     }
@@ -736,6 +1003,7 @@ int64_t dragon_gc_collect() {
     if (n == 0) {
         gc_in_progress = 0;
         pthread_mutex_unlock(&gc_lock);
+        if (stw_self) gc_resume_the_world(stw_self, gc_now_ns() - pause_start);
         return 0;
     }
 
@@ -811,6 +1079,8 @@ int64_t dragon_gc_collect() {
     // allocations need gc_lock (gc_in_progress still blocks re-entering collect). gc_collecting stays 1 across the loop so mutator decrefs on STILL-TRACKED objects skip their own dealloc (no double-free), reset to 0 only after all to_free objects are freed.
     pthread_mutex_unlock(&gc_lock);
 
+    if (stw_self) gc_resume_the_world(stw_self, gc_now_ns() - pause_start);
+
     for (int32_t i = 0; i < to_free_count; i++) {
         dragon_dealloc(to_free[i]);
     }
@@ -821,20 +1091,7 @@ int64_t dragon_gc_collect() {
     free(queue);
 
     pthread_mutex_lock(&gc_lock);
-    {
-        int32_t live = gc_tracked_size;
-        int64_t next;
-        if (collected == 0) {
-            next = (int64_t)gc_threshold * 2;
-        } else {
-            next = GC_BASE_THRESHOLD;
-        }
-        int64_t cap = (int64_t)GC_BASE_THRESHOLD + (int64_t)live * 8;
-        if (next > cap) next = cap;
-        if (next < GC_BASE_THRESHOLD) next = GC_BASE_THRESHOLD;
-        if (next > 2147483647LL) next = 2147483647LL;
-        __atomic_store_n(&gc_threshold, (int32_t)next, __ATOMIC_RELAXED);
-    }
+    gc_retune_threshold(collected);
     __atomic_store_n(&gc_collecting, 0, __ATOMIC_RELEASE);
     gc_in_progress = 0;
     pthread_mutex_unlock(&gc_lock);

@@ -32,7 +32,7 @@ DragonBytes* dragon_read_file_bytes(const char* path) {
     std::rewind(f);
     uint8_t* buf = (uint8_t*)dragon_malloc_nullable(size > 0 ? (size_t)size : 1);
     if (!buf) { std::fclose(f); dragon_raise_oom(); }
-    size_t n = std::fread(buf, 1, (size_t)size, f);
+    size_t n = dragon_blocking_fread(buf, 1, (size_t)size, f);
     std::fclose(f);
     if ((long)n != size) {
         std::free(buf);
@@ -59,7 +59,7 @@ int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
     }
     int64_t n = 0;
     if (data && data->len > 0) {
-        size_t w = std::fwrite(data->data, 1, (size_t)data->len, f);
+        size_t w = dragon_blocking_fwrite(data->data, 1, (size_t)data->len, f);
         n = (int64_t)w;
         if ((int64_t)w != data->len) {
             std::fclose(f);
@@ -77,7 +77,7 @@ int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
 int64_t dragon_file_write_bytes(void* handle, DragonBytes* data) {
     FILE* f = (FILE*)handle;
     if (!f || !data || data->len <= 0) return 0;
-    size_t w = std::fwrite(data->data, 1, (size_t)data->len, f);
+    size_t w = dragon_blocking_fwrite(data->data, 1, (size_t)data->len, f);
     return (int64_t)w;
 }
 
@@ -85,7 +85,7 @@ const char* dragon_file_read_text(void* handle, int64_t size) {
     FILE* f = (FILE*)handle;
     if (!f || size <= 0) return dragon_string_alloc("", 0);
     uint8_t* buf = (uint8_t*)dragon_xmalloc((size_t)size + 4);
-    size_t n = std::fread(buf, 1, (size_t)size, f);
+    size_t n = dragon_blocking_fread(buf, 1, (size_t)size, f);
     if (n > 0) {
         size_t i = n, cont = 0;
         while (i > 0 && (buf[i - 1] & 0xC0) == 0x80 && cont < 3) { i--; cont++; }
@@ -116,7 +116,7 @@ int64_t dragon_file_write_text(void* handle, const char* s) {
     int64_t blen = 0;
     char* enc = dragon_str_to_utf8_alloc(s, &blen);
     const char* src = enc ? enc : s;
-    size_t w = std::fwrite(src, 1, (size_t)blen, f);
+    size_t w = dragon_blocking_fwrite(src, 1, (size_t)blen, f);
     if (enc) std::free(enc);
     return (int64_t)w;
 }

@@ -19,11 +19,14 @@ import ui
 from html import HTML
 from ui import Signal, bind_text, bind_attr, bind_html, bind_show
 from unittest import TestCase, main
+from threading import Lock
+import time
 
 extern "C" def probe_js_count() -> int
 extern "C" def probe_js_at(i: int) -> str
 extern "C" def probe_js_reset()
 extern "C" def probe_dispatch(msg: str)
+extern "C" def probe_dispatch_from_foreign_thread(msg: str, rounds: int) -> int
 
 const HOSTILE_TITLE: str = "Bob & \"Alice\" </script>\n\\x"
 const HOSTILE_TITLE_JSON: str = "\"Bob & \\\"Alice\\\" </script>\\n\\\\x\""
@@ -34,6 +37,8 @@ const NODE_ID_SLOT: str = "$id"
 const OUT_OF_RANGE_CALLBACK: str = "99999"
 const OUT_OF_RANGE_CALLBACK_TOO_LONG_TO_FIT_INLINE: str = "0000000000000000000000000000000000099999"
 const FIRST_CALLBACK: str = "0"
+const SECOND_CALLBACK: str = "1"
+const THIRD_CALLBACK: str = "2"
 
 text_source: Signal[str] = Signal("initial")
 attr_source: Signal[bool] = Signal(false)
@@ -81,6 +86,48 @@ def note_click() -> None {
 }
 
 
+napped: list[str] = []
+nap_lock: Lock = Lock()
+
+
+def note_nap() -> None {
+    time.sleep_ms(1)
+    with nap_lock {
+        napped.append("nap")
+    }
+}
+
+
+foreign_hits: list[str] = []
+foreign_lock: Lock = Lock()
+
+
+def note_foreign() -> None {
+    parts: list[str] = []
+    i: int = 0
+    while i < 4 {
+        parts.append("row-" + str(i))
+        i = i + 1
+    }
+    with foreign_lock {
+        foreign_hits.append(str(len(parts)))
+    }
+}
+
+
+def churn_for_foreign(key: str) -> int {
+    i: int = 0
+    while i < 400 {
+        rows: list[list[int]] = [[i], [i + 1], [i + 2]]
+        with foreign_lock {
+            foreign_rows[key] = rows
+        }
+        i = i + 1
+    }
+    return i
+}
+
+
 text_node: int = bind_text(render_text)
 attr_node: int = bind_attr("class", render_class)
 html_node: int = bind_html(render_rows)
@@ -89,6 +136,15 @@ default_show_node: int = bind_show(render_default_shown)
 hostile_name_node: int = bind_attr(HOSTILE_ATTR_NAME, render_attr_name_value)
 
 handlers: HTML = template[HTML] {<button onclick="!{note_click}">go</button>}
+nap_handlers: HTML = template[HTML] {<button onclick="!{note_nap}">nap</button>}
+foreign_handlers: HTML = template[HTML] {<button onclick="!{note_foreign}">f</button>}
+foreign_rows: dict[str, list[list[int]]] = {}
+
+
+def dispatch_nap_in_fire() -> int {
+    probe_dispatch(SECOND_CALLBACK)
+    return 1
+}
 
 auto_source: Signal[int] = Signal(0)
 auto_view: HTML = template[HTML] {<p>!{auto_source()}</p>}
@@ -295,6 +351,44 @@ class HandlerExtractionTests(TestCase) {
 }
 
 
+class ForeignCallbackRegionTests(TestCase) {
+    """probe_dispatch is a foreign callee, so calling it marks this carrier
+    SAFE; the shim suspends that region around the Dragon handler. The handler
+    parks on a sleep and mutates a shared list, both of which would be a
+    stopped-carrier mutation if the suspend were missing."""
+
+    def test_handler_that_parks_and_mutates_inside_a_foreign_callback() {
+        before: int = len(napped)
+        t1: Task[int] = fire dispatch_nap_in_fire()
+        t2: Task[int] = fire dispatch_nap_in_fire()
+        done: int = t1.join()
+        done = done + t2.join()
+        self.assertEqual(done, 2)
+        self.assertEqual(len(napped), before + 2)
+    }
+}
+
+
+class ForeignThreadCallbackTests(TestCase) {
+    """A thread the runtime never created calls a Dragon handler through the
+    shim's boundary pair while fires churn a shared dict. The pair registers
+    that thread with the collector, so its allocations and its list append are
+    visible to a stop instead of racing one."""
+
+    def test_callback_from_a_thread_the_runtime_never_created() {
+        before: int = len(foreign_hits)
+        c1: Task[int] = fire churn_for_foreign("f1")
+        c2: Task[int] = fire churn_for_foreign("f2")
+        rounds: int = probe_dispatch_from_foreign_thread(THIRD_CALLBACK, 200)
+        churned: int = c1.join()
+        churned = churned + c2.join()
+        self.assertEqual(rounds, 200)
+        self.assertEqual(churned, 800)
+        self.assertEqual(len(foreign_hits), before + 200)
+    }
+}
+
+
 class AutoBindTests(TestCase) {
     def test_interpolated_signal_emits_a_bound_span() {
         markup: str = auto_view.to_str()
@@ -330,4 +424,5 @@ class LocalSignalTests(TestCase) {
 
 main([NodeIdTests(), BindTextTests(), BindAttrTests(), BindHtmlTests(),
       BindShowTests(), SubscriptionTests(), HandlerExtractionTests(),
+      ForeignCallbackRegionTests(), ForeignThreadCallbackTests(),
       AutoBindTests(), LocalSignalTests()])

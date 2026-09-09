@@ -64,7 +64,7 @@ void dragon_print_space() {
 const char* dragon_input(const char* prompt) {
     if (prompt) printf("%s", prompt);
     char buffer[4096];
-    if (fgets(buffer, sizeof(buffer), stdin)) {
+    if (dragon_blocking_fgets(buffer, sizeof(buffer), stdin)) {
         size_t len = strlen(buffer);
         if (len > 0 && buffer[len - 1] == '\n') { buffer[--len] = '\0'; }
         return dragon_string_alloc(buffer, (int64_t)len);
@@ -571,7 +571,7 @@ const char* dragon_file_read(void* handle) {
             long remaining = size - pos;
             if (remaining <= 0) return dragon_string_alloc("", 0);
             char* buf = (char*)dragon_xmalloc((size_t)remaining + 1);
-            size_t nread = fread(buf, 1, remaining, f);
+            size_t nread = dragon_blocking_fread(buf, 1, remaining, f);
             buf[nread] = '\0';
             const char* result = dragon_string_alloc(buf, (int64_t)nread);
             free(buf);
@@ -588,7 +588,7 @@ const char* dragon_file_read(void* handle) {
             if (!nb) { free(buf); dragon_raise_oom(); }
             buf = nb;
         }
-        size_t n = fread(buf + len, 1, cap - len - 1, f);
+        size_t n = dragon_blocking_fread(buf + len, 1, cap - len - 1, f);
         len += n;
         if (n == 0) break;
     }
@@ -602,7 +602,7 @@ DragonBytes* dragon_file_read_chunk(void* handle, int64_t size) {
     if (!handle || size <= 0) return dragon_bytes_new(nullptr, 0);
     FILE* f = (FILE*)handle;
     DragonBytes* out = dragon_bytes_new(nullptr, size);
-    size_t n = fread(out->data, 1, (size_t)size, f);
+    size_t n = dragon_blocking_fread(out->data, 1, (size_t)size, f);
     out->len = (int64_t)n;
     return out;
 }
@@ -617,7 +617,7 @@ const char* dragon_file_read_bytes(void* handle) {
             long remaining = size - pos;
             if (remaining <= 0) return dragon_string_alloc("", 0);
             DragonString* ds = dragon_string_alloc_raw((int64_t)remaining);
-            size_t nread = fread(ds->data, 1, (size_t)remaining, f);
+            size_t nread = dragon_blocking_fread(ds->data, 1, (size_t)remaining, f);
             ds->len = (int64_t)nread;
             ds->data[nread] = '\0';
             return ds->data;
@@ -633,7 +633,7 @@ const char* dragon_file_read_bytes(void* handle) {
             if (!nb) { free(buf); dragon_raise_oom(); }
             buf = nb;
         }
-        size_t n = fread(buf + len, 1, cap - len, f);
+        size_t n = dragon_blocking_fread(buf + len, 1, cap - len, f);
         len += n;
         if (n == 0) break;
     }

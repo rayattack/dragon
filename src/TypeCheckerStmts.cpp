@@ -1594,6 +1594,17 @@ void TypeChecker::visit(FunctionDecl& node) {
         impl_->genericTemplateDepth++;
     }
 
+    if (node.isExtern && !node.externLib.empty()) {
+        const std::string& symbol =
+            node.externSymbol.empty() ? node.name : node.externSymbol;
+        if (symbol.rfind("dragon_", 0) == 0)
+            error(node.location(),
+                  "'dragon_' is the Dragon runtime's reserved symbol namespace: "
+                  "an extern declared from a library cannot claim '" + symbol +
+                  "'. Rename the foreign symbol, or drop the 'from' clause if "
+                  "this is a runtime entry point.");
+    }
+
     std::vector<std::shared_ptr<Type>> paramTypes;
     {
         Impl::ExternSignatureScope externScope(*impl_, node.isExtern);

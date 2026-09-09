@@ -57,6 +57,7 @@ typedef struct {
 } DragonFireArgs;
 
 static void* dragon_thread_entry(void* raw) {
+    dragon_gc_mutator_register();
     DragonFireArgs* fa = (DragonFireArgs*)raw;
     int64_t res = 0;
     typedef int64_t (*Fn0)();
@@ -89,6 +90,7 @@ static void* dragon_thread_entry(void* raw) {
     free(fa->args);
     free(fa);
     dragon_exc_thread_state_release();
+    dragon_gc_mutator_unregister();
     return NULL;
 }
 
@@ -137,7 +139,9 @@ int64_t dragon_thread_join(DragonThread* t) {
     }
     if (t->started) {
         osthread_green_join_wait(&t->green_waiter, &t->done);
+        dragon_gc_safe_begin();
         pthread_join(t->tid, NULL);
+        dragon_gc_safe_end();
     }
     int64_t result = t->result;
     free(t);
@@ -157,6 +161,7 @@ typedef struct {
 } DragonOSThread;
 
 static void* dragon_osthread_entry(void* raw) {
+    dragon_gc_mutator_register();
     DragonOSThread* t = (DragonOSThread*)raw;
     int64_t res = 0;
     typedef int64_t (*Fn0)();
@@ -179,6 +184,7 @@ static void* dragon_osthread_entry(void* raw) {
     __atomic_store_n(&t->done, (int8_t)1, __ATOMIC_RELEASE);
     osthread_exit_wake_green_joiner(&t->green_waiter);
     dragon_exc_thread_state_release();
+    dragon_gc_mutator_unregister();
     return NULL;
 }
 
@@ -220,7 +226,9 @@ int64_t dragon_osthread_join(void* handle) {
         return __atomic_load_n(&t->result, __ATOMIC_ACQUIRE);
     }
     osthread_green_join_wait(&t->green_waiter, &t->done);
+    dragon_gc_safe_begin();
     pthread_join(t->tid, NULL);
+    dragon_gc_safe_end();
     int64_t result = t->result;
     free(t->args);
     free(t);
@@ -418,6 +426,36 @@ void dragon_extern_exit(void) {
     __atomic_store_n(&c->tick, c->tick + 1, __ATOMIC_RELEASE);
 }
 
+void dragon_foreign_enter(void) {
+    dragon_gc_safe_begin();
+    dragon_extern_enter();
+}
+
+void dragon_foreign_exit(void) {
+    dragon_extern_exit();
+    dragon_gc_safe_end();
+}
+
+int64_t dragon_safe_region_suspend(void) {
+    DragonMutator* m = __dragon_mutator;
+    if (!m) {
+        dragon_gc_mutator_register_foreign();
+        m = __dragon_mutator;
+    }
+    if (!m || m->safe_depth == 0) return 0;
+    int32_t saved = m->safe_depth;
+    m->safe_depth = 1;
+    dragon_gc_safe_end();
+    return (int64_t)saved;
+}
+
+void dragon_safe_region_resume(int64_t token) {
+    if (token <= 0) return;
+    dragon_gc_safe_begin();
+    DragonMutator* m = __dragon_mutator;
+    if (m) m->safe_depth = (int32_t)token;
+}
+
 static DragonVThread* scheduler_dequeue() {
     DragonVThread* vt = __scheduler->head;
     if (vt) {
@@ -482,10 +520,12 @@ static DragonCarrier* carrier_register(void) {
     __atomic_store_n(&__carrier_list, c, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&__scheduler->lock);
     __current_carrier = c;
+    dragon_gc_mutator_register();
     return c;
 }
 
 static void carrier_park_as_spare(DragonCarrier* c) {
+    dragon_gc_safe_begin();
     pthread_mutex_lock(&__scheduler->lock);
     __scheduler->spares++;
     while (__scheduler->spare_wakeups == 0) {
@@ -494,6 +534,7 @@ static void carrier_park_as_spare(DragonCarrier* c) {
     __scheduler->spare_wakeups--;
     __scheduler->spares--;
     pthread_mutex_unlock(&__scheduler->lock);
+    dragon_gc_safe_end();
     __atomic_store_n(&c->retaken, 0, __ATOMIC_RELEASE);
 }
 
@@ -504,16 +545,19 @@ static void* scheduler_worker(void* arg) {
         if (__atomic_load_n(&carrier->retaken, __ATOMIC_ACQUIRE)) {
             carrier_park_as_spare(carrier);
         }
+        dragon_gc_safe_begin();
         pthread_mutex_lock(&__scheduler->lock);
         while (!__scheduler->head && !__scheduler->shutdown) {
             pthread_cond_wait(&__scheduler->not_empty, &__scheduler->lock);
         }
         if (__scheduler->shutdown && !__scheduler->head) {
             pthread_mutex_unlock(&__scheduler->lock);
+            dragon_gc_safe_end();
             break;
         }
         DragonVThread* vt = scheduler_dequeue();
         pthread_mutex_unlock(&__scheduler->lock);
+        dragon_gc_safe_end();
 
         if (!vt) continue;
 
@@ -530,11 +574,14 @@ static void* scheduler_worker(void* arg) {
         int __saved_active_frames = __dragon_active_frames;
         __dragon_active_frames = vt->active_frames;
 
+        dragon_gc_assert_running("scheduler resume");
         mco_resume(vt->coro);
+        dragon_gc_safe_region_reset();
 
         vt->active_frames = __dragon_active_frames;
         __dragon_active_frames = __saved_active_frames;
         __current_vthread = NULL;
+        dragon_gc_poll();
 
         if (mco_status(vt->coro) == MCO_DEAD) {
             vthread_mark_done_and_release(vt);
@@ -546,6 +593,7 @@ static void* scheduler_worker(void* arg) {
             }
         }
     }
+    dragon_gc_mutator_unregister();
     return NULL;
 }
 
@@ -692,15 +740,21 @@ int64_t dragon_vthread_join(DragonVThread* vt) {
                                               false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 
     DragonVThread* self = dragon_green_self();
+    int safe = 0;
     pthread_mutex_lock(&vt->join_lock);
     while (!vt->done) {
         if (self) {
             green_park(&vt->join_waiters, self, &vt->join_lock);
-        } else {
-            pthread_cond_wait(&vt->join_cond, &vt->join_lock);
+            continue;
         }
+        if (!safe) {
+            safe = 1;
+            dragon_gc_safe_begin();
+        }
+        pthread_cond_wait(&vt->join_cond, &vt->join_lock);
     }
     pthread_mutex_unlock(&vt->join_lock);
+    if (safe) dragon_gc_safe_end();
 
     int64_t result = vt->result;
     vt->result_claimed = 1;
@@ -1224,11 +1278,13 @@ void dragon_vthread_sleep(int64_t ms) {
 
     DragonVThread* vt = __current_vthread;
     if (!vt || !vt->coro) {
+        dragon_gc_safe_begin();
 #ifdef _WIN32
         Sleep((DWORD)ms);
 #else
         usleep((useconds_t)(ms * 1000));
 #endif
+        dragon_gc_safe_end();
         return;
     }
 
@@ -1250,6 +1306,7 @@ void dragon_vthread_yield() {
     DragonVThread* vt = __current_vthread;
     if (vt && vt->coro) {
         mco_yield(vt->coro);
+        dragon_gc_assert_running("vthread yield");
     }
 }
 
@@ -1271,18 +1328,24 @@ void* dragon_lock_new() {
 void dragon_lock_acquire(void* lock) {
     DragonLock* l = (DragonLock*)lock;
     DragonVThread* vt = dragon_green_self();
+    int safe = 0;
     pthread_mutex_lock(&l->m);
     while (l->locked) {
         if (vt) {
             green_park(&l->waiters, vt, &l->m);
-        } else {
-            l->os_waiters++;
-            pthread_cond_wait(&l->c, &l->m);
-            l->os_waiters--;
+            continue;
         }
+        if (!safe) {
+            safe = 1;
+            dragon_gc_safe_begin();
+        }
+        l->os_waiters++;
+        pthread_cond_wait(&l->c, &l->m);
+        l->os_waiters--;
     }
     l->locked = 1;
     pthread_mutex_unlock(&l->m);
+    if (safe) dragon_gc_safe_end();
 }
 
 int64_t dragon_lock_try_acquire(void* lock) {
@@ -1382,12 +1445,14 @@ void dragon_condvar_wait(void* cond, void* lock) {
     } else {
         cv->os_waiters++;
         dragon_lock_release(lock);
+        dragon_gc_safe_begin();
         while (cv->os_signals == 0) {
             pthread_cond_wait(&cv->c, &cv->m);
         }
         cv->os_signals--;
         cv->os_waiters--;
         pthread_mutex_unlock(&cv->m);
+        dragon_gc_safe_end();
     }
     dragon_lock_acquire(lock);
 }
@@ -1444,35 +1509,47 @@ void dragon_rwlock_free(void* rw) {
 void dragon_rwlock_rdlock(void* rw) {
     DragonRWLock* l = (DragonRWLock*)rw;
     DragonVThread* vt = dragon_green_self();
+    int safe = 0;
     pthread_mutex_lock(&l->m);
     while (l->writer_active) {
         if (vt) {
             green_park(&l->reader_waiters, vt, &l->m);
-        } else {
-            l->os_waiters++;
-            pthread_cond_wait(&l->c, &l->m);
-            l->os_waiters--;
+            continue;
         }
+        if (!safe) {
+            safe = 1;
+            dragon_gc_safe_begin();
+        }
+        l->os_waiters++;
+        pthread_cond_wait(&l->c, &l->m);
+        l->os_waiters--;
     }
     l->active_readers++;
     pthread_mutex_unlock(&l->m);
+    if (safe) dragon_gc_safe_end();
 }
 
 void dragon_rwlock_wrlock(void* rw) {
     DragonRWLock* l = (DragonRWLock*)rw;
     DragonVThread* vt = dragon_green_self();
     pthread_mutex_lock(&l->m);
+    int safe = 0;
     while (l->writer_active || l->active_readers > 0) {
         if (vt) {
             green_park(&l->writer_waiters, vt, &l->m);
-        } else {
-            l->os_waiters++;
-            pthread_cond_wait(&l->c, &l->m);
-            l->os_waiters--;
+            continue;
         }
+        if (!safe) {
+            safe = 1;
+            dragon_gc_safe_begin();
+        }
+        l->os_waiters++;
+        pthread_cond_wait(&l->c, &l->m);
+        l->os_waiters--;
     }
     l->writer_active = 1;
     pthread_mutex_unlock(&l->m);
+    if (safe) dragon_gc_safe_end();
 }
 
 int64_t dragon_rwlock_tryrdlock(void* rw) {
@@ -1601,17 +1678,23 @@ int64_t dragon_sem_acquire(void* handle) {
     if (!s) return -1;
     DragonVThread* vt = dragon_green_self();
     pthread_mutex_lock(&s->m);
+    int safe = 0;
     while (s->permits == 0) {
         if (vt) {
             green_park(&s->waiters, vt, &s->m);
-        } else {
-            s->os_waiters++;
-            pthread_cond_wait(&s->c, &s->m);
-            s->os_waiters--;
+            continue;
         }
+        if (!safe) {
+            safe = 1;
+            dragon_gc_safe_begin();
+        }
+        s->os_waiters++;
+        pthread_cond_wait(&s->c, &s->m);
+        s->os_waiters--;
     }
     s->permits--;
     pthread_mutex_unlock(&s->m);
+    if (safe) dragon_gc_safe_end();
     return 0;
 }
 
@@ -1717,14 +1800,20 @@ int64_t dragon_barrier_wait(void* handle) {
         vthread_wake_stolen(stolen);
         return 1;
     }
+    int safe = 0;
     while (gen == b->generation) {
         if (vt) {
             green_park(&b->waiters, vt, &b->m);
-        } else {
-            pthread_cond_wait(&b->c, &b->m);
+            continue;
         }
+        if (!safe) {
+            safe = 1;
+            dragon_gc_safe_begin();
+        }
+        pthread_cond_wait(&b->c, &b->m);
     }
     pthread_mutex_unlock(&b->m);
+    if (safe) dragon_gc_safe_end();
     return 0;
 }
 
@@ -2030,7 +2119,9 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     WSAPOLLFD pfd = {};
     pfd.fd = (SOCKET)fd;
     pfd.events = events;
+    dragon_gc_safe_begin();
     int r = WSAPoll(&pfd, 1, timeout_ms);
+    dragon_gc_safe_end();
     if (r > 0) {
         if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
         return 1;
@@ -2041,7 +2132,9 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
 static int nb_wait_fd(int fd, short events) {
     struct pollfd pfd = { fd, events, 0 };
     while (1) {
+        dragon_gc_safe_begin();
         int r = poll(&pfd, 1, -1);
+        dragon_gc_safe_end();
         if (r > 0) {
             // POLLHUP/POLLERR still mean "the syscall will not block": macOS raises
             // POLLHUP on peer close with data still buffered, so only POLLNVAL fails here.
@@ -2058,7 +2151,9 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     clock_gettime(CLOCK_MONOTONIC, &start);
     int remaining = timeout_ms;
     while (1) {
+        dragon_gc_safe_begin();
         int r = poll(&pfd, 1, remaining);
+        dragon_gc_safe_end();
         if (r > 0) {
             if (pfd.revents & POLLNVAL) return -1;
             return 1;

@@ -27,7 +27,7 @@ const char* dragon_getpass_read(const char* prompt) {
 #ifdef _WIN32
     if (prompt) { fputs(prompt, stderr); fflush(stderr); }
     char buf[4096];
-    if (!fgets(buf, (int)sizeof(buf), stdin)) return dragon_string_alloc("", 0);
+    if (!dragon_blocking_fgets(buf, (int)sizeof(buf), stdin)) return dragon_string_alloc("", 0);
     size_t n = strlen(buf);
     while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) n--;
     return dragon_string_alloc(buf, (int64_t)n);

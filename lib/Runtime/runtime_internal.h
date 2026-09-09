@@ -378,6 +378,129 @@ extern int gc_collecting;
 extern int gc_concurrent;
 void dragon_gc_go_concurrent(void);
 
+#define DRAGON_MUTATOR_RUNNING 0
+#define DRAGON_MUTATOR_SAFE    1
+#define DRAGON_MUTATOR_HELD    2
+
+typedef struct DragonMutator {
+    int32_t state;
+    int32_t safe_depth;
+    int32_t is_collector;
+    struct DragonMutator* next;
+} DragonMutator;
+
+extern __thread DragonMutator* __dragon_mutator;
+extern int gc_stop_requested;
+
+void dragon_fatal_safe_region_yield(const char* where);
+void dragon_foreign_enter(void);
+void dragon_foreign_exit(void);
+int64_t dragon_safe_region_suspend(void);
+void dragon_safe_region_resume(int64_t token);
+void dragon_gc_mutator_register(void);
+void dragon_gc_mutator_register_foreign(void);
+void dragon_gc_mutator_unregister(void);
+void dragon_gc_safepoint(void);
+void dragon_gc_safe_begin_slow(DragonMutator* m);
+void dragon_gc_safe_end_slow(DragonMutator* m);
+
+#if defined(__SANITIZE_ADDRESS__)
+#define DRAGON_GC_MUTATION_GATE 1
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define DRAGON_GC_MUTATION_GATE 1
+#  endif
+#endif
+
+void dragon_fatal_mutation_in_safe_region(const char* where);
+void dragon_fatal_unregistered_mutation(const char* where);
+
+static inline void dragon_gc_assert_mutable(const char* where) {
+#ifdef DRAGON_GC_MUTATION_GATE
+    DragonMutator* m = __dragon_mutator;
+    if (!m) {
+        if (__atomic_load_n(&gc_concurrent, __ATOMIC_RELAXED))
+            dragon_fatal_unregistered_mutation(where);
+        return;
+    }
+    if (m->safe_depth != 0) dragon_fatal_mutation_in_safe_region(where);
+#else
+    (void)where;
+#endif
+}
+
+static inline void dragon_gc_assert_running(const char* where) {
+    DragonMutator* m = __dragon_mutator;
+    if (m && __atomic_load_n(&m->state, __ATOMIC_RELAXED) != DRAGON_MUTATOR_RUNNING)
+        dragon_fatal_safe_region_yield(where);
+}
+
+static inline int dragon_gc_stop_pending(void) {
+    return __builtin_expect(__atomic_load_n(&gc_stop_requested, __ATOMIC_RELAXED), 0);
+}
+
+static inline void dragon_gc_poll(void) {
+    if (dragon_gc_stop_pending()) dragon_gc_safepoint();
+}
+
+static inline void dragon_gc_safe_begin(void) {
+    if (!__atomic_load_n(&gc_concurrent, __ATOMIC_RELAXED)) return;
+    DragonMutator* m = __dragon_mutator;
+    if (!m || m->safe_depth++ != 0) return;
+    __atomic_store_n(&m->state, DRAGON_MUTATOR_SAFE, __ATOMIC_SEQ_CST);
+    if (__builtin_expect(__atomic_load_n(&gc_stop_requested, __ATOMIC_SEQ_CST) != 0, 0))
+        dragon_gc_safe_begin_slow(m);
+}
+
+static inline void dragon_gc_safe_end(void) {
+    if (!__atomic_load_n(&gc_concurrent, __ATOMIC_RELAXED)) return;
+    DragonMutator* m = __dragon_mutator;
+    if (!m || m->safe_depth == 0 || --m->safe_depth != 0) return;
+    int32_t expected = DRAGON_MUTATOR_SAFE;
+    if (__builtin_expect(__atomic_load_n(&gc_stop_requested, __ATOMIC_ACQUIRE) != 0, 0) ||
+        !__atomic_compare_exchange_n(&m->state, &expected, DRAGON_MUTATOR_RUNNING,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        dragon_gc_safe_end_slow(m);
+}
+
+static inline void dragon_gc_safe_region_reset(void) {
+    DragonMutator* m = __dragon_mutator;
+    if (!m || m->safe_depth == 0) return;
+    m->safe_depth = 1;
+    dragon_gc_safe_end();
+}
+
+static inline size_t dragon_blocking_fread(void* buf, size_t size, size_t n, FILE* f) {
+    dragon_gc_safe_begin();
+    size_t r = fread(buf, size, n, f);
+    dragon_gc_safe_end();
+    return r;
+}
+
+static inline size_t dragon_blocking_fwrite(const void* buf, size_t size, size_t n,
+                                            FILE* f) {
+    dragon_gc_safe_begin();
+    size_t r = fwrite(buf, size, n, f);
+    dragon_gc_safe_end();
+    return r;
+}
+
+static inline char* dragon_blocking_fgets(char* buf, int n, FILE* f) {
+    dragon_gc_safe_begin();
+    char* r = fgets(buf, n, f);
+    dragon_gc_safe_end();
+    return r;
+}
+
+#ifndef _WIN32
+static inline ssize_t dragon_blocking_read(int fd, void* buf, size_t n) {
+    dragon_gc_safe_begin();
+    ssize_t r = read(fd, buf, n);
+    dragon_gc_safe_end();
+    return r;
+}
+#endif
+
 #define GC_FLAG_MUTATING 0x10
 
 void dragon_fatal_concurrent_mutation(const char* kind);
@@ -557,6 +680,10 @@ void dragon_gc_untrack(void* obj);
 void dragon_gc_set_threshold(int64_t n);
 int64_t dragon_gc_collect();
 int64_t dragon_gc_tracked_count();
+int64_t dragon_gc_collections();
+int64_t dragon_gc_deferred_collections();
+int64_t dragon_gc_max_pause_ns();
+int64_t dragon_gc_last_pause_ns();
 
 void dragon_mark_shared(void* obj);
 

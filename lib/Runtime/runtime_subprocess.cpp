@@ -163,10 +163,13 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
 
     close(exec_pipe[1]);
     int child_err = 0;
-    ssize_t got = read(exec_pipe[0], &child_err, sizeof(child_err));
+    ssize_t got = dragon_blocking_read(exec_pipe[0], &child_err, sizeof(child_err));
     close(exec_pipe[0]);
     if (got > 0) {
-        int status; waitpid(pid, &status, 0);
+        int status;
+        dragon_gc_safe_begin();
+        waitpid(pid, &status, 0);
+        dragon_gc_safe_end();
         if (stdin_w  >= 0) close((int)stdin_w);
         if (stdout_r >= 0) close((int)stdout_r);
         if (stderr_r >= 0) close((int)stderr_r);
@@ -200,7 +203,7 @@ DragonBytes* dragon_subprocess_drain(int fd) {
             buf = nbuf;
             cap = ncap;
         }
-        ssize_t r = read(fd, buf + len, cap - len);
+        ssize_t r = dragon_blocking_read(fd, buf + len, cap - len);
         if (r > 0) {
             len += (size_t)r;
             continue;
@@ -417,7 +420,7 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
 
         if (idx_out >= 0 && (pfds[idx_out].revents & (POLLIN | POLLERR | POLLHUP))) {
             for (;;) {
-                ssize_t r = read(out_fd, rbuf, sizeof(rbuf));
+                ssize_t r = dragon_blocking_read(out_fd, rbuf, sizeof(rbuf));
                 if (r > 0) { pumpbuf_append(&outb, rbuf, (size_t)r); continue; }
                 if (r == 0) { out_eof = true; break; }
                 if (errno == EINTR) continue;
@@ -428,7 +431,7 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
 
         if (idx_err >= 0 && (pfds[idx_err].revents & (POLLIN | POLLERR | POLLHUP))) {
             for (;;) {
-                ssize_t r = read(err_fd, rbuf, sizeof(rbuf));
+                ssize_t r = dragon_blocking_read(err_fd, rbuf, sizeof(rbuf));
                 if (r > 0) { pumpbuf_append(&errb, rbuf, (size_t)r); continue; }
                 if (r == 0) { err_eof = true; break; }
                 if (errno == EINTR) continue;
@@ -482,7 +485,7 @@ DragonBytes* dragon_subprocess_read_n(int fd, int64_t n) {
             break;
         }
         if (pr == 0) { dragon_vthread_yield(); continue; }
-        ssize_t r = read(fd, buf + got, (size_t)n - got);
+        ssize_t r = dragon_blocking_read(fd, buf + got, (size_t)n - got);
         if (r > 0) { got += (size_t)r; continue; }
         if (r < 0 && errno == EINTR) continue;
         break;

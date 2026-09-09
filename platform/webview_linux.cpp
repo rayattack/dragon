@@ -10,6 +10,10 @@
 extern "C" const char* dragon_string_dup_cstr(const char* s);
 
 extern "C" void dragon_decref_str(const char* s);
+extern "C" void dragon_foreign_enter(void);
+extern "C" void dragon_foreign_exit(void);
+extern "C" int64_t dragon_safe_region_suspend(void);
+extern "C" void dragon_safe_region_resume(int64_t token);
 
 extern "C" char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
@@ -134,9 +138,11 @@ static void dragon__on_script_message(WebKitUserContentManager* ucm,
     char* s = jsc_value_to_string(value);
     DRAGON_DBG("script-message: '%s' handler=%p\n", s ? s : "(null)", (void*) wv->handler);
     if (wv->handler && s) {
+        const int64_t region = dragon_safe_region_suspend();
         const char* dstr = dragon_string_dup_cstr(s);
         wv->handler(dstr);
         dragon_decref_str(dstr);
+        dragon_safe_region_resume(region);
     }
     if (s) g_free(s);
 }
@@ -227,7 +233,9 @@ void dragon_webview_set_handler(void* fn) {
 }
 
 static gboolean dragon__post_trampoline(gpointer data) {
+    const int64_t region = dragon_safe_region_suspend();
     ((void (*)(void)) data)();
+    dragon_safe_region_resume(region);
     return G_SOURCE_REMOVE;
 }
 void dragon_webview_post(void* fn) {
@@ -343,7 +351,9 @@ const char* dragon_webview_pick_folder(const char* title, const char* start_dir)
 }
 
 void dragon_webview_run(void) {
+    dragon_foreign_enter();
     gtk_main();
+    dragon_foreign_exit();
 }
 
 static gboolean dragon__quit_cb(gpointer data) {
@@ -354,7 +364,9 @@ static gboolean dragon__quit_cb(gpointer data) {
 void dragon_webview_run_timeout(int ms) {
     DRAGON_DBG("run_timeout: entering gtk_main for %d ms\n", ms);
     g_timeout_add(ms, dragon__quit_cb, NULL);
+    dragon_foreign_enter();
     gtk_main();
+    dragon_foreign_exit();
     DRAGON_DBG("run_timeout: gtk_main returned\n");
 }
 

@@ -68,7 +68,10 @@ const char* dragon_resolve4(const char* host) {
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
         struct addrinfo* res = nullptr;
-        if (getaddrinfo(host, nullptr, &hints, &res) != 0 || !res) {
+        dragon_gc_safe_begin();
+        int gai = getaddrinfo(host, nullptr, &hints, &res);
+        dragon_gc_safe_end();
+        if (gai != 0 || !res) {
             return dragon_string_dup_cstr("");
         }
         struct sockaddr_in* sa = (struct sockaddr_in*)res->ai_addr;
@@ -913,7 +916,9 @@ DragonList* dragon_waitpid(int32_t pid, int32_t options) {
     dragon_list_append(result, EINVAL);
 #else
     int status = 0;
+    dragon_gc_safe_begin();
     pid_t r = waitpid((pid_t)pid, &status, (int)options);
+    dragon_gc_safe_end();
     if (r < 0) {
         dragon_list_append(result, -1);
         dragon_list_append(result, errno);
