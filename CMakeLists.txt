@@ -340,6 +340,32 @@ install(TARGETS dragon
 install(PROGRAMS ${DRAGON_EGG_OUT}
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# Compiled Dragon programs are self-contained (-static-libgcc/-static-libstdc++,
+# see CodeGen), but dragon.exe itself links libLLVM as a DLL, so the toolchain
+# DLLs have to travel with it or the archive dies on a machine without MSYS2.
+# Resolve them from the compiler's own bin directory rather than hardcoding
+# names, which would rot on the next MSYS2 LLVM bump.
+if(WIN32)
+    get_filename_component(_dragon_mingw_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    install(CODE "
+        set(_bindir \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")
+        file(GET_RUNTIME_DEPENDENCIES
+            EXECUTABLES \"\${_bindir}/dragon.exe\"
+            RESOLVED_DEPENDENCIES_VAR _dragon_resolved
+            UNRESOLVED_DEPENDENCIES_VAR _dragon_unresolved
+            DIRECTORIES \"${_dragon_mingw_bin}\"
+            PRE_EXCLUDE_REGEXES \"^api-ms-\" \"^ext-ms-\"
+            POST_EXCLUDE_REGEXES \".*[Ww]indows.*[Ss]ystem32.*\")
+        foreach(_dep IN LISTS _dragon_resolved)
+            file(INSTALL DESTINATION \"\${_bindir}\" TYPE SHARED_LIBRARY
+                 FOLLOW_SYMLINK_CHAIN FILES \"\${_dep}\")
+        endforeach()
+        if(_dragon_unresolved)
+            message(WARNING \"unresolved runtime deps for dragon.exe: \${_dragon_unresolved}\")
+        endif()
+    ")
+endif()
+
 install(TARGETS dragon_runtime dragon_sqlite3 dragon_llhttp dragon_mbedtls
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/dragon)
 
@@ -437,10 +463,9 @@ elseif(APPLE)
     set(CPACK_GENERATOR "TGZ")
     set(CPACK_SYSTEM_NAME "Darwin")
 elseif(WIN32)
-    set(CPACK_GENERATOR "WIX;ZIP")
-    set(CPACK_WIX_PRODUCT_GUID "*")
-    set(CPACK_WIX_UPGRADE_GUID "8B5F2C1A-3E7D-4A9B-9C6E-1D2F3A4B5C6D")
-    set(CPACK_WIX_PROGRAM_MENU_FOLDER "Dragon")
+    # ZIP only: the MinGW build has no WiX toolset, and an unsigned .msi buys
+    # nothing over an archive that already carries its DLLs.
+    set(CPACK_GENERATOR "ZIP")
     set(CPACK_PACKAGE_INSTALL_DIRECTORY "Dragon")
 endif()
 

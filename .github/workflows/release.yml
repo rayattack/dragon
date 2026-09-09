@@ -1,7 +1,7 @@
 # Dragon release pipeline.
 #
-# Builds the compiler on Linux and macOS (Apple Silicon + Intel). Windows is
-# parked until the MSYS2/MinGW rework (see the matrix note below).
+# Builds the compiler on Linux, macOS (Apple Silicon + Intel) and Windows
+# (MSYS2/UCRT64, marked experimental).
 #
 # Triggers:
 #   * If you push a tag like `v0.0.1`            -> publishes a release for that tag
@@ -11,11 +11,14 @@
 #   dragon-<ver>-linux-x86_64.{deb,rpm,tar.gz}
 #   dragon-<ver>-macos-arm64.tar.gz
 #   dragon-<ver>-macos-x86_64.tar.gz
+#   dragon-<ver>-windows-x86_64.zip
 #
 # LLVM: the codebase builds against a released LLVM (>= 21). The reusable
-# .github/actions/setup-llvm installs it from apt.llvm.org (Linux) or Homebrew
-# (macOS); LLVM is statically linked, so the produced .deb/.rpm/.tar.gz do not
-# depend on a system libLLVM.
+# .github/actions/setup-llvm installs it from apt.llvm.org (Linux), Homebrew
+# (macOS) or MSYS2 (Windows). On Linux and macOS LLVM is statically linked, so
+# the .deb/.rpm/.tar.gz do not depend on a system libLLVM. Windows links the
+# libLLVM DLL instead -- ld cannot digest the static component archives -- so
+# the .zip carries that DLL and the rest of the MinGW runtime in bin/.
 #
 
 name: Release
@@ -50,11 +53,10 @@ jobs:
           - { os: ubuntu-22.04,     target: linux-x86_64,  experimental: false }
           - { os: macos-15,         target: macos-arm64,   experimental: false }
           - { os: macos-15-intel,   target: macos-x86_64,  experimental: false }
-          # Windows is parked: the runtime targets MinGW (pthreads/unistd.h,
-          # MSVC is not a target) but this job built with MSVC, so it can
-          # never link. Re-enable once the job is reworked to MSYS2/MinGW
-          # (needs an LLVM-from-source build under MinGW, cached after one run).
-          # - { os: windows-2022,   target: windows-x86_64, experimental: true }
+          # Windows builds under MSYS2/UCRT64, never MSVC: the runtime is
+          # written against pthreads/unistd.h. Experimental until the test
+          # suite is fully green on the platform.
+          - { os: windows-2025,     target: windows-x86_64, experimental: true }
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -98,19 +100,16 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake ninja zstd
 
-      - name: Install build + packaging tools (Windows)
+      # UCRT64 supplies GCC (winpthreads), CMake, Ninja and zlib/zstd. No WiX:
+      # Windows ships as a ZIP that already carries its DLLs.
+      - name: Setup MSYS2 (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install ninja -y
-          # WiX toolset 3.x provides the candle/light CPack WIX generator needs.
-          choco install wixtoolset -y
-          echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      # Put MSVC on PATH so the bash-driven LLVM/Dragon Ninja builds find a compiler.
-      - name: Set up MSVC (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          pacboy: >-
+            gcc:p cmake:p ninja:p zlib:p zstd:p
 
       # ---- LLVM (pinned trunk snapshot, built once + cached) -----------------
       - name: Setup LLVM
@@ -121,6 +120,7 @@ jobs:
       # macOS legs build with tests ON and run the suite before packaging;
       # the Linux leg is already gated by the everyday CI workflow.
       - name: Configure
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           cmake -S . -B build -G Ninja \
@@ -129,8 +129,22 @@ jobs:
             -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
 
       - name: Build
+        if: runner.os != 'Windows'
         shell: bash
         run: cmake --build build --config Release -j
+
+      # Windows gets its own pair: the toolchain lives inside MSYS2, and the
+      # runner's stock `bash` (Git Bash) cannot see it.
+      - name: Configure + build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDRAGON_BUILD_TESTS=OFF \
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+          cmake --build build -j
 
       - name: Test (macOS)
         if: runner.os == 'macOS'
@@ -171,13 +185,28 @@ jobs:
           # the Gatekeeper quarantine an unsigned disk image would carry.
           cpack -G TGZ -B "$PWD/dist"
 
+      # The install step resolves dragon.exe's runtime DLLs (libLLVM, libstdc++,
+      # libwinpthread, ...) out of the MSYS2 bin dir and drops them in bin/, so
+      # the archive runs on a machine that has never seen MSYS2.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         working-directory: build
-        shell: bash
+        shell: msys2 {0}
+        run: cpack -G ZIP -B "$PWD/dist"
+
+      # Mirror of the macOS check: unpack somewhere neutral, scrub MSYS2 off
+      # PATH, and confirm the binary still starts.
+      - name: Verify self-contained binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          cpack -G WIX -B "$PWD/dist"
-          cpack -G ZIP -B "$PWD/dist"
+          $zip = Get-ChildItem build/dist/*.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath "$env:RUNNER_TEMP/pkgtest" -Force
+          $exe = Get-ChildItem "$env:RUNNER_TEMP/pkgtest" -Recurse -Filter dragon.exe | Select-Object -First 1
+          if (-not $exe) { throw "no dragon.exe inside $($zip.Name)" }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          & $exe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "dragon.exe did not run without MSYS2 on PATH" }
 
       # ---- Normalize artifact names to what www.dr links to ------------------
       - name: Rename artifacts
@@ -202,7 +231,7 @@ jobs:
           case "$T" in
             linux-*)   pick deb deb;    pick rpm rpm;    pick "tar.gz" "tar.gz" ;;
             macos-*)                                     pick "tar.gz" "tar.gz" ;;
-            windows-*) pick msi msi;                     pick zip zip ;;
+            windows-*)                                   pick zip zip ;;
           esac
           # Checksums alongside each artifact.
           ( cd out && for f in *; do

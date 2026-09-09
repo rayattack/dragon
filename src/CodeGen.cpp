@@ -1346,6 +1346,11 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     args.push_back("-luserenv");
     // dragon_urandom / the hash seed call BCryptGenRandom out of bcrypt.dll.
     args.push_back("-lbcrypt");
+    // Compiled programs must run on a machine with no MSYS2 install, so fold
+    // the GCC/libstdc++ support libraries into the executable rather than
+    // leaving it looking for libstdc++-6.dll next to it.
+    args.push_back("-static-libgcc");
+    args.push_back("-static-libstdc++");
 #elif defined(__APPLE__)
     args.push_back("-lpthread");
 #else
