@@ -481,6 +481,7 @@ static void vthread_result_release_unclaimed(DragonVThread* vt) {
 static void vthread_release(DragonVThread* vt) {
     if (__atomic_sub_fetch(&vt->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
     vthread_result_release_unclaimed(vt);
+    dragon_lsan_unroot_whole_coroutine(vt->coro);
     mco_destroy(vt->coro);
     pthread_mutex_destroy(&vt->join_lock);
     pthread_cond_destroy(&vt->join_cond);
@@ -720,6 +721,7 @@ DragonVThread* dragon_vthread_spawn_typed(
         return NULL;
     }
 
+    dragon_lsan_root_whole_coroutine(vt->coro);
     __atomic_fetch_add(&__dragon_vthread_live, 1, __ATOMIC_ACQ_REL);
     scheduler_enqueue(vt);
     return vt;

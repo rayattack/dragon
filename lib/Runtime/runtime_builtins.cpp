@@ -686,6 +686,7 @@ DragonGenerator* dragon_generator_create_typed(
     mco_desc desc = mco_desc_init(trampoline, 0);
     desc.user_data = heap_args;
     mco_result r = mco_create(&gen->coro, &desc);
+    if (r == MCO_SUCCESS) dragon_lsan_root_whole_coroutine(gen->coro);
     if (r != MCO_SUCCESS) {
         fprintf(stderr, "generator: failed to create coroutine: %s\n",
                 mco_result_description(r));
@@ -770,7 +771,10 @@ void dragon_generator_destroy(void* gen_ptr) {
     dragon_generator_release_yielded(gen);
     if (gen->coro) {
         mco_state st = mco_status(gen->coro);
-        if (st == MCO_DEAD || st == MCO_SUSPENDED) mco_destroy(gen->coro);
+        if (st == MCO_DEAD || st == MCO_SUSPENDED) {
+            dragon_lsan_unroot_whole_coroutine(gen->coro);
+            mco_destroy(gen->coro);
+        }
     }
     if (gen->args) {
         if (gen->args_decref_fn) gen->args_decref_fn(gen->args);

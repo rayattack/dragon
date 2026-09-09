@@ -575,5 +575,29 @@ class ConcurrencyCaptureTests(TestCase) {
 }
 
 
+def linger_holding_a_string() -> int {
+    held: str = "still-parked-at-exit"
+    sleep_ms(4000)
+    return len(held)
+}
+
+
+lingering: Task[int] = fire linger_holding_a_string()
+
+
+class LingeringFireTests(TestCase) {
+    """A fire that is still parked when main returns keeps a live execution
+    context: its args block and whatever its stack holds. Those are reachable
+    from a running coroutine, so a leak report here means the checker cannot
+    see that context, not that the program lost memory."""
+
+    def test_a_still_parked_fire_is_alive_not_leaked() {
+        quick: Task[int] = fire square(6)
+        self.assertEqual(quick.join(), 36)
+    }
+}
+
+
 main([ModuleTaskInMethodTests(), TaskDetachRcTests(), TaskOwnershipTests(),
-      FireForgetTests(), FireReadOnlyShareTests(), ConcurrencyCaptureTests()])
+      FireForgetTests(), FireReadOnlyShareTests(), ConcurrencyCaptureTests(),
+      LingeringFireTests()])

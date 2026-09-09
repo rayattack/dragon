@@ -405,11 +405,27 @@ void dragon_gc_safe_begin_slow(DragonMutator* m);
 void dragon_gc_safe_end_slow(DragonMutator* m);
 
 #if defined(__SANITIZE_ADDRESS__)
-#define DRAGON_GC_MUTATION_GATE 1
+#define DRAGON_SANITIZED 1
 #elif defined(__has_feature)
 #  if __has_feature(address_sanitizer)
-#    define DRAGON_GC_MUTATION_GATE 1
+#    define DRAGON_SANITIZED 1
 #  endif
+#endif
+
+#ifdef DRAGON_SANITIZED
+#define DRAGON_GC_MUTATION_GATE 1
+#include <sanitizer/lsan_interface.h>
+
+static inline void dragon_lsan_root_whole_coroutine(mco_coro* co) {
+    if (co && co->coro_size) __lsan_register_root_region(co, co->coro_size);
+}
+
+static inline void dragon_lsan_unroot_whole_coroutine(mco_coro* co) {
+    if (co && co->coro_size) __lsan_unregister_root_region(co, co->coro_size);
+}
+#else
+static inline void dragon_lsan_root_whole_coroutine(mco_coro*) {}
+static inline void dragon_lsan_unroot_whole_coroutine(mco_coro*) {}
 #endif
 
 void dragon_fatal_mutation_in_safe_region(const char* where);
