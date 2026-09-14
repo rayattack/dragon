@@ -940,7 +940,7 @@ void CodeGen::emitNewModuleGlobalStore(NameExpr& name, AssignStmt& node,
     else if (dynamic_cast<SetExpr*>(node.value.get()))
         vk = Impl::VarKind::Set;
     else if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
-        vk = (sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral);
+        vk = (sl->isBytes ? Impl::VarKind::Bytes : Impl::VarKind::StrLiteral);
     else if (auto* rhsNE = dynamic_cast<NameExpr*>(node.value.get())) {
         if (impl_->classNames.count(rhsNE->name))
             vk = Impl::VarKind::Type;
@@ -1219,7 +1219,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::inferBoundVarKind(
     if (dynamic_cast<SetExpr*>(value) || dynamic_cast<SetCompExpr*>(value))
         return VarKind::Set;
     if (auto* sl = dynamic_cast<StringLiteral*>(value))
-        return sl->isBytes ? VarKind::List : VarKind::StrLiteral;
+        return sl->isBytes ? VarKind::Bytes : VarKind::StrLiteral;
     if (auto* rhsName = dynamic_cast<NameExpr*>(value)) {
         if (classNames.count(rhsName->name))
             return VarKind::Type;

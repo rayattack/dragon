@@ -201,6 +201,7 @@ llvm::StructType* CodeGen::buildFnEnvStruct(
             case Impl::VarKind::Str:
             case Impl::VarKind::StrLiteral:
             case Impl::VarKind::List:
+            case Impl::VarKind::Bytes:
             case Impl::VarKind::Dict:
             case Impl::VarKind::Tuple:
             case Impl::VarKind::Set:

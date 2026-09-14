@@ -340,7 +340,7 @@ void CodeGen::visit(ClassDecl& node) {
                                                 else if (fieldType->isPointerTy()) {
                                                     if (callExpr->type) {
                                                         switch (callExpr->type->kind()) {
-                                                            case Type::Kind::Bytes: fieldKind = Impl::VarKind::List;
+                                                            case Type::Kind::Bytes: fieldKind = Impl::VarKind::Bytes;
                                                                 break;
                                                             case Type::Kind::Str:   fieldKind = Impl::VarKind::Str;   break;
                                                             case Type::Kind::List:  fieldKind = Impl::VarKind::List;  break;

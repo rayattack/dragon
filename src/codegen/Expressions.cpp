@@ -1831,7 +1831,7 @@ void CodeGen::visit(IfExpr& node) {
         else if (typeName->name == "float") nk = Impl::VarKind::Float;
         else if (typeName->name == "bool")  nk = Impl::VarKind::Bool;
         else if (typeName->name == "str")   nk = Impl::VarKind::Str;
-        else if (typeName->name == "bytes") nk = Impl::VarKind::List;
+        else if (typeName->name == "bytes") nk = Impl::VarKind::Bytes;
         else if (typeName->name == "list") {
             auto membIt = impl_->unionMemberKinds.find(argName->name);
             bool declaredListMember =

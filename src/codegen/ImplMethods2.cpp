@@ -219,6 +219,7 @@ llvm::Value* CodeGen::Impl::cellI64ToNative(llvm::Value* i64Val, VarKind kind) {
             case VarKind::Str:
             case VarKind::StrLiteral:
             case VarKind::List:
+            case VarKind::Bytes:
             case VarKind::Dict:
             case VarKind::Tuple:
             case VarKind::Set:
@@ -758,7 +759,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
             if (named->name == "float") return VarKind::Float;
             if (named->name == "bool") return VarKind::Bool;
             if (named->name == "str") return VarKind::Str;
-            if (named->name == "bytes") return VarKind::List;
+            if (named->name == "bytes") return VarKind::Bytes;
             if (named->name == "type") return VarKind::Type;
             if (named->name == "list") return VarKind::List;
             if (named->name == "dict") return VarKind::Dict;
@@ -826,6 +827,7 @@ TypeExpr* CodeGen::Impl::unionNicheMember(TypeExpr* typeExpr) {
         bool isPtrShaped =
             k == VarKind::Str        || k == VarKind::StrLiteral  ||
             k == VarKind::List       || k == VarKind::Dict        ||
+            k == VarKind::Bytes      ||
             k == VarKind::Tuple      || k == VarKind::Set         ||
             k == VarKind::ClassInstance;
         if (auto* nm = dynamic_cast<NamedTypeExpr*>(otherSide))
@@ -843,6 +845,7 @@ llvm::Value* CodeGen::Impl::boxPayloadAsKind(llvm::Value* box, VarKind k) {
             case VarKind::Str:
             case VarKind::StrLiteral:
             case VarKind::List:
+            case VarKind::Bytes:
             case VarKind::Dict:
             case VarKind::Tuple:
             case VarKind::Set:

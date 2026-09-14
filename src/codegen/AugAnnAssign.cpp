@@ -743,7 +743,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         }
                         Impl::VarKind newKind = fieldKind;
                         if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
-                            newKind = (sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral);
+                            newKind = (sl->isBytes ? Impl::VarKind::Bytes : Impl::VarKind::StrLiteral);
                         bool rhsBorrowed = Impl::isBorrowedHeapExpr(node.value.get());
                         impl_->emitFieldSharedBarrier(objPtr, val, fieldKind);
                         impl_->storeWithRCOverwrite(
