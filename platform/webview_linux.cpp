@@ -337,9 +337,11 @@ const char* dragon_webview_pick_folder(const char* title, const char* start_dir)
         dragon__folder_pick_idle(&req);
     } else {
         g_idle_add(dragon__folder_pick_idle, &req);
+        dragon_foreign_enter();
         g_mutex_lock(&req.mutex);
         while (!req.done) g_cond_wait(&req.cond, &req.mutex);
         g_mutex_unlock(&req.mutex);
+        dragon_foreign_exit();
     }
     g_mutex_clear(&req.mutex);
     g_cond_clear(&req.cond);

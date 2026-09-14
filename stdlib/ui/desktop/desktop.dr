@@ -19,7 +19,7 @@ extern "C" def dragon_webview_is_maximized(handle: ptr) -> int
 extern "C" def dragon_webview_pick_folder(title: str, start_dir: str) -> str
 
 
-def pick_folder(title: str = "Open Folder", start_dir: str = "") -> str {
+def folder(title: str = "Open Folder", start_dir: str = "") -> str {
     """Open the OS-native folder chooser (the XDG portal dialog where one is
     running) and return the chosen absolute path, or "" if the user cancels.
     Blocks its caller until the dialog settles; call it from an rpc handler -

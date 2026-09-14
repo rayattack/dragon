@@ -23,6 +23,10 @@ from threading import Lock
 import time
 
 extern "C" def probe_js_count() -> int
+extern "C" def dragon_webview_pick_folder(title: str, start_dir: str) -> str
+extern "C" def probe_folder_release() -> None
+extern "C" def dragon_gc_deferred_collections() -> int
+extern "C" def dragon_gc_set_threshold(n: int) -> None
 extern "C" def probe_js_at(i: int) -> str
 extern "C" def probe_js_reset()
 extern "C" def probe_dispatch(msg: str)
@@ -422,7 +426,54 @@ class LocalSignalTests(TestCase) {
 }
 
 
+class Cyc {
+    peer: Cyc | None
+    pad: list[int]
+
+    def() {
+        self.peer = none
+        self.pad = [0, 0, 0, 0]
+    }
+}
+
+
+def churn_cycles(rounds: int) -> int {
+    made: int = 0
+    for i in range(rounds) {
+        a: Cyc = Cyc()
+        b: Cyc = Cyc()
+        a.peer = b
+        b.peer = a
+        made = made + 1
+    }
+    return made
+}
+
+
+class FolderDialogRegionTests(TestCase) {
+    """A folder dialog blocks for as long as a human takes to answer it. The
+    shim wears the dragon_ prefix, so codegen does not bracket the call and the
+    shim has to enter the safe region itself. Without that the carrier stays
+    counted RUNNING and every collection attempted during the dialog is
+    abandoned, for as long as the dialog is open."""
+
+    def test_a_blocked_folder_dialog_does_not_defer_collection() {
+        before: int = dragon_gc_deferred_collections()
+        dragon_gc_set_threshold(64)
+        waiting: Task[str] = fire dragon_webview_pick_folder("pick one", "")
+        churned: int = churn_cycles(4000)
+        probe_folder_release()
+        picked: str = waiting.join()
+        dragon_gc_set_threshold(700)
+        self.assertEqual(picked, "/picked")
+        self.assertTrue(churned > 0)
+        self.assertEqual(dragon_gc_deferred_collections(), before)
+    }
+}
+
+
 main([NodeIdTests(), BindTextTests(), BindAttrTests(), BindHtmlTests(),
       BindShowTests(), SubscriptionTests(), HandlerExtractionTests(),
       ForeignCallbackRegionTests(), ForeignThreadCallbackTests(),
-      AutoBindTests(), LocalSignalTests()])
+      AutoBindTests(), LocalSignalTests(),
+      FolderDialogRegionTests()])

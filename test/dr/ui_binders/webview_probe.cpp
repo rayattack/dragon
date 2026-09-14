@@ -46,6 +46,27 @@ std::string utf8_of(const char* s) {
 
 extern "C" {
 
+pthread_mutex_t g_folder_mu = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  g_folder_cv = PTHREAD_COND_INITIALIZER;
+int g_folder_ready = 0;
+
+const char* dragon_webview_pick_folder(const char* title, const char* start_dir) {
+    (void) title; (void) start_dir;
+    dragon_foreign_enter();
+    pthread_mutex_lock(&g_folder_mu);
+    while (!g_folder_ready) pthread_cond_wait(&g_folder_cv, &g_folder_mu);
+    pthread_mutex_unlock(&g_folder_mu);
+    dragon_foreign_exit();
+    return dragon_string_dup_cstr("/picked");
+}
+
+void probe_folder_release(void) {
+    pthread_mutex_lock(&g_folder_mu);
+    g_folder_ready = 1;
+    pthread_cond_broadcast(&g_folder_cv);
+    pthread_mutex_unlock(&g_folder_mu);
+}
+
 void dragon_webview_eval_js(const char* js) { g_evaluated_js.push_back(utf8_of(js)); }
 void dragon_webview_set_handler(void* fn) { g_handler = (DragonMsgHandler) fn; }
 void dragon_webview_run(void) {

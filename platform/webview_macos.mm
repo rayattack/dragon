@@ -344,8 +344,10 @@ const char* dragon_webview_pick_folder(const char* title, const char* start_dir)
             }
         };
 
+        dragon_foreign_enter();
         if ([NSThread isMainThread]) run();
         else dispatch_sync(dispatch_get_main_queue(), run);
+        dragon_foreign_exit();
 
         return dragon_string_dup_cstr(picked ? [picked UTF8String] : "");
     }
