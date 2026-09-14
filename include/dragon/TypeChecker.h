@@ -416,6 +416,8 @@ private:
     void reportNoConstructorCall(CallExpr& node, const ClassType& ct);
     void checkSubscriptSlotStore(AssignStmt& node,
                                  const std::shared_ptr<Type>& slot);
+    void refuseStoreIntoUnwritableSlot(SubscriptExpr& sub,
+                                       const std::shared_ptr<Type>& container);
     void checkUnionSlotStore(Expr* value, const std::shared_ptr<Type>& slot,
                              const SourceLocation& loc,
                              const std::string& what);

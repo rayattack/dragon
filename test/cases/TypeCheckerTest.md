@@ -4151,3 +4151,95 @@ extern "C" from "mylib" {
     def dragon_list_append(l: ptr, v: int)
 }
 ```
+
+#### :bytes_index_store_rejected
+
+`bytes` is immutable. The store gate in codegen asks only whether the target is
+a list, and `bytes` shares `VarKind::List`, so this reached codegen and emitted
+a list element store against a `DragonBytes`. What the list path reads as `data`
+is the bytes object's `len`, so it wrote through the buffer length as an
+address.
+
+```dr
+def main() -> None {
+    b: bytes = bytes(4)
+    b[0] = 65
+}
+
+main()
+```
+
+#### :bytes_literal_index_store_rejected
+
+```dr
+def main() -> None {
+    b: bytes = b"abcd"
+    b[0] = 65
+}
+
+main()
+```
+
+#### :bytes_field_index_store_rejected
+
+```dr
+class Page {
+    buf: bytes
+
+    def() {
+        self.buf = bytes(4)
+    }
+
+    def poke() -> None {
+        self.buf[0] = 65
+    }
+}
+
+def main() -> None {
+    p: Page = Page()
+    p.poke()
+}
+
+main()
+```
+
+#### :str_index_store_rejected
+
+A str store took the other branch: it failed the list gate, no store was
+emitted, and nothing was reported. The write was silently discarded.
+
+```dr
+def main() -> None {
+    s: str = "abcd"
+    s[0] = "X"
+}
+
+main()
+```
+
+#### :bytes_index_read_accepted
+
+Reading stays legal; only the store is refused.
+
+```dr
+def main() -> None {
+    b: bytes = b"abcd"
+    print(b[0])
+    print(len(b))
+    print(b[1:3])
+}
+
+main()
+```
+
+#### :list_index_store_still_accepted
+
+```dr
+def main() -> None {
+    xs: list[int] = [1, 2, 3]
+    xs[0] = 65
+    print(xs[0])
+}
+
+main()
+```

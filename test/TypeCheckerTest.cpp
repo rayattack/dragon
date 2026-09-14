@@ -2244,3 +2244,12 @@ TEST(TypeCheckerTest, HashRejectsMutableContainers) {
     EXPECT_TRUE(checkOk(code("hash_of_a_tuple_accepted")));
     EXPECT_TRUE(checkOk(code("hash_of_scalars_accepted")));
 }
+
+TEST(TypeCheckerTest, ImmutableIndexStoreRejected) {
+    EXPECT_TRUE(checkHasErrors(code("bytes_index_store_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_literal_index_store_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_field_index_store_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("str_index_store_rejected")));
+    EXPECT_TRUE(checkOk(code("bytes_index_read_accepted")));
+    EXPECT_TRUE(checkOk(code("list_index_store_still_accepted")));
+}

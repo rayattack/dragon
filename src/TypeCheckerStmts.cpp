@@ -104,6 +104,35 @@ void TypeChecker::checkSubscriptSlotStore(AssignStmt& node,
     checkUnionSlotStore(node.value.get(), slot, node.location(), "a slot");
 }
 
+void TypeChecker::refuseStoreIntoUnwritableSlot(
+        SubscriptExpr& sub, const std::shared_ptr<Type>& container) {
+    if (!container) return;
+    switch (container->kind()) {
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+        case Type::Kind::Tuple:
+            error(sub.location(),
+                  "'" + container->toString() +
+                      "' is immutable: an index store has nowhere to write. "
+                      "Build a new value, or use a list for a sequence you "
+                      "need to change in place");
+            return;
+        case Type::Kind::Instance: {
+            const ClassType* cls =
+                static_cast<const InstanceType&>(*container).classType.get();
+            if (cls && !findMethodOwner(cls, "__setitem__"))
+                error(sub.location(),
+                      "'" + cls->name +
+                          "' does not define __setitem__, so an index store "
+                          "has nowhere to write. Add __setitem__, or assign "
+                          "the field you mean");
+            return;
+        }
+        default:
+            return;
+    }
+}
+
 void TypeChecker::markNarrowTarget(Expr& value,
                                    const std::shared_ptr<Type>& want) {
     if (!want || !value.type || value.type->kind() != Type::Kind::Boxed) return;
@@ -505,6 +534,8 @@ void TypeChecker::visit(AssignStmt& node) {
                     slotType = dt->valueType;
                 else if (auto* lt = dynamic_cast<ListType*>(contType.get()))
                     slotType = lt->elementType;
+                else
+                    refuseStoreIntoUnwritableSlot(*sub, contType);
                 checkSubscriptSlotStore(node, slotType);
             }
             inferType(target.get());
