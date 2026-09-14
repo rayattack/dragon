@@ -3,6 +3,7 @@ import json
 from math import nan
 from json import Schema, ValidationResult
 from json import Data
+from database.base import Value
 
 class Customer {
     id: int
@@ -51,8 +52,51 @@ class Holder {
 }
 
 
+class UnionRow {
+    cells: dict[str, int | str]
+
+    def() {
+        self.cells = {"n": 4, "s": "text"}
+    }
+
+    def int_total() -> int {
+        total: int = 0
+        for k, v in self.cells.items() {
+            if isinstance(v, int) {
+                total = total + v
+            }
+        }
+        return total
+    }
+
+    def str_total() -> str {
+        joined: str = ""
+        for k, v in self.cells.items() {
+            if isinstance(v, str) {
+                joined = joined + v
+            }
+        }
+        return joined
+    }
+}
+
+
 def make(n: int) -> Thing {
     return Thing(n)
+}
+
+
+def union_int_total(d: dict[str, int | str]) -> int {
+    total: int = 0
+    for k, v in d.items() {
+        if isinstance(v, int) {
+            total = total + v
+        }
+        if isinstance(v, str) {
+            total = total + len(v)
+        }
+    }
+    return total
 }
 
 
@@ -702,6 +746,132 @@ class TestBoxDomains(TestCase) {
 }
 
 
+class DictItemsUnionTests(TestCase) {
+    def test_inline_union_keeps_its_tag() -> None {
+        d: dict[str, int | str] = {"n": 4, "s": "text"}
+        ints: int = 0
+        strs: str = ""
+        arms: int = 0
+        for k, v in d.items() {
+            if isinstance(v, int) {
+                ints = ints + v
+                arms = arms + 1
+            }
+            if isinstance(v, str) {
+                strs = strs + v.upper()
+                arms = arms + 1
+            }
+        }
+        self.assertEqual(ints, 4)
+        self.assertEqual(strs, "TEXT")
+        self.assertEqual(arms, 2)
+    }
+
+    def test_stdlib_value_alias_row() -> None {
+        row: dict[str, Value] = {"id": 1, "title": "hello", "score": 1.5}
+        ids: int = 0
+        title: str = ""
+        score: float = 0.0
+        for k, v in row.items() {
+            if isinstance(v, int) {
+                ids = ids + v
+            }
+            if isinstance(v, str) {
+                title = title + v
+            }
+            if isinstance(v, float) {
+                score = score + v
+            }
+        }
+        self.assertEqual(ids, 1)
+        self.assertEqual(title, "hello")
+        self.assertEqual(score, 1.5)
+    }
+
+    def test_optional_str_values_narrow() -> None {
+        d: dict[str, str | None] = {"a": "x", "b": None}
+        present: str = ""
+        absent: int = 0
+        for k, v in d.items() {
+            if v is None {
+                absent = absent + 1
+            } else {
+                present = present + v.upper()
+            }
+        }
+        self.assertEqual(present, "X")
+        self.assertEqual(absent, 1)
+    }
+
+    def test_class_field_dict_items() -> None {
+        const row: UnionRow = UnionRow()
+        self.assertEqual(row.int_total(), 4)
+        self.assertEqual(row.str_total(), "text")
+    }
+
+    def test_parameter_dict_items() -> None {
+        self.assertEqual(union_int_total({"n": 5, "s": "abc"}), 8)
+    }
+
+    def test_rows_reached_through_a_loop_variable() -> None {
+        rows: list[dict[str, int | str]] = [{"n": 1, "s": "a"}, {"n": 2, "s": "b"}]
+        ints: int = 0
+        strs: str = ""
+        for r in rows {
+            for k, v in r.items() {
+                if isinstance(v, int) {
+                    ints = ints + v
+                }
+                if isinstance(v, str) {
+                    strs = strs + v
+                }
+            }
+        }
+        self.assertEqual(ints, 3)
+        self.assertEqual(strs, "ab")
+    }
+
+    def test_single_target_pair_keeps_its_tag() -> None {
+        d: dict[str, int | str] = {"n": 4, "s": "text"}
+        keys: str = ""
+        ints: int = 0
+        strs: str = ""
+        for kv in d.items() {
+            const key: str = kv[0]
+            const v: int | str = kv[1]
+            keys = keys + key
+            if isinstance(v, int) {
+                ints = ints + v
+            }
+            if isinstance(v, str) {
+                strs = strs + v
+            }
+        }
+        self.assertEqual(keys, "ns")
+        self.assertEqual(ints, 4)
+        self.assertEqual(strs, "text")
+    }
+
+    def test_items_churn_keeps_values_alive() -> None {
+        total: int = 0
+        i: int = 0
+        while i < 2000 {
+            d: dict[str, int | str] = {"n": i, "s": "abc"}
+            for k, v in d.items() {
+                if isinstance(v, int) {
+                    total = total + v
+                }
+                if isinstance(v, str) {
+                    total = total + len(v)
+                }
+            }
+            i = i + 1
+        }
+        self.assertEqual(total, 2005000)
+    }
+}
+
+
 main([DictGetOptionalTests(), DictIntIterationTests(), DictFloatKeyTests(),
       DictObjectKeyTests(), DictSpreadTests(), TestTypedReads(), TestLifetimes(),
-      TestBoxDomains()])
+      TestBoxDomains(), DictItemsUnionTests()])

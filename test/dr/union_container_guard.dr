@@ -50,4 +50,44 @@ for v in hit {
 }
 if len(walk(doc, ["id", "name"], 0)) != 0 { print("FAIL: leaf descent") }
 
+ints: int = 0
+strs: str = ""
+for k, v in d.items() {
+    match v {
+        case int() { ints = ints + v }
+        case str() { strs = strs + v }
+        case _     { print("FAIL: items arm") }
+    }
+}
+if ints != 1 { print("FAIL: items int value") }
+if strs != "text" { print("FAIL: items str value") }
+
+names: str = ""
+ids: int = 0
+flat: dict[str, Data] = {"name": "Ada", "id": 7}
+for k, v in flat.items() {
+    match v {
+        case str() { names = names + v }
+        case int() { ids = ids + v }
+        case _     { print("FAIL: alias items arm") }
+    }
+}
+if names != "Ada" { print("FAIL: alias items str value") }
+if ids != 7 { print("FAIL: alias items int value") }
+
+rows: list[dict[str, int | str]] = [{"n": 2, "s": "a"}, {"n": 3, "s": "b"}]
+rowints: int = 0
+rowstrs: str = ""
+for row in rows {
+    for k, v in row.items() {
+        match v {
+            case int() { rowints = rowints + v }
+            case str() { rowstrs = rowstrs + v }
+            case _     { print("FAIL: row items arm") }
+        }
+    }
+}
+if rowints != 5 { print("FAIL: row items int value") }
+if rowstrs != "ab" { print("FAIL: row items str value") }
+
 print("union containers ok")

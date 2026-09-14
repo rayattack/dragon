@@ -3,6 +3,67 @@
 
 namespace dragon {
 
+static Type* unionNichePointerMember(Type* t) {
+    if (!t || t->kind() != Type::Kind::Union) return nullptr;
+    auto& u = static_cast<UnionType&>(*t);
+    if (u.types.size() != 2) return nullptr;
+    Type* other = nullptr;
+    bool hasNone = false;
+    for (auto& member : u.types) {
+        if (!member) continue;
+        if (member->kind() == Type::Kind::None_) hasNone = true;
+        else other = member.get();
+    }
+    if (!hasNone || !other) return nullptr;
+    switch (other->kind()) {
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+        case Type::Kind::List:
+        case Type::Kind::Dict:
+        case Type::Kind::Set:
+        case Type::Kind::Tuple:
+        case Type::Kind::Instance:
+        case Type::Kind::Contract:
+        case Type::Kind::Function:
+        case Type::Kind::Ptr:
+            return other;
+        default:
+            return nullptr;
+    }
+}
+
+static Type::Kind storageKindForType(Type* t) {
+    if (!t) return Type::Kind::Unknown;
+    if (t->kind() != Type::Kind::Union) return t->kind();
+    if (Type* niche = unionNichePointerMember(t)) return niche->kind();
+    return Type::Kind::Boxed;
+}
+
+static Expr* dictItemsReceiver(const ForStmt& node) {
+    auto* methCall = dynamic_cast<CallExpr*>(node.iterable.get());
+    if (!methCall) return nullptr;
+    auto* methAttr = dynamic_cast<AttributeExpr*>(methCall->callee.get());
+    if (!methAttr) return nullptr;
+    return methAttr->object.get();
+}
+
+static Type* dictValueTypeOf(Expr* expr) {
+    if (!expr || !expr->type) return nullptr;
+    auto* dt = dynamic_cast<DictType*>(expr->type.get());
+    return dt ? dt->valueType.get() : nullptr;
+}
+
+static Type* dictItemsValueType(const ForStmt& node) {
+    if (!node.iterable->type || node.iterable->type->kind() != Type::Kind::List)
+        return nullptr;
+    auto& lt = static_cast<ListType&>(*node.iterable->type);
+    if (!lt.elementType || lt.elementType->kind() != Type::Kind::Tuple)
+        return nullptr;
+    auto& tt = static_cast<TupleType&>(*lt.elementType);
+    if (tt.elementTypes.size() < 2) return nullptr;
+    return tt.elementTypes[1].get();
+}
+
 static std::optional<Type::Kind> inlineListElemKind(const ForStmt& node) {
     auto* listType = dynamic_cast<ListType*>(node.iterable->type.get());
     if (!listType || !listType->elementType) return std::nullopt;
@@ -828,32 +889,38 @@ void CodeGen::visit(ForStmt& node) {
     iterLoaded = impl_->builder->CreateLoad(impl_->i8PtrType, iterAlloca, "__iter");
 
     if (tupleTarget && isDictItemsIterable) {
-        Impl::VarKind valVarKind = Impl::VarKind::Int;
-        if (auto* methCall = dynamic_cast<CallExpr*>(node.iterable.get())) {
-            if (auto* methAttr = dynamic_cast<AttributeExpr*>(methCall->callee.get())) {
-                if (auto* dn = dynamic_cast<NameExpr*>(methAttr->object.get())) {
-                    auto vit = impl_->varDictValueKinds.find(dn->name);
-                    if (vit != impl_->varDictValueKinds.end()) {
-                        Type::Kind k = vit->second;
-                        if (k == Type::Kind::Str) valVarKind = Impl::VarKind::Str;
-                        else if (k == Type::Kind::Float) valVarKind = Impl::VarKind::Float;
-                        else if (k == Type::Kind::Bool) valVarKind = Impl::VarKind::Bool;
-                        else if (k == Type::Kind::Bytes) valVarKind = Impl::VarKind::List;
-                        else if (k == Type::Kind::List) valVarKind = Impl::VarKind::List;
-                        else if (k == Type::Kind::Dict) valVarKind = Impl::VarKind::Dict;
-                        else if (k == Type::Kind::Instance) valVarKind = Impl::VarKind::ClassInstance;
-                    }
-                }
-            }
-        }
+        Expr* dictExpr = dictItemsReceiver(node);
+        Type::Kind valTypeKind = storageKindForType(dictItemsValueType(node));
+        if (valTypeKind == Type::Kind::Unknown)
+            valTypeKind = storageKindForType(dictValueTypeOf(dictExpr));
+        if (valTypeKind == Type::Kind::Unknown)
+            valTypeKind = impl_->resolveDictValueKind(dictExpr);
+        bool valIsBoxed = Impl::isBoxedKind(valTypeKind);
+        Impl::VarKind valVarKind = valTypeKind == Type::Kind::Unknown
+                                       ? Impl::VarKind::Int
+                                       : Impl::typeKindToVarKind(valTypeKind);
 
         llvm::Value* elem = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_list_get"], {iterLoaded, currentIdx}, "elem");
         llvm::Value* tuplePtr = impl_->builder->CreateIntToPtr(elem, impl_->i8PtrType, "tupleptr");
 
         for (size_t i = 0; i < tupleTarget->elements.size(); i++) {
-            if (auto* name = dynamic_cast<NameExpr*>(tupleTarget->elements[i].get())) {
-                llvm::Value* idx = llvm::ConstantInt::get(impl_->i64Type, i);
+            auto* name = dynamic_cast<NameExpr*>(tupleTarget->elements[i].get());
+            if (!name) continue;
+            llvm::Value* idx = llvm::ConstantInt::get(impl_->i64Type, i);
+            if (i > 0 && valIsBoxed) {
+                llvm::Value* valBox = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_tuple_box_get"], {tuplePtr, idx},
+                    "unpack.box");
+                auto* boxAlloca = impl_->lookupVar(name->name);
+                if (!boxAlloca || boxAlloca->getAllocatedType() != impl_->boxType)
+                    boxAlloca = impl_->createEntryAlloca(func, name->name, impl_->boxType);
+                impl_->setVar(name->name, boxAlloca, Impl::VarKind::Union);
+                impl_->scopes.back().borrowed.insert(name->name);
+                impl_->builder->CreateStore(valBox, boxAlloca);
+                continue;
+            }
+            {
                 llvm::Value* val = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_tuple_get"], {tuplePtr, idx}, "unpack");
                 if (i == 0) {
