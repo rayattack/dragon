@@ -682,6 +682,18 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_bytes_len",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_bytearray_new",
+        llvm::FunctionType::get(i8PtrType, {i64Type}, false));
+    getOrDeclareRuntime("dragon_bytearray_copy",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_bytearray_freeze",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_bytearray_len",
+        llvm::FunctionType::get(i64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_bytearray_get",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_bytearray_set",
+        llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_print_bytes",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_bytes_concat",

@@ -406,7 +406,8 @@ static void dragon_dealloc(void* obj) {
         case DRAGON_TAG_DICT:  dragon_dict_destroy((struct DragonDict*)obj); break;
         case DRAGON_TAG_TUPLE: dragon_tuple_destroy((struct DragonTuple*)obj); break;
         case DRAGON_TAG_SET:   dragon_set_destroy((struct DragonSet*)obj); break;
-        case DRAGON_TAG_BYTES: dragon_bytes_destroy((struct DragonBytes*)obj); break;
+        case DRAGON_TAG_BYTES:
+        case DRAGON_TAG_BYTEARRAY: dragon_bytes_destroy((struct DragonBytes*)obj); break;
         case DRAGON_TAG_DEQUE: dragon_deque_destroy((struct DragonDeque*)obj); break;
         case DRAGON_TAG_STR:   free(obj); break;
         case DRAGON_TAG_CLASS: {

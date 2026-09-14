@@ -382,6 +382,9 @@ bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
     } else if (isDeque) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_deque_len"], {arg}, "len");
+    } else if (a0->type && a0->type->kind() == Type::Kind::ByteArray) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_bytearray_len"], {arg}, "len");
     } else if (isBytes) {
         impl_->lastValue = emitBytesFieldsOrEmpty(*impl_, arg, false).len;
     } else if (isTuple) {
@@ -985,6 +988,15 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
         return true;
     }
 
+    if (name == "bytearray" && node.args.size() == 1) {
+        node.args[0]->accept(*this);
+        llvm::Value* n = impl_->lastValue;
+        if (n->getType() == impl_->i1Type)
+            n = impl_->builder->CreateZExt(n, impl_->i64Type);
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_bytearray_new"], {n}, "bytearray");
+        return true;
+    }
     if (name == "bytes") {
         if (node.args.empty()) {
             impl_->lastValue = impl_->emitBytesLiteral("");

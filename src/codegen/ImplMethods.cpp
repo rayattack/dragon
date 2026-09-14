@@ -10,6 +10,7 @@ Type::Kind CodeGen::Impl::elemVarKindToTypeKind(VarKind ek) {
             case VarKind::Bool:          return Type::Kind::Bool;
             case VarKind::List:          return Type::Kind::List;
             case VarKind::Bytes:         return Type::Kind::Bytes;
+            case VarKind::ByteArray:     return Type::Kind::ByteArray;
             case VarKind::Dict:          return Type::Kind::Dict;
             case VarKind::Tuple:         return Type::Kind::Tuple;
             case VarKind::Set:           return Type::Kind::Set;
@@ -258,7 +259,7 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                     vk == VarKind::Str  || vk == VarKind::StrLiteral ||
                     vk == VarKind::Int  || vk == VarKind::Float || vk == VarKind::Bool ||
                     vk == VarKind::List || vk == VarKind::Dict  || vk == VarKind::Tuple ||
-                    vk == VarKind::Bytes ||
+                    vk == VarKind::Bytes || vk == VarKind::ByteArray ||
                     vk == VarKind::Set;
                 if (!staleNonInstance)
                     return it->second;
@@ -409,6 +410,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     case Type::Kind::Float:    return VarKind::Float;
                     case Type::Kind::Bool:     return VarKind::Bool;
                     case Type::Kind::Bytes:    return VarKind::Bytes;
+                    case Type::Kind::ByteArray: return VarKind::ByteArray;
                     case Type::Kind::List:     return VarKind::List;
                     case Type::Kind::Dict:     return VarKind::Dict;
                     case Type::Kind::Tuple:    return VarKind::Tuple;
@@ -854,6 +856,7 @@ int64_t CodeGen::Impl::varKindToTag(VarKind vk) {
             case VarKind::Bool:          return TAG_BOOL;
             case VarKind::List:          return TAG_LIST;
             case VarKind::Bytes:         return TAG_BYTES;
+            case VarKind::ByteArray:     return 15;
             case VarKind::Dict:          return TAG_DICT;
             case VarKind::ClassInstance: return 7;
             case VarKind::Generator:     return 8;
@@ -1137,6 +1140,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
             case Type::Kind::Bool:     return VarKind::Bool;
             case Type::Kind::Str:      return VarKind::Str;
             case Type::Kind::Bytes:    return VarKind::Bytes;
+            case Type::Kind::ByteArray: return VarKind::ByteArray;
             case Type::Kind::List:     return VarKind::List;
             case Type::Kind::Deque:    return VarKind::Deque;
             case Type::Kind::Dict:     return VarKind::Dict;

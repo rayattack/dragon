@@ -921,6 +921,10 @@ struct OwnershipCheck::Impl {
         return e && e->type && e->type->kind() == Type::Kind::Task;
     }
 
+    static bool isByteArrayExpr(Expr* e) {
+        return e && e->type && e->type->kind() == Type::Kind::ByteArray;
+    }
+
     void consumeTaskHandle(NameExpr* tn, Flow& flow) {
         if (!isTaskExpr(tn)) return;
         VarSlot* s = resolve(tn->name);
@@ -1371,6 +1375,16 @@ struct OwnershipCheck::Impl {
                           "owns it");
                 return;
             }
+            if (rhsIsMove && isByteArrayExpr(mvRhs)) {
+                BindState d;
+                d.st = St::Dead;
+                d.killLoc = value->location();
+                d.killWasDel = false;
+                d.killDesc = "a frozen bytes";
+                if (VarSlot* src = resolve(mvRhs->name))
+                    flow.states[src->id] = d;
+                return;
+            }
             if (rhsIsMove) {
                 error(value->location(),
                       "a move needs a consuming destination (an own field or "
@@ -1778,7 +1792,7 @@ struct OwnershipCheck::Impl {
         }
         if (auto* r = dynamic_cast<ReturnStmt*>(s)) {
             if (auto* mv = dynamic_cast<NameExpr*>(r->value.get());
-                mv && mv->isMoveMarked)
+                mv && mv->isMoveMarked && !mv->freezesByteArray)
                 error(r->value->location(),
                       "a return already hands the caller its own reference; "
                       "'own " + mv->name +

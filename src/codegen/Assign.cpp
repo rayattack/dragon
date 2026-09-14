@@ -8,6 +8,7 @@ bool isPtrElemKind(Type::Kind k) {
     switch (k) {
         case Type::Kind::Str:
         case Type::Kind::Bytes:
+        case Type::Kind::ByteArray:
         case Type::Kind::List:
         case Type::Kind::Dict:
         case Type::Kind::Tuple:
@@ -68,6 +69,22 @@ void CodeGen::visit(AssignStmt& node) {
 
         if (auto* sub = dynamic_cast<SubscriptExpr*>(target.get())) {
             if (tryEmitSetitemOverloadStore(*sub, val)) continue;
+            if (sub->object->type &&
+                sub->object->type->kind() == Type::Kind::ByteArray) {
+                sub->object->accept(*this);
+                llvm::Value* ba = impl_->lastValue;
+                sub->index->accept(*this);
+                llvm::Value* idx = impl_->lastValue;
+                if (idx->getType() == impl_->i1Type)
+                    idx = impl_->builder->CreateZExt(idx, impl_->i64Type);
+                llvm::Value* byteVal = val;
+                if (byteVal->getType() == impl_->i1Type)
+                    byteVal = impl_->builder->CreateZExt(byteVal, impl_->i64Type);
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_bytearray_set"],
+                    {impl_->toI8Ptr(ba), idx, byteVal});
+                continue;
+            }
             if (tryEmitDictSubscriptStore(*sub, node, val)) continue;
             tryEmitListSubscriptStore(*sub, node, val);
             continue;
@@ -711,6 +728,7 @@ void CodeGen::emitTupleUnpackAssign(TupleExpr& tupleTarget, AssignStmt& node,
                 break;
             case Type::Kind::Str:
             case Type::Kind::Bytes:
+            case Type::Kind::ByteArray:
             case Type::Kind::List:
             case Type::Kind::Dict:
             case Type::Kind::Set:
@@ -1271,6 +1289,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::inferBoundVarKind(
         return VarKind::Str;
     switch (value->type->kind()) {
         case Type::Kind::Bytes:
+        case Type::Kind::ByteArray:
         case Type::Kind::List:
         case Type::Kind::Deque:
         case Type::Kind::Dict:

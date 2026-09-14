@@ -121,6 +121,7 @@ std::string PrimitiveType::toString() const {
         case Kind::Bool: return "bool";
         case Kind::Str: return "str";
         case Kind::Bytes: return "bytes";
+        case Kind::ByteArray: return "bytearray";
         case Kind::None_: return "None";
         default: return "<primitive?>";
     }
@@ -492,6 +493,9 @@ bool TypeChecker::check(Module& module) {
     impl_->define("bytes", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->bytesType));
+    impl_->define("bytearray", std::make_shared<FunctionType>(
+        std::vector<std::shared_ptr<Type>>{impl_->intType},
+        impl_->byteArrayType));
     impl_->define("abs", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->boxedType},
         impl_->intType));
@@ -798,6 +802,7 @@ void TypeChecker::initBuiltinTypes() {
     impl_->boolType = std::make_shared<PrimitiveType>(Type::Kind::Bool);
     impl_->strType = std::make_shared<PrimitiveType>(Type::Kind::Str);
     impl_->bytesType = std::make_shared<PrimitiveType>(Type::Kind::Bytes);
+    impl_->byteArrayType = std::make_shared<PrimitiveType>(Type::Kind::ByteArray);
     impl_->noneType = std::make_shared<PrimitiveType>(Type::Kind::None_);
     impl_->boxedType = std::make_shared<BoxedType>();
     impl_->neverType = std::make_shared<NeverType>();
@@ -809,6 +814,7 @@ void TypeChecker::initBuiltinTypes() {
     impl_->typeNames["bool"] = impl_->boolType;
     impl_->typeNames["str"] = impl_->strType;
     impl_->typeNames["bytes"] = impl_->bytesType;
+    impl_->typeNames["bytearray"] = impl_->byteArrayType;
     impl_->typeNames["None"] = impl_->noneType;
     impl_->typeNames["Never"] = impl_->neverType;
     // Internal-only spelling for compiler-synthesized decoder bodies;
@@ -1691,6 +1697,7 @@ bool dubable(const Type* t, std::string& why,
         case Type::Kind::None_:
         case Type::Kind::Str:
         case Type::Kind::Bytes:
+        case Type::Kind::ByteArray:
             return true;
         case Type::Kind::List: {
             auto& lt = static_cast<const ListType&>(*t);

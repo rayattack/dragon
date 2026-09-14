@@ -2221,6 +2221,10 @@ void TypeChecker::visit(SubscriptExpr& node) {
         node.type = isSlice ? impl_->bytesType : impl_->intType;
         return;
     }
+    if (objType->kind() == Type::Kind::ByteArray) {
+        node.type = isSlice ? impl_->bytesType : impl_->intType;
+        return;
+    }
     if (objType->kind() == Type::Kind::Boxed) {
         node.type = objType;
         return;

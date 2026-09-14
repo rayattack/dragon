@@ -104,6 +104,17 @@ void TypeChecker::checkSubscriptSlotStore(AssignStmt& node,
     checkUnionSlotStore(node.value.get(), slot, node.location(), "a slot");
 }
 
+bool TypeChecker::isByteArrayFreeze(Expr* value, const Type& from,
+                                    const Type& to) {
+    if (from.kind() != Type::Kind::ByteArray ||
+        to.kind() != Type::Kind::Bytes)
+        return false;
+    auto* named = dynamic_cast<NameExpr*>(value);
+    if (!named || !named->isMoveMarked) return false;
+    named->freezesByteArray = true;
+    return true;
+}
+
 void TypeChecker::refuseStoreIntoUnwritableSlot(
         SubscriptExpr& sub, const std::shared_ptr<Type>& container) {
     if (!container) return;
@@ -431,6 +442,7 @@ void TypeChecker::visit(AssignStmt& node) {
             valueType->kind() != Type::Kind::Unknown &&
             !(elemIsType && valueType->kind() == Type::Kind::List) &&
             !valueType->isAssignableTo(*annotType) &&
+            !isByteArrayFreeze(node.value.get(), *valueType, *annotType) &&
             !tryExpectedTypeLiteral(node.value.get(), annotType)) {
             error(node.location(), "cannot assign '" + valueType->toString() +
                   "' to variable of type '" + annotType->toString() + "'" +
@@ -617,6 +629,7 @@ void TypeChecker::visit(AnnAssignStmt& node) {
             valueType->kind() != Type::Kind::Unknown &&
             !(elemIsType && valueType->kind() == Type::Kind::List) &&
             !valueType->isAssignableTo(*annotType) &&
+            !isByteArrayFreeze(node.value.get(), *valueType, *annotType) &&
             !tryExpectedTypeLiteral(node.value.get(), annotType)) {
             error(node.location(), "cannot assign '" + valueType->toString() +
                   "' to variable of type '" + annotType->toString() + "'" +
@@ -1328,6 +1341,7 @@ void TypeChecker::visit(MatchStmt& node) {
             case Type::Kind::Bool:  return "bool";
             case Type::Kind::Str:   return "str";
             case Type::Kind::Bytes: return "bytes";
+            case Type::Kind::ByteArray: return "bytearray";
             case Type::Kind::List:  return "list";
             case Type::Kind::Dict:  return "dict";
             case Type::Kind::Tuple: return "tuple";
@@ -1461,6 +1475,7 @@ void TypeChecker::visit(ReturnStmt& node) {
                 // bodies that are fine for every real instantiation.
                 expected->kind() != Type::Kind::TypeVar &&
                 !retType->isAssignableTo(*expected) &&
+                !isByteArrayFreeze(node.value.get(), *retType, *expected) &&
                 !tryExpectedTypeLiteral(node.value.get(), expected)) {
                 error(node.location(), "return type '" + retType->toString() +
                       "' does not match declared return type '" +

@@ -2253,3 +2253,9 @@ TEST(TypeCheckerTest, ImmutableIndexStoreRejected) {
     EXPECT_TRUE(checkOk(code("bytes_index_read_accepted")));
     EXPECT_TRUE(checkOk(code("list_index_store_still_accepted")));
 }
+
+TEST(TypeCheckerTest, ByteArrayFreezeRules) {
+    EXPECT_TRUE(checkHasErrors(code("bytearray_needs_own_to_become_bytes")));
+    EXPECT_TRUE(checkOk(code("bytearray_index_store_accepted")));
+    EXPECT_TRUE(checkOk(code("bytearray_freeze_accepted")));
+}

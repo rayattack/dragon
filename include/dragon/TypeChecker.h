@@ -14,7 +14,7 @@ namespace dragon {
 class Type {
 public:
     enum class Kind {
-        Int, Float, Bool, Str, Bytes, None_,
+        Int, Float, Bool, Str, Bytes, ByteArray, None_,
         List, Dict, Set, Tuple, Function, Task, Lock,
         Class, Instance, Boxed, Never, Union, Optional, TypeVar, Unknown,
         Contract,
@@ -418,6 +418,7 @@ private:
                                  const std::shared_ptr<Type>& slot);
     void refuseStoreIntoUnwritableSlot(SubscriptExpr& sub,
                                        const std::shared_ptr<Type>& container);
+    bool isByteArrayFreeze(Expr* value, const Type& from, const Type& to);
     void checkUnionSlotStore(Expr* value, const std::shared_ptr<Type>& slot,
                              const SourceLocation& loc,
                              const std::string& what);

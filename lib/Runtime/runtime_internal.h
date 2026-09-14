@@ -93,6 +93,7 @@ enum DragonTypeTag : uint8_t {
     DRAGON_TAG_DEQUE     = 12,
     DRAGON_TAG_CELL      = 13,
     DRAGON_TAG_LIST_BOX  = 14,
+    DRAGON_TAG_BYTEARRAY = 15,
 };
 
 static inline void dragon_obj_init(DragonObjectHeader* h, uint8_t tag) {
@@ -856,6 +857,12 @@ void dragon_set_add(DragonSet* s, int64_t val);
 int64_t dragon_set_contains(DragonSet* s, int64_t val);
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len);
+DragonBytes* dragon_bytearray_new(int64_t len);
+DragonBytes* dragon_bytearray_copy(DragonBytes* src);
+DragonBytes* dragon_bytearray_freeze(DragonBytes* ba);
+int64_t dragon_bytearray_len(DragonBytes* ba);
+int64_t dragon_bytearray_get(DragonBytes* ba, int64_t index);
+void dragon_bytearray_set(DragonBytes* ba, int64_t index, int64_t value);
 DragonBytes* dragon_bytes_empty();
 DragonBytes* dragon_bytes_from_list(DragonList* list);
 

@@ -527,3 +527,8 @@ TEST(OwnershipCheckTest, TaskReboundToSecondHandleRejected) {
 TEST(OwnershipCheckTest, TaskIsAliveThroughAnyReceiverOk) {
     EXPECT_TRUE(ownAccepts(code("task_is_alive_through_any_receiver_ok")));
 }
+
+TEST(OwnershipCheckTest, ByteArrayUseAfterFreezeRejected) {
+    std::string e = ownError(code("bytearray_use_after_freeze_rejected"));
+    EXPECT_NE(e.find("frozen"), std::string::npos) << e;
+}

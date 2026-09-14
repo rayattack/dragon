@@ -1072,6 +1072,15 @@ void CodeGen::visit(SubscriptExpr& node) {
         idx = impl_->builder->CreateZExt(idx, impl_->i64Type);
     }
 
+    if (node.object->type &&
+        node.object->type->kind() == Type::Kind::ByteArray &&
+        obj->getType()->isPointerTy()) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_bytearray_get"], {obj, idx}, "ba.get");
+        impl_->popArgTempCleanups(subBases);
+        return;
+    }
+
     if (!obj->getType()->isPointerTy()) {
         impl_->addError(
             "cannot subscript this expression: the receiver lowered to a "

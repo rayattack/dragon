@@ -165,6 +165,7 @@ class NameExpr : public Expr {
 public:
     std::string name;
     bool isMoveMarked = false;
+    bool freezesByteArray = false;
     bool isDubMarked = false;
     void accept(ASTVisitor& visitor) override;
 };

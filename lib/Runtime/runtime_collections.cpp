@@ -1170,6 +1170,53 @@ DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
     return b;
 }
 
+DragonBytes* dragon_bytearray_new(int64_t len) {
+    if (len < 0) len = 0;
+    auto* b = (DragonBytes*)dragon_xmalloc((size_t)len + sizeof(DragonBytes) + 1);
+    dragon_obj_init(&b->header, DRAGON_TAG_BYTEARRAY);
+    b->len = len;
+    b->data = (uint8_t*)(b + 1);
+    memset(b->data, 0, (size_t)len + 1);
+    return b;
+}
+
+DragonBytes* dragon_bytearray_copy(DragonBytes* src) {
+    int64_t n = src ? src->len : 0;
+    DragonBytes* out = dragon_bytearray_new(n);
+    if (src && n > 0) memcpy(out->data, src->data, (size_t)n);
+    return out;
+}
+
+DragonBytes* dragon_bytearray_freeze(DragonBytes* ba) {
+    if (!ba) return dragon_bytes_new(nullptr, 0);
+    __atomic_store_n(&ba->header.type_tag, (uint8_t)DRAGON_TAG_BYTES,
+                     __ATOMIC_RELEASE);
+    dragon_incref(ba);
+    return ba;
+}
+
+int64_t dragon_bytearray_len(DragonBytes* ba) {
+    return ba ? ba->len : 0;
+}
+
+int64_t dragon_bytearray_get(DragonBytes* ba, int64_t index) {
+    if (!ba) dragon_raise_exc_cstr(41, "IndexError: bytearray index out of range");
+    int64_t i = index < 0 ? ba->len + index : index;
+    if (i < 0 || i >= ba->len)
+        dragon_raise_exc_cstr(41, "IndexError: bytearray index out of range");
+    return (int64_t)ba->data[i];
+}
+
+void dragon_bytearray_set(DragonBytes* ba, int64_t index, int64_t value) {
+    if (!ba) dragon_raise_exc_cstr(41, "IndexError: bytearray index out of range");
+    int64_t i = index < 0 ? ba->len + index : index;
+    if (i < 0 || i >= ba->len)
+        dragon_raise_exc_cstr(41, "IndexError: bytearray index out of range");
+    if (value < 0 || value > 255)
+        dragon_raise_exc_cstr(90, "ValueError: byte must be in range(0, 256)");
+    ba->data[i] = (uint8_t)value;
+}
+
 DragonBytes* dragon_bytes_from_literal(const char* data, int64_t len) {
     return dragon_bytes_new((const uint8_t*)data, len);
 }

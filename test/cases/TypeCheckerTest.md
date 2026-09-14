@@ -4243,3 +4243,47 @@ def main() -> None {
 
 main()
 ```
+
+#### :bytearray_needs_own_to_become_bytes
+
+A bytearray is mutable and a bytes is not, so handing one over has to be
+spelled. Without `own` this would leave two live handles to one buffer, one of
+which can still write through it.
+
+```dr
+def main() -> None {
+    b: bytearray = bytearray(2)
+    f: bytes = b
+    print(len(f))
+}
+
+main()
+```
+
+#### :bytearray_index_store_accepted
+
+```dr
+def main() -> None {
+    b: bytearray = bytearray(2)
+    b[0] = 65
+    print(b[0])
+}
+
+main()
+```
+
+#### :bytearray_freeze_accepted
+
+```dr
+def build() -> bytes {
+    b: bytearray = bytearray(2)
+    b[0] = 65
+    return own b
+}
+
+def main() -> None {
+    print(len(build()))
+}
+
+main()
+```

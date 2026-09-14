@@ -988,6 +988,7 @@ void Sema::defineBuiltins() {
     defineBuiltin("str", Symbol::Kind::Class);
     defineBuiltin("bool", Symbol::Kind::Class);
     defineBuiltin("bytes", Symbol::Kind::Class);
+    defineBuiltin("bytearray", Symbol::Kind::Class);
     defineBuiltin("list", Symbol::Kind::Class);
     defineBuiltin("dict", Symbol::Kind::Class);
     defineBuiltin("set", Symbol::Kind::Class);

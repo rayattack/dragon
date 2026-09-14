@@ -1458,8 +1458,111 @@ class BytesLiteralImmortalTests(TestCase) {
 }
 
 
+def build_run(n: int, base: int) -> bytes {
+    buf: bytearray = bytearray(n)
+    for i in range(n) {
+        buf[i] = base + i
+    }
+    return own buf
+}
+
+
+class ByteArrayTests(TestCase) {
+    """bytearray is the mutable half of the bytes family: same heap layout, its
+    own type tag. `own` freezes one into bytes by flipping that tag, so the
+    buffer is never copied and the source binding dies at the freeze. `dub`
+    must copy rather than retain, because two live handles to one mutable
+    buffer would alias."""
+
+    def test_new_is_zeroed_and_sized() {
+        b: bytearray = bytearray(4)
+        self.assertEqual(len(b), 4)
+        self.assertEqual(b[0], 0)
+        self.assertEqual(b[3], 0)
+    }
+
+    def test_index_write_then_read() {
+        b: bytearray = bytearray(3)
+        b[0] = 72
+        b[1] = 105
+        b[2] = 33
+        self.assertEqual(b[0], 72)
+        self.assertEqual(b[1], 105)
+        self.assertEqual(b[2], 33)
+    }
+
+    def test_negative_indices() {
+        b: bytearray = bytearray(3)
+        b[-1] = 90
+        self.assertEqual(b[-1], 90)
+        self.assertEqual(b[2], 90)
+    }
+
+    def test_index_out_of_range_raises() {
+        b: bytearray = bytearray(2)
+        raised: bool = False
+        try {
+            b[5] = 1
+        } except IndexError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_value_out_of_byte_range_raises() {
+        b: bytearray = bytearray(2)
+        raised: bool = False
+        try {
+            b[0] = 256
+        } except ValueError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_dub_copies_rather_than_aliases() {
+        a: bytearray = bytearray(2)
+        a[0] = 10
+        c: bytearray = dub a
+        c[0] = 99
+        self.assertEqual(a[0], 10)
+        self.assertEqual(c[0], 99)
+    }
+
+    def test_own_freezes_into_bytes() {
+        b: bytearray = bytearray(3)
+        b[0] = 72
+        b[1] = 105
+        b[2] = 33
+        f: bytes = own b
+        self.assertEqual(len(f), 3)
+        self.assertEqual(f, b"Hi!")
+        self.assertEqual(f.decode(), "Hi!")
+    }
+
+    def test_a_frozen_buffer_is_an_ordinary_bytes() {
+        f: bytes = build_run(3, 65)
+        self.assertEqual(f, b"ABC")
+        self.assertEqual(f + b"D", b"ABCD")
+        self.assertEqual(f[1:3], b"BC")
+        self.assertEqual(len(f), 3)
+        self.assertEqual(hash(f), hash(b"ABC"))
+    }
+
+    def test_freeze_survives_a_union_round_trip() {
+        f: bytes = build_run(2, 97)
+        v: int | bytes = f
+        narrowed: int = 0
+        if isinstance(v, bytes) {
+            narrowed = len(v)
+        }
+        self.assertEqual(narrowed, 2)
+    }
+}
+
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
       BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests(),
-      BytesLiteralImmortalTests()])
+      BytesLiteralImmortalTests(), ByteArrayTests()])

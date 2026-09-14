@@ -4,6 +4,17 @@
 namespace dragon {
 
 void CodeGen::visit(NameExpr& node) {
+    if (node.freezesByteArray) {
+        node.freezesByteArray = false;
+        node.accept(*this);
+        node.freezesByteArray = true;
+        llvm::Value* raw = impl_->lastValue;
+        if (raw && raw->getType()->isPointerTy())
+            impl_->lastValue = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_bytearray_freeze"],
+                {impl_->toI8Ptr(raw)}, "freeze");
+        return;
+    }
     if (node.isDubMarked && impl_->options.gcMode == GCMode::RC) {
         node.isDubMarked = false;
         node.accept(*this);
@@ -34,6 +45,7 @@ void CodeGen::visit(NameExpr& node) {
             case Type::Kind::List:  fn = "dragon_list_deep_copy"; break;
             case Type::Kind::Dict:  fn = "dragon_dict_deep_copy"; break;
             case Type::Kind::Set:   fn = "dragon_set_copy"; break;
+            case Type::Kind::ByteArray: fn = "dragon_bytearray_copy"; break;
             case Type::Kind::Bytes:
             case Type::Kind::Tuple: fn = "dragon_obj_retain"; break;
             default: break;

@@ -59,7 +59,7 @@ struct CodeGen::Impl {
 
     llvm::Value* lastValue = nullptr;
 
-    enum class VarKind { Int, Float, Bool, Str, StrLiteral, List, Bytes, Dict, Tuple, Set, File, ClassInstance, Generator, Type, Closure, Union, Deque, Other };
+    enum class VarKind { Int, Float, Bool, Str, StrLiteral, List, Bytes, ByteArray, Dict, Tuple, Set, File, ClassInstance, Generator, Type, Closure, Union, Deque, Other };
 
     struct Scope {
         std::unordered_map<std::string, llvm::AllocaInst*> vars;
@@ -746,7 +746,7 @@ struct CodeGen::Impl {
 
     static bool isHeapKind(VarKind k) {
         return k == VarKind::Str || k == VarKind::List || k == VarKind::Dict ||
-               k == VarKind::Bytes ||
+               k == VarKind::Bytes || k == VarKind::ByteArray ||
                k == VarKind::Tuple || k == VarKind::Set ||
                k == VarKind::File || k == VarKind::ClassInstance || k == VarKind::Generator ||
                k == VarKind::Deque ||

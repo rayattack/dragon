@@ -36,6 +36,7 @@ struct TypeChecker::Impl {
     std::shared_ptr<PrimitiveType> boolType;
     std::shared_ptr<PrimitiveType> strType;
     std::shared_ptr<PrimitiveType> bytesType;
+    std::shared_ptr<PrimitiveType> byteArrayType;
     std::shared_ptr<PrimitiveType> noneType;
     std::shared_ptr<BoxedType> boxedType;
     std::shared_ptr<NeverType> neverType;

@@ -1143,3 +1143,20 @@ class Probe {
 p: Probe = Probe()
 print(f"{p.a()} {p.b()} {p.c()}")
 ```
+
+#### :bytearray_use_after_freeze_rejected
+
+`own` consumes the buffer. Writing through the old binding afterwards would
+mutate a value the program now believes is immutable.
+
+```dr
+def main() -> None {
+    b: bytearray = bytearray(2)
+    f: bytes = own b
+    b[0] = 1
+    print(len(f))
+}
+
+main()
+```
+
