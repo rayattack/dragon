@@ -35,6 +35,8 @@ extern "C" {
 #define MSG_NOSIGNAL 0
 #endif
 
+void dragon_vthread_yield(void);
+
 static void vthread_wake(DragonVThread* vt);
 static void vthread_arm_park(DragonVThread* vt);
 static DragonVThread* dragon_green_self(void);
@@ -1276,18 +1278,34 @@ void dragon_io_watch_fd_deadline(int fd, int event_type, DragonVThread* vt,
     io_post_request(req);
 }
 
+#ifndef _WIN32
+static void os_sleep_whole_duration(int64_t ms) {
+    struct timespec remaining;
+    remaining.tv_sec = (time_t)(ms / 1000);
+    remaining.tv_nsec = (long)((ms % 1000) * 1000000);
+    while (nanosleep(&remaining, &remaining) != 0 && errno == EINTR) {
+    }
+}
+#endif
+
 void dragon_vthread_sleep(int64_t ms) {
     pthread_once(&__io_once, io_init);
 
     DragonVThread* vt = __current_vthread;
     if (!vt || !vt->coro) {
+        if (ms <= 0) return;
         dragon_gc_safe_begin();
 #ifdef _WIN32
         Sleep((DWORD)ms);
 #else
-        usleep((useconds_t)(ms * 1000));
+        os_sleep_whole_duration(ms);
 #endif
         dragon_gc_safe_end();
+        return;
+    }
+
+    if (ms <= 0) {
+        dragon_vthread_yield();
         return;
     }
 

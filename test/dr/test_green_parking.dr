@@ -221,6 +221,29 @@ def mx_hammer() -> int {
 }
 
 
+def ms_napper() -> int {
+    time.sleep_ms(200)
+    return 1
+}
+
+def float_napper() -> int {
+    time.sleep_float(0.15)
+    return 1
+}
+
+def secs_napper() -> int {
+    time.sleep_secs(1)
+    return 1
+}
+
+def zero_napper() -> int {
+    time.sleep_ms(0)
+    time.sleep_float(0.0)
+    time.sleep_secs(0)
+    return 1
+}
+
+
 class LockParkingTests(TestCase) {
     def test_contended_lock_frees_carriers() {
         global hits
@@ -544,6 +567,82 @@ class ExternDetachTests(TestCase) {
 }
 
 
+class SleepParkingTests(TestCase) {
+    def test_sleep_ms_fanout_overlaps_on_two_carriers() {
+        const t0: float = time.monotonic()
+        nappers: list[Task[int]] = []
+        for i in range(400) {
+            nappers.append(fire ms_napper())
+        }
+        woke: int = 0
+        for n in nappers {
+            woke = woke + n.join()
+        }
+        const elapsed: float = time.monotonic() - t0
+        self.assertEqual(woke, 400)
+        self.assertGreaterEqual(elapsed, 0.2, "the sleepers never slept")
+        self.assertLess(elapsed, 1.0, "sleep_ms held its carrier: 400 sleepers serialized")
+    }
+
+    def test_sleep_float_fanout_overlaps_on_two_carriers() {
+        const t0: float = time.monotonic()
+        nappers: list[Task[int]] = []
+        for i in range(400) {
+            nappers.append(fire float_napper())
+        }
+        woke: int = 0
+        for n in nappers {
+            woke = woke + n.join()
+        }
+        const elapsed: float = time.monotonic() - t0
+        self.assertEqual(woke, 400)
+        self.assertGreaterEqual(elapsed, 0.15, "the sleepers never slept")
+        self.assertLess(elapsed, 1.5, "sleep_float held its carrier: 400 sleepers serialized")
+    }
+
+    def test_sleep_secs_fanout_overlaps_on_two_carriers() {
+        const t0: float = time.monotonic()
+        nappers: list[Task[int]] = []
+        for i in range(64) {
+            nappers.append(fire secs_napper())
+        }
+        woke: int = 0
+        for n in nappers {
+            woke = woke + n.join()
+        }
+        const elapsed: float = time.monotonic() - t0
+        self.assertEqual(woke, 64)
+        self.assertGreaterEqual(elapsed, 1.0, "the sleepers never slept")
+        self.assertLess(elapsed, 5.0, "sleep_secs held its carrier: 64 sleepers serialized")
+    }
+
+    def test_zero_length_sleeps_reschedule_instead_of_parking_forever() {
+        z: Task[int] = fire zero_napper()
+        const t0: float = time.monotonic()
+        while z.is_alive() and time.monotonic() - t0 < 5.0 {
+            time.sleep_ms(5)
+        }
+        const done: bool = not z.is_alive()
+        self.assertTrue(done, "a zero-length sleep parked on a timer that never fires")
+        if done {
+            self.assertEqual(z.join(), 1)
+        }
+    }
+
+    def test_sleep_off_a_green_thread_still_sleeps() {
+        const t0: float = time.monotonic()
+        time.sleep_ms(50)
+        self.assertGreaterEqual(time.monotonic() - t0, 0.05, "sleep_ms returned early on the main thread")
+        const t1: float = time.monotonic()
+        time.sleep_float(0.0002)
+        self.assertGreaterEqual(time.monotonic() - t1, 0.001, "a sub-millisecond sleep was rounded down to nothing")
+        const t2: float = time.monotonic()
+        time.sleep_secs(1)
+        self.assertGreaterEqual(time.monotonic() - t2, 1.0, "sleep_secs returned early on the main thread")
+    }
+}
+
+
 main([LockParkingTests(), EventParkingTests(), ConditionParkingTests(),
       SemaphoreParkingTests(), BarrierParkingTests(), JoinParkingTests(),
-      RWLockParkingTests(), ExternDetachTests()])
+      RWLockParkingTests(), ExternDetachTests(), SleepParkingTests()])

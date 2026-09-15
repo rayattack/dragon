@@ -112,6 +112,34 @@ declarations, so call the Dragon wrappers below rather than those.
 Use `monotonic()` (or `perf_counter()`) for measuring elapsed time, and
 `now()`/`now_float()` when you need a real-world timestamp.
 
+Every sleep is green-thread aware. Inside a `fire`d task the sleep parks the green
+thread on the runtime's timer and hands its carrier OS thread back to the scheduler,
+so four hundred tasks that each `time.sleep_ms(200)` finish in about 200 ms on two
+carriers instead of queueing up behind them:
+
+```dragon
+import time
+
+def napper() -> int {
+    time.sleep_ms(200)
+    return 1
+}
+
+nappers: list[Task[int]] = []
+for i in range(400) {
+    nappers.append(fire napper())
+}
+for n in nappers { n.join() }
+```
+
+Called off a green thread (the main thread, or inside an OS `Thread`), the same
+call sleeps that one OS thread and nothing else, and it resumes the remainder of
+the duration if a signal interrupts it.
+
+`sleep_float` rounds up to the next whole millisecond, so `sleep_float(0.0002)`
+sleeps 1 ms rather than returning immediately. A zero or negative duration does not
+sleep at all: on a green thread it yields to the scheduler, elsewhere it returns.
+
 ```dragon
 import time
 
@@ -126,7 +154,8 @@ print(time.now() > 1700000000)   # True
 **Differs from Python.** The single Python `time.sleep(secs)` is split into
 three typed wrappers - `sleep_secs`, `sleep_ms`, and `sleep_float` - because
 Dragon does not overload on argument type. `time.time()` is `now()` /
-`now_float()`. The sleep wrappers return an `int` status code, not `None`.
+`now_float()`. The sleep wrappers return an `int`, not `None`: `0` once the whole
+requested duration has elapsed.
 
 ---
 

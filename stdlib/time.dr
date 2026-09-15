@@ -13,6 +13,8 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 
+extern "C" def dragon_vthread_sleep(ms: int) -> None
+
 extern "C" def dragon_timespec_new(sec: int, nsec: int) -> ptr
 extern "C" def dragon_timespec_sec(ts: ptr) -> int
 extern "C" def dragon_timespec_nsec(ts: ptr) -> int
@@ -26,6 +28,7 @@ CLOCK_MONOTONIC: int = dragon_clock_monotonic_id()
 CLOCK_PROCESS: int = dragon_clock_process_id()
 
 const CLOCKS_PER_SEC: int = 1000000
+const MILLIS_PER_SEC: int = 1000
 
 def now() -> int {
     return time(none)
@@ -55,22 +58,28 @@ def process_time() -> float {
     return float(clock()) / float(CLOCKS_PER_SEC)
 }
 
+def _milliseconds_ceil(seconds: float) -> int {
+    const exact: float = seconds * float(MILLIS_PER_SEC)
+    const whole: int = int(exact)
+    if float(whole) < exact {
+        return whole + 1
+    }
+    return whole
+}
+
 def sleep_secs(seconds: int) -> int {
-    return sleep(seconds)
+    dragon_vthread_sleep(seconds * MILLIS_PER_SEC)
+    return 0
 }
 
 def sleep_ms(milliseconds: int) -> int {
-    const us: int = milliseconds * 1000
-    return usleep(us)
+    dragon_vthread_sleep(milliseconds)
+    return 0
 }
 
 def sleep_float(seconds: float) -> int {
-    const sec: int = int(seconds)
-    const nsec: int = int((seconds - float(sec)) * 1000000000.0)
-    const ts: ptr = dragon_timespec_new(sec, nsec)
-    const rc: int = nanosleep(ts, none)
-    free(ts)
-    return rc
+    dragon_vthread_sleep(_milliseconds_ceil(seconds))
+    return 0
 }
 
 def perf_counter() -> float {
