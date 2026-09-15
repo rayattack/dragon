@@ -583,8 +583,11 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     {
         auto* setjmpType = llvm::FunctionType::get(
             llvm::Type::getInt32Ty(*context), {i8PtrType}, false);
-        auto* setjmpFunc = getOrDeclareRuntime("setjmp", setjmpType);
+        const char* maskFreeSetjmp =
+            module->getTargetTriple().isOSWindows() ? "setjmp" : "_setjmp";
+        auto* setjmpFunc = getOrDeclareRuntime(maskFreeSetjmp, setjmpType);
         setjmpFunc->addFnAttr(llvm::Attribute::ReturnsTwice);
+        runtimeFuncs["setjmp"] = setjmpFunc;
     }
 
     getOrDeclareRuntime("dragon_min_int",

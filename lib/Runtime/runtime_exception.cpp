@@ -1,5 +1,11 @@
 #include "runtime_internal.h"
 
+#ifdef _WIN32
+#define dragon_longjmp longjmp
+#else
+#define dragon_longjmp _longjmp
+#endif
+
 extern "C" {
 
 void dragon_raise_exc(int64_t type, const char* msg);
@@ -125,7 +131,7 @@ static void dragon_raise_exc_impl(int64_t type, void* obj, const char* msg,
         EXC_VT->exc_type = (int)type;
         if (EXC_VT->exc_sp >= 0) {
             int sp = EXC_VT->exc_sp;
-            longjmp(EXC_VT->exc_stack[sp], (int)type);
+            dragon_longjmp(EXC_VT->exc_stack[sp], (int)type);
         }
         fprintf(stderr, "Unhandled exception: %s\n",
                 EXC_VT->exc_msg ? EXC_VT->exc_msg : "");
@@ -134,7 +140,7 @@ static void dragon_raise_exc_impl(int64_t type, void* obj, const char* msg,
     __dragon_exc_type = (int)type;
     if (__dragon_exc_sp >= 0) {
         int sp = __dragon_exc_sp;
-        longjmp(__dragon_exc_stack[sp], (int)type);
+        dragon_longjmp(__dragon_exc_stack[sp], (int)type);
     }
     fprintf(stderr, "Unhandled exception: %s\n",
             __dragon_exc_msg ? __dragon_exc_msg : "");
