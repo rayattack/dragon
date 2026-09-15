@@ -35,11 +35,32 @@ static const char* dragon_str_strip_ws_impl(const char* s, int do_left, int do_r
     return dragon_str_slice(s, start, stop, 1);
 }
 
+static const char* dragon_str_fold_ascii(const char* s, int64_t n, int upper) {
+    DragonString* out = dragon_string_alloc_raw(n);
+    const unsigned char* src = (const unsigned char*)s;
+    unsigned char* dst = (unsigned char*)out->data;
+    if (upper) {
+        for (int64_t i = 0; i < n; ++i) {
+            unsigned char c = src[i];
+            dst[i] = (unsigned char)(c - (unsigned char)(32 * (c >= 'a' && c <= 'z')));
+        }
+    } else {
+        for (int64_t i = 0; i < n; ++i) {
+            unsigned char c = src[i];
+            dst[i] = (unsigned char)(c + (unsigned char)(32 * (c >= 'A' && c <= 'Z')));
+        }
+    }
+    out->data[n] = '\0';
+    return out->data;
+}
+
 static const char* dragon_str_map_cp(const char* s, uint32_t (*xform)(uint32_t)) {
     if (!s) return dragon_string_alloc("", 0);
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
     int64_t n = ds ? ds->len : (int64_t)strlen(s);
     if (!ds || ds->kind == 1) {
+        if (xform == cp_ascii_lower) return dragon_str_fold_ascii(s, n, 0);
+        if (xform == cp_ascii_upper) return dragon_str_fold_ascii(s, n, 1);
         DragonString* out = dragon_string_alloc_raw(n);
         for (int64_t i = 0; i < n; ++i)
             out->data[i] = (char)xform((uint32_t)(unsigned char)s[i]);
