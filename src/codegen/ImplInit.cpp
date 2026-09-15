@@ -694,6 +694,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_bytearray_set",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
+    getOrDeclareRuntime("dragon_bytearray_write_slice",
+        llvm::FunctionType::get(voidType,
+                                {i8PtrType, i64Type, i64Type, i8PtrType},
+                                false));
     getOrDeclareRuntime("dragon_bytearray_index_error",
         llvm::FunctionType::get(voidType, {}, false));
     getOrDeclareRuntime("dragon_bytearray_value_error",

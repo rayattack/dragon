@@ -419,6 +419,7 @@ private:
     void refuseStoreIntoUnwritableSlot(SubscriptExpr& sub,
                                        const std::shared_ptr<Type>& container);
     bool isByteArrayFreeze(Expr* value, const Type& from, const Type& to);
+    std::shared_ptr<Type> checkByteArrayStore(SubscriptExpr& sub, Expr* value);
     void checkUnionSlotStore(Expr* value, const std::shared_ptr<Type>& slot,
                              const SourceLocation& loc,
                              const std::string& what);

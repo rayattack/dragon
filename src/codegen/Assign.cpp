@@ -72,6 +72,33 @@ void CodeGen::visit(AssignStmt& node) {
             if (tryEmitSetitemOverloadStore(*sub, val)) continue;
             if (sub->object->type &&
                 sub->object->type->kind() == Type::Kind::ByteArray) {
+                if (auto* slice = dynamic_cast<SliceExpr*>(sub->index.get())) {
+                    if (slice->step) {
+                        impl_->addError(
+                            "a strided bytearray slice cannot be assigned; "
+                            "write a contiguous range",
+                            sub->location());
+                        continue;
+                    }
+                    sub->object->accept(*this);
+                    llvm::Value* dst = impl_->toI8Ptr(impl_->lastValue);
+                    auto* sentinel = llvm::ConstantInt::get(impl_->i64Type,
+                                                            INT64_MIN);
+                    llvm::Value* lo = sentinel;
+                    llvm::Value* hi = sentinel;
+                    if (slice->lower) {
+                        slice->lower->accept(*this);
+                        lo = impl_->lastValue;
+                    }
+                    if (slice->upper) {
+                        slice->upper->accept(*this);
+                        hi = impl_->lastValue;
+                    }
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_bytearray_write_slice"],
+                        {dst, lo, hi, impl_->toI8Ptr(val)});
+                    continue;
+                }
                 sub->object->accept(*this);
                 llvm::Value* ba = impl_->lastValue;
                 sub->index->accept(*this);

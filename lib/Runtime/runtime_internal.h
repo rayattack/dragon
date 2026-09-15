@@ -858,6 +858,8 @@ int64_t dragon_set_contains(DragonSet* s, int64_t val);
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len);
 DragonBytes* dragon_bytearray_new(int64_t len);
+void dragon_bytearray_write_slice(DragonBytes* ba, int64_t start,
+                                  int64_t stop, DragonBytes* src);
 void dragon_bytearray_index_error(void);
 void dragon_bytearray_value_error(void);
 DragonBytes* dragon_bytearray_copy(DragonBytes* src);

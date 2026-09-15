@@ -115,6 +115,24 @@ bool TypeChecker::isByteArrayFreeze(Expr* value, const Type& from,
     return true;
 }
 
+std::shared_ptr<Type> TypeChecker::checkByteArrayStore(SubscriptExpr& sub,
+                                                       Expr* value) {
+    auto* slice = dynamic_cast<SliceExpr*>(sub.index.get());
+    if (slice && slice->step)
+        error(sub.location(),
+              "a strided bytearray slice cannot be assigned: the write is a "
+              "block copy, so the range has to be contiguous");
+    std::shared_ptr<Type> want = slice ? impl_->bytesType : impl_->intType;
+    auto valueType = value ? inferType(value) : nullptr;
+    if (valueType && valueType->kind() != Type::Kind::Unknown &&
+        !valueType->isAssignableTo(*want))
+        error(sub.location(),
+              "cannot assign '" + valueType->toString() + "' into a bytearray " +
+                  (slice ? "slice: a slice assignment copies a 'bytes' value"
+                         : "element: an element is an int"));
+    return want;
+}
+
 void TypeChecker::refuseStoreIntoUnwritableSlot(
         SubscriptExpr& sub, const std::shared_ptr<Type>& container) {
     if (!container) return;
@@ -546,6 +564,9 @@ void TypeChecker::visit(AssignStmt& node) {
                     slotType = dt->valueType;
                 else if (auto* lt = dynamic_cast<ListType*>(contType.get()))
                     slotType = lt->elementType;
+                else if (contType &&
+                         contType->kind() == Type::Kind::ByteArray)
+                    slotType = checkByteArrayStore(*sub, node.value.get());
                 else
                     refuseStoreIntoUnwritableSlot(*sub, contType);
                 checkSubscriptSlotStore(node, slotType);

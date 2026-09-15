@@ -4287,3 +4287,60 @@ def main() -> None {
 
 main()
 ```
+
+#### :bytearray_strided_slice_store_rejected
+
+The write is a block copy, so the range has to be contiguous. This was refused
+only at build time until the rule moved into the checker.
+
+```dr
+def main() -> None {
+    buf: bytearray = bytearray(8)
+    buf[0:8:2] = b"abcd"
+}
+
+main()
+```
+
+#### :bytearray_slice_store_needs_bytes
+
+A str right-hand side was accepted with no check at all, which handed a string
+to a block copy expecting a byte buffer.
+
+```dr
+def main() -> None {
+    buf: bytearray = bytearray(8)
+    buf[0:3] = "abc"
+}
+
+main()
+```
+
+#### :bytearray_element_store_needs_int
+
+```dr
+def main() -> None {
+    buf: bytearray = bytearray(4)
+    buf[0] = "x"
+}
+
+main()
+```
+
+#### :bytearray_slice_store_accepted
+
+```dr
+def build(src: bytes, off: int) -> bytes {
+    buf: bytearray = bytearray(16)
+    buf[off:off + len(src)] = src
+    buf[:2] = b"hi"
+    buf[-1:] = b"!"
+    return own buf
+}
+
+def main() -> None {
+    print(len(build(b"abc", 4)))
+}
+
+main()
+```

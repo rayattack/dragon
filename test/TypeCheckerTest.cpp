@@ -2259,3 +2259,10 @@ TEST(TypeCheckerTest, ByteArrayFreezeRules) {
     EXPECT_TRUE(checkOk(code("bytearray_index_store_accepted")));
     EXPECT_TRUE(checkOk(code("bytearray_freeze_accepted")));
 }
+
+TEST(TypeCheckerTest, ByteArraySliceStoreRules) {
+    EXPECT_TRUE(checkHasErrors(code("bytearray_strided_slice_store_rejected")));
+    EXPECT_TRUE(checkHasErrors(code("bytearray_slice_store_needs_bytes")));
+    EXPECT_TRUE(checkHasErrors(code("bytearray_element_store_needs_int")));
+    EXPECT_TRUE(checkOk(code("bytearray_slice_store_accepted")));
+}

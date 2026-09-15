@@ -1350,6 +1350,24 @@ void dragon_bytes_index_error() {
     dragon_raise_exc_cstr(41, "IndexError: bytes index out of range");
 }
 
+void dragon_bytearray_write_slice(DragonBytes* ba, int64_t start, int64_t stop,
+                                  DragonBytes* src) {
+    int64_t cap = ba ? ba->len : 0;
+    if (start == INT64_MIN) start = 0;
+    if (stop == INT64_MIN) stop = cap;
+    if (start < 0) start += cap;
+    if (stop < 0) stop += cap;
+    if (start < 0 || stop > cap || start > stop)
+        dragon_raise_exc_cstr(41,
+            "IndexError: bytearray slice out of range");
+    int64_t n = src ? src->len : 0;
+    if (stop - start != n)
+        dragon_raise_exc_cstr(90,
+            "ValueError: bytearray slice assignment needs a value of the same "
+            "length; a bytearray has a fixed size and cannot resize");
+    if (n > 0) memcpy(ba->data + start, src->data, (size_t)n);
+}
+
 void dragon_bytearray_index_error() {
     dragon_raise_exc_cstr(41, "IndexError: bytearray index out of range");
 }
