@@ -1605,6 +1605,33 @@ class ByteArrayTests(TestCase) {
         self.assertTrue(raised)
     }
 
+    def test_a_slice_reads_out_of_a_bytearray() {
+        src: bytearray = bytearray(6)
+        src[0:6] = b"abcdef"
+        self.assertEqual(src[0:3], b"abc")
+        self.assertEqual(src[3:6], b"def")
+        self.assertEqual(src[:2], b"ab")
+        self.assertEqual(src[-2:], b"ef")
+    }
+
+    def test_bytearray_copies_into_bytearray() {
+        src: bytearray = bytearray(6)
+        src[0:6] = b"abcdef"
+        dst: bytearray = bytearray(6)
+        dst[0:3] = src[3:6]
+        dst[3:6] = src[0:3]
+        f: bytes = own dst
+        self.assertEqual(f, b"defabc")
+    }
+
+    def test_an_overlapping_self_shift_is_safe() {
+        buf: bytearray = bytearray(8)
+        buf[0:8] = b"12345678"
+        buf[2:6] = buf[0:4]
+        f: bytes = own buf
+        self.assertEqual(f, b"12123478")
+    }
+
     def test_freeze_survives_a_union_round_trip() {
         f: bytes = build_run(2, 97)
         v: int | bytes = f

@@ -674,6 +674,9 @@ void CodeGen::visit(SubscriptExpr& node) {
             }
         }
         bool isBytes = impl_->exprIsBytes(node.object.get());
+        if (node.object->type &&
+            node.object->type->kind() == Type::Kind::ByteArray)
+            isBytes = true;
         if (isBytes) isList = false;
         if (!isList && !isBytes && node.object->type &&
             node.object->type->kind() == Type::Kind::List) {
