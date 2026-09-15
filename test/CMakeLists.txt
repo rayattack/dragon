@@ -271,6 +271,17 @@ add_test(NAME dr_shadowed_stdlib_package_guard
         ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr
         -I ${DRAGON_INCLUDE_PROBE_DIR}/shadow)
 
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/badmod/broken.dr
+    CONTENT "def helper() -> int {\n    xs: list[int] = [1,\n    return 0\n}\n")
+file(GENERATE OUTPUT ${DRAGON_INCLUDE_PROBE_DIR}/imports_broken.dr
+    CONTENT "from broken import helper\nprint(helper())\n")
+add_test(NAME dr_imported_module_parse_error_names_the_line
+    COMMAND $<TARGET_FILE:dragon> check
+        ${DRAGON_INCLUDE_PROBE_DIR}/imports_broken.dr
+        -I${DRAGON_INCLUDE_PROBE_DIR}/badmod)
+set_tests_properties(dr_imported_module_parse_error_names_the_line PROPERTIES
+    PASS_REGULAR_EXPRESSION "broken\\.dr:[0-9]+:[0-9]+")
+
 add_test(NAME dr_unknown_option_guard
     COMMAND $<TARGET_FILE:dragon> check
         ${DRAGON_INCLUDE_PROBE_DIR}/shadowed_stdlib.dr --no-such-option)

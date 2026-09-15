@@ -15,6 +15,27 @@ namespace dragon {
 
 namespace {
 
+template <typename Diagnostic>
+std::vector<std::string> formatModuleDiagnostics(
+        const std::vector<Diagnostic>& diags, const std::string& pass,
+        const std::string& moduleName, const std::string& filepath) {
+    std::vector<std::string> out;
+    for (const auto& d : diags) {
+        if (d.level != Diagnostic::Level::Error) continue;
+        out.push_back(d.message + " at [" + filepath + ":" +
+                      std::to_string(d.location.line) + ":" +
+                      std::to_string(d.location.column) + "]");
+    }
+    if (out.empty())
+        out.push_back(pass + " errors in module '" + moduleName + "' (" +
+                      filepath + ")");
+    return out;
+}
+
+}
+
+namespace {
+
 #if defined(_WIN32)
   #define DRAGON_POPEN  _popen
   #define DRAGON_PCLOSE _pclose
@@ -359,7 +380,9 @@ void ModuleResolver::dfs(const std::string& moduleName,
     Lexer lexer(source, lexOpts);
     auto tokens = lexer.tokenize();
     if (lexer.hasErrors()) {
-        errors_.push_back("lexer errors in module '" + moduleName + "' (" + filepath + ")");
+        for (auto& e : formatModuleDiagnostics(lexer.diagnostics(), "lexer",
+                                              moduleName, filepath))
+            errors_.push_back(std::move(e));
         colors[moduleName] = Color::Black;
         return;
     }
@@ -371,7 +394,9 @@ void ModuleResolver::dfs(const std::string& moduleName,
     Parser parser(std::move(tokens), parseOpts);
     auto ast = parser.parseModule();
     if (parser.hasErrors()) {
-        errors_.push_back("parser errors in module '" + moduleName + "' (" + filepath + ")");
+        for (auto& e : formatModuleDiagnostics(parser.diagnostics(), "parser",
+                                              moduleName, filepath))
+            errors_.push_back(std::move(e));
         colors[moduleName] = Color::Black;
         return;
     }
