@@ -513,4 +513,140 @@ class CrossModuleArgRcTests(TestCase) {
 }
 
 
-main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests()])
+const WIDE: str = "café-über-"
+
+
+def heap_ascii(n: int) -> str {
+    const head: str = "payload-"
+    return head + HEX[n & 15] + "-tail-wwwwwwwwwwwwwwwwwwww"
+}
+
+
+def heap_wide(n: int) -> str {
+    return WIDE + HEX[n & 15] + "-tail"
+}
+
+
+def encoded_from_scope(n: int) -> bytes {
+    const s: str = heap_ascii(n)
+    return s.encode("utf-8")
+}
+
+
+class EncodeBorrowRC(TestCase) {
+    def test_encoded_view_outlives_its_source() {
+        i: int = 0
+        while i < 3000 {
+            const view: bytes = encoded_from_scope(i)
+            self.assertEqual(len(view), 35)
+            self.assertEqual(view[0], 112)
+            i = i + 1
+        }
+    }
+
+    def test_encoded_view_of_a_temporary_slice() {
+        i: int = 0
+        while i < 3000 {
+            const view: bytes = heap_ascii(i)[0:8].encode("utf-8")
+            self.assertEqual(view, b"payload-")
+            i = i + 1
+        }
+    }
+
+    def test_encoded_views_survive_in_a_container() {
+        held: list[bytes] = []
+        i: int = 0
+        while i < 2000 {
+            held.append(encoded_from_scope(i))
+            i = i + 1
+        }
+        self.assertEqual(len(held), 2000)
+        self.assertEqual(held[0], held[16])
+        self.assertEqual(held[1999], encoded_from_scope(1999))
+    }
+
+    def test_encode_then_drop_does_not_retain() {
+        i: int = 0
+        while i < 3000 {
+            const view: bytes = heap_ascii(i).encode("utf-8")
+            self.assertEqual(len(view), 35)
+            i = i + 1
+        }
+    }
+
+    def test_slice_of_an_encoded_view_is_independent() {
+        i: int = 0
+        while i < 2000 {
+            const part: bytes = encoded_from_scope(i)[0:8]
+            self.assertEqual(part, b"payload-")
+            i = i + 1
+        }
+    }
+
+    def test_round_trip_matches_the_source() {
+        i: int = 0
+        while i < 2000 {
+            const s: str = heap_ascii(i)
+            self.assertEqual(s.encode("utf-8").decode("utf-8"), s)
+            i = i + 1
+        }
+    }
+
+    def test_wide_source_encodes_to_utf8_and_round_trips() {
+        i: int = 0
+        while i < 2000 {
+            const s: str = heap_wide(i)
+            const view: bytes = s.encode("utf-8")
+            self.assertEqual(len(view), len(s) + 2)
+            self.assertEqual(view.decode("utf-8"), s)
+            i = i + 1
+        }
+    }
+}
+
+
+def owned_slice(n: int) -> bytes {
+    const src: bytes = b"0123456789abcdef"
+    return src[n & 7:(n & 7) + 8]
+}
+
+
+class ByteArraySliceAssignRC(TestCase) {
+    def test_owned_temp_rhs_is_released() {
+        i: int = 0
+        while i < 3000 {
+            ba: bytearray = bytearray(8)
+            ba[0:8] = owned_slice(i)
+            const frozen: bytes = own ba
+            self.assertEqual(len(frozen), 8)
+            i = i + 1
+        }
+    }
+
+    def test_inline_slice_rhs_is_released() {
+        const src: bytes = b"0123456789abcdef"
+        i: int = 0
+        while i < 3000 {
+            ba: bytearray = bytearray(8)
+            ba[0:8] = src[4:12]
+            self.assertEqual(ba[0], 52)
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_binding_rhs_survives_the_write() {
+        const src: bytes = b"abcdefgh"
+        i: int = 0
+        while i < 3000 {
+            ba: bytearray = bytearray(8)
+            ba[0:8] = src
+            self.assertEqual(ba[7], 104)
+            i = i + 1
+        }
+        self.assertEqual(len(src), 8)
+        self.assertEqual(src, b"abcdefgh")
+    }
+}
+
+
+main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC()])

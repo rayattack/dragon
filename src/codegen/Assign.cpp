@@ -97,6 +97,10 @@ void CodeGen::visit(AssignStmt& node) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_bytearray_write_slice"],
                         {dst, lo, hi, impl_->toI8Ptr(val)});
+                    Impl::VarKind wdk =
+                        impl_->ownedTempDrainKind(node.value.get(), val);
+                    if (wdk != Impl::VarKind::Other)
+                        impl_->emitDecrefByKind(val, wdk);
                     continue;
                 }
                 sub->object->accept(*this);
