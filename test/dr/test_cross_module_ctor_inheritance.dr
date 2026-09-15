@@ -11,7 +11,7 @@ class CrossModuleCtorTests(TestCase) {
     def test_inherited_ctor_runs() {
         const r: CustomResponse = CustomResponse()
         self.assertEqual(r.status, 200)
-        const out: str = r.serialize()
+        const out: str = r.serialize().decode("utf-8")
         self.assertIn("200 OK", out)
         self.assertIn("content-type:", out)
     }
@@ -19,7 +19,7 @@ class CrossModuleCtorTests(TestCase) {
     def test_inherited_mutable_fields_initialized() {
         const r: CustomResponse = CustomResponse()
         r.cookie("k", "v")
-        const out: str = r.serialize()
+        const out: str = r.serialize().decode("utf-8")
         self.assertIn("set-cookie: k=v", out)
     }
 
@@ -27,7 +27,7 @@ class CrossModuleCtorTests(TestCase) {
         const r: CustomResponse = CustomResponse()
         self.assertEqual(r.tag(), "custom")
         r.text("hello")
-        self.assertIn("hello", r.serialize())
+        self.assertIn("hello", r.serialize().decode("utf-8"))
     }
 }
 

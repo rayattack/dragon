@@ -1162,6 +1162,10 @@ static inline DragonBytes* dragon_bytes_alloc(int64_t len) {
     return b;
 }
 
+DragonBytes* dragon_bytes_alloc_raw(int64_t len) {
+    return dragon_bytes_alloc(len);
+}
+
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
     DragonBytes* b = dragon_bytes_alloc(len);
     if (len <= 0) return b;

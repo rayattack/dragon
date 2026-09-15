@@ -1,4 +1,5 @@
 from http.server import Router, Request, Response, Context
+from html import HTML
 
 
 const port: int = 8080
@@ -6,7 +7,7 @@ const app: Router = Router(port, "0.0.0.0")
 
 
 app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
-    res.body = template {
+    res.html(template[HTML] {
         <html>
             <head><title>Dragon</title></head>
             <body>
@@ -14,19 +15,19 @@ app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
                 <p>Visit <a href="/hello/world">/hello/world</a></p>
             </body>
         </html>
-    }
+    })
 });
 
 
 app.GET('/hello/:name', lambda (req: Request, res: Response, ctx: Context) -> None {
     name: str = req.params["name"]
-    res.body = f"Hello, {name}!"
+    res.text(f"Hello, {name}!")
 });
 
 
 app.GET('/health', lambda (req: Request, res: Response, ctx: Context) -> None {
     res.headers["content-type"] = "application/json"
-    res.body = '{"status": "ok"}'
+    res.json('{"status": "ok"}')
 });
 
 

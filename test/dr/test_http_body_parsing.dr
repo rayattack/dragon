@@ -6,6 +6,8 @@ from http.connection import MemoryReader
 
 const CRLF: str = "\r\n"
 const CRLF_B: bytes = CRLF.encode()
+const TRUNCATION_PROBE_ROUNDS: int = 2000
+const TRUNCATION_PROBE_DECLARED_BYTES: int = 131072
 
 
 def _open(boundary: str) -> bytes {
@@ -78,8 +80,13 @@ def _len_handler(req: Request, res: Response, ctx: Context) -> None {
 }
 
 
-def _plain_post(body: bytes) -> bytes {
-    head: bytes = b"POST /len HTTP/1.1" + CRLF_B + b"Host: x" + CRLF_B
+def _text_handler(req: Request, res: Response, ctx: Context) -> None {
+    res.text(f"text={len(req.text())}")
+}
+
+
+def _plain_post(body: bytes, path: str = "/len") -> bytes {
+    head: bytes = ("POST " + path + " HTTP/1.1").encode() + CRLF_B + b"Host: x" + CRLF_B
     head = head + (b"Content-Length: " + str(len(body)).encode()) + CRLF_B
     head = head + b"Connection: close" + CRLF_B + CRLF_B
     return head + body
@@ -297,6 +304,16 @@ class BodyCapTests(TestCase) {
         self.assertIn("Payload Too Large", sent)
     }
 
+    def test_multibyte_body_arrives_as_bytes_and_decodes_to_codepoints() {
+        const app: Router = Router()
+        app.POST("/len", _len_handler)
+        app.POST("/text", _text_handler)
+        const body: bytes = "héllo wörld".encode("utf-8")
+        self.assertEqual(len(body), 13)
+        self.assertIn("len=13", _serve(app, _plain_post(body)))
+        self.assertIn("text=11", _serve(app, _plain_post(body, "/text")))
+    }
+
     def test_body_at_cap_passes() {
         const app: Router = Router()
         app.set_max_body_bytes(16)
@@ -335,6 +352,17 @@ class BodyCapTests(TestCase) {
         const sent: str = _serve(app, _declared_post(10, b"abc"))
         self.assertIn("400", sent)
         self.assertIn("Bad Request", sent)
+    }
+
+    def test_repeated_truncated_bodies_release_their_buffers() {
+        const app: Router = Router()
+        app.POST("/len", _len_handler)
+        const wire: bytes = _declared_post(TRUNCATION_PROBE_DECLARED_BYTES, b"abc")
+        i: int = 0
+        while i < TRUNCATION_PROBE_ROUNDS {
+            self.assertIn("400", _serve(app, wire))
+            i = i + 1
+        }
     }
 
     def test_nonpositive_cap_rejected() {

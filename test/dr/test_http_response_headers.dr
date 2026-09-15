@@ -7,6 +7,11 @@ from http.cookiejar import Cookie, CookieJar, parse_set_cookie
 const TAINTED: str = "ok\r\nX-Injected: yes"
 
 
+def _wire(res: Response) -> str {
+    return res.serialize().decode("utf-8")
+}
+
+
 def _count(haystack: str, needle: str) -> int {
     count: int = 0
     rest: str = haystack
@@ -39,7 +44,7 @@ class CookieSerializeTests(TestCase) {
         res.text("hi")
         res.cookie("a", "1")
         res.cookie("b", "2")
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "set-cookie:"), 2)
         self.assertIn("set-cookie: a=1", out)
         self.assertIn("set-cookie: b=2", out)
@@ -49,8 +54,8 @@ class CookieSerializeTests(TestCase) {
         const res: Response = Response()
         res.cookie("a", "1")
         res.cookie("b", "2")
-        res.chunk("streamed")
-        const out: str = res.serialize()
+        res.chunk(b"streamed")
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "set-cookie:"), 2)
         self.assertIn("transfer-encoding: chunked", out)
         self.assertIn("set-cookie: a=1", out)
@@ -63,7 +68,7 @@ class CookieSerializeTests(TestCase) {
         res.cookie("a", "1")
         res.cookie("b", "2")
         res.cookie("c", "3")
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "set-cookie:"), 3)
     }
 
@@ -71,7 +76,7 @@ class CookieSerializeTests(TestCase) {
         const res: Response = Response()
         res.cookie("sid", "abc", 3600, "/", true, true, "Strict")
         res.cookie("theme", "dark")
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "set-cookie:"), 2)
         self.assertIn("set-cookie: sid=abc", out)
         self.assertIn("Max-Age=3600", out)
@@ -85,7 +90,7 @@ class CookieSerializeTests(TestCase) {
         res.cookie("a", "1")
         res.cookie("b", "2")
         res.flip_no_body()
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "set-cookie:"), 2)
         self.assertNotIn("content-length", out)
         self.assertIn("set-cookie: a=1", out)
@@ -95,7 +100,7 @@ class CookieSerializeTests(TestCase) {
     def test_no_cookies_no_line() {
         const res: Response = Response()
         res.text("hi")
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "set-cookie:"), 0)
     }
 }
@@ -128,21 +133,21 @@ class HeaderInjectionTests(TestCase) {
 
     def test_tuple_setter_still_sets_ordinary_headers() {
         res: Response = Response()
-        res.body = "hi"
+        res.body = b"hi"
         res.headers = "x-trace", "abc123"
-        const wire: str = res.serialize()
+        const wire: str = _wire(res)
         self.assertIn("x-trace: abc123", wire)
     }
 
     def test_injected_header_never_reaches_the_wire() {
         res: Response = Response()
-        res.body = "hi"
+        res.body = b"hi"
         try {
             res.headers = "x-trace", TAINTED
         } except ValueError {
             pass
         }
-        self.assertNotIn("X-Injected", res.serialize())
+        self.assertNotIn("X-Injected", _wire(res))
     }
 }
 
@@ -158,7 +163,7 @@ class ResponseFramingTests(TestCase) {
         const res: Response = Response()
         res.set_header("content-type", "text/event-stream")
         res.cede(_drain)
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "content-length:"), 0)
         self.assertIn("content-type: text/event-stream", out)
     }
@@ -166,7 +171,7 @@ class ResponseFramingTests(TestCase) {
     def test_ceded_response_is_close_delimited() {
         const res: Response = Response()
         res.cede(_drain)
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "connection:"), 1)
         self.assertIn("connection: close", out)
     }
@@ -175,7 +180,7 @@ class ResponseFramingTests(TestCase) {
         const res: Response = Response()
         res.set_header("content-length", "2048")
         res.cede(_drain)
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "content-length:"), 1)
         self.assertIn("content-length: 2048", out)
     }
@@ -184,7 +189,7 @@ class ResponseFramingTests(TestCase) {
         const res: Response = Response()
         res.cookie("a", "1")
         res.cede(_drain)
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertIn("set-cookie: a=1", out)
     }
 
@@ -192,7 +197,7 @@ class ResponseFramingTests(TestCase) {
         const res: Response = Response()
         res.text("hi")
         res.set_header("content-length", "999")
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "content-length:"), 1)
         self.assertIn("content-length: 2", out)
     }
@@ -202,7 +207,7 @@ class ResponseFramingTests(TestCase) {
         res.set_header("connection", "Upgrade")
         res.set_header("upgrade", "websocket")
         res.flip_no_body()
-        const out: str = res.serialize()
+        const out: str = _wire(res)
         self.assertEqual(_count(out, "content-length:"), 0)
         self.assertIn("connection: Upgrade", out)
     }

@@ -23,8 +23,8 @@ def _echo_body(req: Request, res: Response, ctx: Context) -> None {
 }
 
 def _stream(req: Request, res: Response, ctx: Context) -> None {
-    res.chunk("part1-")
-    res.chunk("part2")
+    res.chunk(b"part1-")
+    res.chunk(b"part2")
 }
 
 def _build_app() -> Router {
@@ -81,6 +81,11 @@ def _get(path: str) -> bytes {
 
 def _get_keepalive(path: str) -> bytes {
     return ("GET " + path + " HTTP/1.1\r\nHost: h\r\n\r\n").encode("utf-8")
+}
+
+def _post_head(path: str, body_len: int, version: str = "1.1") -> bytes {
+    return ("POST " + path + " HTTP/" + version + "\r\nHost: h\r\nContent-Length: "
+            + str(body_len) + "\r\n\r\n").encode("utf-8")
 }
 
 def _big(req: Request, res: Response, ctx: Context) -> None {
@@ -205,9 +210,9 @@ class RequestReaderTests(TestCase) {
         const fr: FramedRequest = rr.read_request()
         self.assertTrue(fr.ok)
         self.assertEqual(fr.body.decode("utf-8"), "hello world")
-        const raw: str = fr.raw.decode("utf-8")
-        self.assertIn("content-length: 11", raw)
-        self.assertNotIn("transfer-encoding", raw)
+        const head: str = fr.head.decode("utf-8")
+        self.assertIn("content-length: 11", head)
+        self.assertNotIn("transfer-encoding", head)
     }
 
     def test_eof_is_clean() {
@@ -222,6 +227,70 @@ class RequestReaderTests(TestCase) {
             b"POST /x HTTP/1.1\r\nContent-Length: 100\r\n\r\nonly-a-few"]))
         const fr: FramedRequest = rr.read_request()
         self.assertTrue(fr.bad)
+    }
+
+    def test_head_excludes_the_body() {
+        const req: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"
+        const rr: RequestReader = RequestReader(MemoryReader([req]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(len(fr.head), len(req) - 5)
+        self.assertNotIn("hello", fr.head.decode("utf-8"))
+    }
+
+    def test_pipelined_request_shares_the_body_read() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcGET /next HTTP/1.1\r\nHost: h\r\n\r\n"]))
+        const fr1: FramedRequest = rr.read_request()
+        self.assertTrue(fr1.ok)
+        self.assertEqual(fr1.body.decode("utf-8"), "abc")
+        const fr2: FramedRequest = rr.read_request()
+        self.assertTrue(fr2.ok)
+        self.assertIn("GET /next", fr2.head.decode("utf-8"))
+    }
+
+    def test_read_overshooting_the_body_keeps_the_next_request() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\nabcd",
+            b"efghijGET /next HTTP/1.1\r\nHost: h\r\n\r\n"]))
+        const fr1: FramedRequest = rr.read_request()
+        self.assertTrue(fr1.ok)
+        self.assertEqual(fr1.body.decode("utf-8"), "abcdefghij")
+        const fr2: FramedRequest = rr.read_request()
+        self.assertTrue(fr2.ok)
+        self.assertIn("GET /next", fr2.head.decode("utf-8"))
+    }
+
+    def test_body_arriving_one_byte_at_a_time() {
+        const chunks: list[bytes] = [b"POST /x HTTP/1.1\r\nContent-Length: 6\r\n\r\n"]
+        for c in [b"s", b"p", b"l", b"i", b"t", b"!"] {
+            chunks.append(c)
+        }
+        const rr: RequestReader = RequestReader(MemoryReader(chunks))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "split!")
+    }
+
+    def test_zero_length_body_then_pipelined_request() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 0\r\n\r\nGET /next HTTP/1.1\r\nHost: h\r\n\r\n"]))
+        const fr1: FramedRequest = rr.read_request()
+        self.assertTrue(fr1.ok)
+        self.assertEqual(len(fr1.body), 0)
+        const fr2: FramedRequest = rr.read_request()
+        self.assertTrue(fr2.ok)
+        self.assertIn("GET /next", fr2.head.decode("utf-8"))
+    }
+
+    def test_body_is_exact_when_reads_land_on_the_boundary() {
+        const piece: bytes = _make_body(b"q", 4096)
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nContent-Length: 8192\r\n\r\n", piece, piece]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(len(fr.body), 8192)
+        self.assertEqual(fr.body, piece + piece)
     }
 }
 
@@ -263,6 +332,74 @@ class KeepAliveLoopTests(TestCase) {
         _build_app().serve_connection(mr)
         self.assertIn("len=5000", mr.sent)
     }
+
+    def test_body_saying_connection_close_does_not_close() {
+        const body: bytes = b"\r\nConnection: close\r\n\r\n"
+        const head: bytes = _post_head("/body", len(body))
+        const mr: MemoryReader = MemoryReader([head, body, _get_keepalive("/b")])
+        _build_app().serve_connection(mr)
+        self.assertIn("len=" + str(len(body)), mr.sent)
+        self.assertNotIn("connection: close", mr.sent)
+        self.assertIn("hi:/b", mr.sent)
+    }
+
+    def test_http10_body_saying_http11_closes_and_says_so() {
+        const body: bytes = b"HTTP/1.1 is mentioned here"
+        const head: bytes = _post_head("/body", len(body), "1.0")
+        const mr: MemoryReader = MemoryReader([head, body, _get_keepalive("/b")])
+        _build_app().serve_connection(mr)
+        self.assertIn("len=" + str(len(body)), mr.sent)
+        self.assertIn("connection: close", mr.sent)
+        self.assertNotIn("hi:/b", mr.sent)
+    }
+
+    def test_http10_body_saying_keepalive_closes_and_says_so() {
+        const body: bytes = b"\r\nConnection: keep-alive\r\n\r\n"
+        const head: bytes = _post_head("/body", len(body), "1.0")
+        const mr: MemoryReader = MemoryReader([head, body, _get_keepalive("/b")])
+        _build_app().serve_connection(mr)
+        self.assertIn("len=" + str(len(body)), mr.sent)
+        self.assertIn("connection: close", mr.sent)
+        self.assertNotIn("hi:/b", mr.sent)
+    }
+
+    def test_http10_body_saying_both_closes_and_says_so() {
+        const body: bytes = b"x http/1.1 x\r\nConnection: keep-alive\r\n\r\n"
+        const head: bytes = _post_head("/body", len(body), "1.0")
+        const mr: MemoryReader = MemoryReader([head, body, _get_keepalive("/b")])
+        _build_app().serve_connection(mr)
+        self.assertIn("len=" + str(len(body)), mr.sent)
+        self.assertIn("connection: close", mr.sent)
+        self.assertNotIn("hi:/b", mr.sent)
+    }
+
+    def test_later_header_saying_close_does_not_close() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /a HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\nX-Note: close\r\n\r\n",
+            _get_keepalive("/b")])
+        _build_app().serve_connection(mr)
+        self.assertIn("hi:/a", mr.sent)
+        self.assertIn("hi:/b", mr.sent)
+    }
+
+    def test_http10_url_saying_http11_closes_and_says_so() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /a?next=http/1.1 HTTP/1.0\r\nHost: h\r\n\r\n",
+            _get_keepalive("/b")])
+        _build_app().serve_connection(mr)
+        self.assertIn("hi:/a", mr.sent)
+        self.assertIn("connection: close", mr.sent)
+        self.assertNotIn("hi:/b", mr.sent)
+    }
+
+    def test_http10_with_keepalive_header_is_reused() {
+        const mr: MemoryReader = MemoryReader([
+            b"GET /a HTTP/1.0\r\nHost: h\r\nConnection: keep-alive\r\n\r\n",
+            b"GET /b HTTP/1.0\r\nHost: h\r\nConnection: keep-alive\r\n\r\n"])
+        _build_app().serve_connection(mr)
+        self.assertIn("hi:/a", mr.sent)
+        self.assertIn("hi:/b", mr.sent)
+    }
 }
 
 
@@ -297,9 +434,9 @@ class ChunkStreamingTests(TestCase) {
 
     def test_each_chunk_is_its_own_write() {
         def handler(req: Request, res: Response, ctx: Context) -> None {
-            res.chunk("one")
-            res.chunk("two")
-            res.chunk("three")
+            res.chunk(b"one")
+            res.chunk(b"two")
+            res.chunk(b"three")
         }
         const mr: MemoryReader = self._run(handler)
         self.assertTrue(mr.writes >= 4)
@@ -310,7 +447,7 @@ class ChunkStreamingTests(TestCase) {
 
     def test_stream_is_terminated() {
         def handler(req: Request, res: Response, ctx: Context) -> None {
-            res.chunk("payload")
+            res.chunk(b"payload")
         }
         const mr: MemoryReader = self._run(handler)
         self.assertTrue(mr.sent.endswith("0\r\n\r\n"))
@@ -318,7 +455,7 @@ class ChunkStreamingTests(TestCase) {
 
     def test_header_after_first_chunk_is_refused() {
         def handler(req: Request, res: Response, ctx: Context) -> None {
-            res.chunk("already gone")
+            res.chunk(b"already gone")
             res.set_header("x-late", "nope")
         }
         const mr: MemoryReader = self._run(handler)
@@ -328,7 +465,7 @@ class ChunkStreamingTests(TestCase) {
 
     def test_failed_stream_is_not_terminated() {
         def handler(req: Request, res: Response, ctx: Context) -> None {
-            res.chunk("partial")
+            res.chunk(b"partial")
             raise ValueError("exploded")
         }
         const mr: MemoryReader = self._run(handler)
@@ -354,7 +491,7 @@ class CedeSeamTests(TestCase) {
         self.assertTrue(raised)
 
         const res2: Response = Response()
-        res2.chunk("half a stream")
+        res2.chunk(b"half a stream")
         raised = false
         try {
             res2.cede(own_conn)
@@ -477,7 +614,7 @@ class ChunkedCorrectnessGuardTests(TestCase) {
         const fr: FramedRequest = rr.read_request()
         self.assertTrue(fr.ok)
         self.assertEqual(fr.body.decode("utf-8"), "abcdefghijklmnopqrstuvwxyz")
-        self.assertIn("content-length: 26", fr.raw.decode("utf-8"))
+        self.assertIn("content-length: 26", fr.head.decode("utf-8"))
     }
 
     def test_pipelined_request_after_chunked_survives() {
@@ -488,7 +625,7 @@ class ChunkedCorrectnessGuardTests(TestCase) {
         self.assertEqual(fr1.body.decode("utf-8"), "abc")
         const fr2: FramedRequest = rr.read_request()
         self.assertTrue(fr2.ok)
-        self.assertIn("GET /next", fr2.raw.decode("utf-8"))
+        self.assertIn("GET /next", fr2.head.decode("utf-8"))
     }
 
     def test_chunk_data_split_across_reads_after_rewrite() {
@@ -677,7 +814,58 @@ class JsonBodyTests(TestCase) {
 }
 
 
-main([RequestReaderTests(), KeepAliveLoopTests(), ChunkedResponseTests(),
+class SendOnlyConn(ConnReader) {
+    parts: list[str]
+
+    def() {
+        self.parts = []
+    }
+
+    def send(data: str) -> int {
+        self.parts.append(data)
+        return len(data)
+    }
+}
+
+
+class BytesOnlyConn(ConnReader) {
+    parts: list[bytes]
+
+    def() {
+        self.parts = []
+    }
+
+    def send_bytes(data: bytes) -> int {
+        self.parts.append(data)
+        return len(data)
+    }
+}
+
+
+class ConnReaderContractTests(TestCase) {
+    """send_bytes is the primitive a connection must implement; send(str)
+    encodes and forwards to it. The base send_bytes used to return 0, so a
+    connection that implemented only send silently discarded every response
+    the server wrote through send_bytes."""
+
+    def test_connection_without_send_bytes_is_refused() {
+        const conn: SendOnlyConn = SendOnlyConn()
+        self.assertRaises(NotImplementedError, lambda () -> None {
+            conn.send_bytes(b"HTTP/1.1 200 OK\r\n\r\n")
+        })
+        self.assertEqual(len(conn.parts), 0)
+    }
+
+    def test_send_str_reaches_a_bytes_only_connection() {
+        const conn: BytesOnlyConn = BytesOnlyConn()
+        conn.send("hello")
+        self.assertEqual(len(conn.parts), 1)
+        self.assertEqual(conn.parts[0], b"hello")
+    }
+}
+
+
+main([ConnReaderContractTests(), RequestReaderTests(), KeepAliveLoopTests(), ChunkedResponseTests(),
       ChunkStreamingTests(), CedeSeamTests(),
       FileResponseTests(),
       ChunkedDechunkPerfTests(), ChunkedCorrectnessGuardTests(), HandlerRaisesTests(),

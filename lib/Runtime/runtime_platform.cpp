@@ -157,7 +157,6 @@ void* dragon_ptr_deref(void** pp) {
 
 
 #define DRAGON_HTTP_MAX_HEADERS 64
-#define DRAGON_HTTP_MAX_BODY (1024 * 1024 * 1024)
 #define DRAGON_HTTP_HEADERS_MAX (64 * 1024)
 
 typedef struct {
@@ -173,11 +172,7 @@ typedef struct {
     int   num_headers;
     int   in_value;
     int   header_bytes;
-    char* body;
-    int body_len;
-    int body_cap;
-    int max_body;
-    int complete;
+    int   complete;
     uint8_t http_major;
     uint8_t http_minor;
 } HttpParseState;
@@ -236,55 +231,31 @@ static int http_on_header_value(llhttp_t* p, const char* at, size_t len) {
     return 0;
 }
 
-static int http_on_body(llhttp_t* p, const char* at, size_t len) {
-    HttpParseState* s = (HttpParseState*)p->data;
-    int64_t need = (int64_t)s->body_len + (int64_t)len;
-    if (need > (int64_t)s->max_body) return -1;
-    while (need >= (int64_t)s->body_cap) {
-        int64_t new_cap = (int64_t)s->body_cap * 2;
-        if (new_cap > (int64_t)s->max_body) new_cap = (int64_t)s->max_body + 1;
-        char* tmp = (char*)dragon_xrealloc_or_abort(s->body, (size_t)new_cap);
-        s->body = tmp;
-        s->body_cap = (int)new_cap;
-    }
-    memcpy(s->body + s->body_len, at, len);
-    s->body_len += (int)len;
-    s->body[s->body_len] = '\0';
-    return 0;
-}
-
-static int http_on_message_complete(llhttp_t* p) {
+static int http_on_headers_complete(llhttp_t* p) {
     HttpParseState* s = (HttpParseState*)p->data;
     if (s->in_value && s->num_headers < DRAGON_HTTP_MAX_HEADERS) {
         s->num_headers++;
+        s->in_value = 0;
     }
     s->complete = 1;
     s->http_major = p->http_major;
     s->http_minor = p->http_minor;
-    return 0;
+    return 1;
 }
 
-void* dragon_http_parse_request(const char* buf, int64_t len) {
+void* dragon_http_parse_request_head(const char* buf, int64_t len) {
     HttpParseState* state = (HttpParseState*)dragon_xcalloc_n(1, sizeof(HttpParseState));
     state->url_cap = 256;
     state->url = (char*)dragon_malloc_nullable(state->url_cap);
     if (!state->url) { free(state); dragon_raise_oom(); }
     state->url[0] = '\0';
-    state->body_cap = 1024;
-    state->body = (char*)dragon_malloc_nullable(state->body_cap);
-    if (!state->body) { free(state->url); free(state); dragon_raise_oom(); }
-    state->body[0] = '\0';
-    int64_t mb = len > 0 ? len : 0;
-    if (mb > (int64_t)DRAGON_HTTP_MAX_BODY) mb = DRAGON_HTTP_MAX_BODY;
-    state->max_body = (int)mb;
 
     llhttp_settings_t settings;
     memset(&settings, 0, sizeof(settings));
     settings.on_url           = http_on_url;
     settings.on_header_field  = http_on_header_field;
     settings.on_header_value  = http_on_header_value;
-    settings.on_body          = http_on_body;
-    settings.on_message_complete = http_on_message_complete;
+    settings.on_headers_complete = http_on_headers_complete;
 
     llhttp_t parser;
     llhttp_init(&parser, HTTP_REQUEST, &settings);
@@ -313,11 +284,6 @@ const char* dragon_http_parsed_method(void* handle) {
 const char* dragon_http_parsed_url(void* handle) {
     HttpParseState* s = (HttpParseState*)handle;
     return dragon_string_alloc(s->url, s->url_len);
-}
-
-const char* dragon_http_parsed_body(void* handle) {
-    HttpParseState* s = (HttpParseState*)handle;
-    return dragon_string_alloc(s->body, s->body_len);
 }
 
 int64_t dragon_http_parsed_header_count(void* handle) {
@@ -352,7 +318,6 @@ void dragon_http_parsed_free(void* handle) {
     HttpParseState* s = (HttpParseState*)handle;
     if (!s) return;
     free(s->url);
-    free(s->body);
     for (int i = 0; i < DRAGON_HTTP_MAX_HEADERS; i++) {
         free(s->header_keys[i]);
         free(s->header_vals[i]);
@@ -360,7 +325,7 @@ void dragon_http_parsed_free(void* handle) {
     free(s);
 }
 
-const char* dragon_http_build_response(int64_t status, const char* headers, const char* body) {
+DragonBytes* dragon_http_build_response(int64_t status, const char* headers, DragonBytes* body) {
     const char* reason;
     switch (status) {
         case 101: reason = "Switching Protocols"; break;
@@ -388,32 +353,22 @@ const char* dragon_http_build_response(int64_t status, const char* headers, cons
         case 503: reason = "Service Unavailable"; break;
         default:  reason = "Unknown"; break;
     }
-    int64_t body_len = 0;
-    char* body_owned = NULL;
-    const char* body_bytes = NULL;
-    if (body) {
-        body_owned = dragon_str_to_utf8_alloc(body, &body_len);
-        body_bytes = body_owned ? body_owned : body;
-    }
+    int64_t body_len = body ? body->len : 0;
     int prefix_len = snprintf(NULL, 0, "HTTP/1.1 %d %s\r\n%s\r\n",
                               (int)status, reason, headers ? headers : "");
-    if (prefix_len < 0) {
-        if (body_owned) free(body_owned);
-        return dragon_string_alloc("", 0);
-    }
+    if (prefix_len <= 0) return dragon_bytes_new(NULL, 0);
     int64_t total = (int64_t)prefix_len + body_len;
-    DragonString* out = dragon_string_alloc_raw(total);
-    int off = snprintf(out->data, (size_t)prefix_len + 1, "HTTP/1.1 %d %s\r\n%s\r\n",
+    DragonBytes* out = dragon_bytes_alloc_raw(total);
+    int off = snprintf((char*)out->data, (size_t)prefix_len + 1, "HTTP/1.1 %d %s\r\n%s\r\n",
                        (int)status, reason, headers ? headers : "");
     if (off < 0) off = 0;
-    if (body_bytes && body_len > 0) {
-        memcpy(out->data + off, body_bytes, (size_t)body_len);
+    if (body_len > 0) {
+        memcpy(out->data + off, body->data, (size_t)body_len);
         off += (int)body_len;
     }
-    out->data[off] = '\0';
     out->len = off;
-    if (body_owned) free(body_owned);
-    return out->data;
+    out->data[off] = 0;
+    return out;
 }
 
 uint64_t __dragon_hash_k0 = 0;

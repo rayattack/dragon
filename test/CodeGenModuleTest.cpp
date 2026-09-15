@@ -157,9 +157,9 @@ TEST(CodeGenTest, HttpBuildResponseE2E) {
     EXPECT_EQ(out, "69\n");
 }
 
-TEST(CodeGenTest, HttpParsePostWithBodyE2E) {
-    auto out = compileAndRun(code("http_parse_post_with_body_e2_e"));
-    EXPECT_EQ(out, "1\nPOST\n/api/data\n{\"key\":\"val\"}\n");
+TEST(CodeGenTest, HttpParseHeadWithDeclaredBodyE2E) {
+    auto out = compileAndRun(code("http_parse_head_with_declared_body_e2_e"));
+    EXPECT_EQ(out, "1\nPOST\n/api/data\n1.1\n");
 }
 
 TEST(CodeGenTest, NonBlockingSendRecvE2E) {

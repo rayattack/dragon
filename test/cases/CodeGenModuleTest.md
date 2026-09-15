@@ -122,10 +122,9 @@ show()
 #### :http_parse_request_e2_e
 
 ```dr
-extern "C" def dragon_http_parse_request(buf: str, length: int) -> ptr
+extern "C" def dragon_http_parse_request_head(buf: str, length: int) -> ptr
 extern "C" def dragon_http_parsed_method(handle: ptr) -> str
 extern "C" def dragon_http_parsed_url(handle: ptr) -> str
-extern "C" def dragon_http_parsed_body(handle: ptr) -> str
 extern "C" def dragon_http_parsed_header_count(handle: ptr) -> int
 extern "C" def dragon_http_parsed_header_key(handle: ptr, idx: int) -> str
 extern "C" def dragon_http_parsed_header_value(handle: ptr, idx: int) -> str
@@ -134,7 +133,7 @@ extern "C" def dragon_http_parsed_free(handle: ptr)
 
 const crlf: str = "\r\n"
 const raw: str = "GET /hello?name=world HTTP/1.1" + crlf + "Host: localhost" + crlf + "Content-Type: text/plain" + crlf + crlf
-const parsed: ptr = dragon_http_parse_request(raw, len(raw))
+const parsed: ptr = dragon_http_parse_request_head(raw, len(raw))
 print(dragon_http_parsed_ok(parsed))
 print(dragon_http_parsed_method(parsed))
 print(dragon_http_parsed_url(parsed))
@@ -149,33 +148,35 @@ dragon_http_parsed_free(parsed)
 #### :http_build_response_e2_e
 
 ```dr
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
-extern "C" def dragon_str_len(s: str) -> int
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
 
 const crlf: str = "\r\n"
 const hdrs: str = "content-type: text/plain" + crlf + "content-length: 5" + crlf
-const resp: str = dragon_http_build_response(200, hdrs, "hello")
-# Check length - response should contain status line + headers + blank line + body
-print(dragon_str_len(resp))
+const resp: bytes = dragon_http_build_response(200, hdrs, b"hello")
+print(len(resp))
 ```
 
-#### :http_parse_post_with_body_e2_e
+The parser reads a request head and stops there. A declared `Content-Length`
+must not keep it waiting for a body it will never be given: the framing layer
+has already separated head from body and only ever hands over the head.
+
+#### :http_parse_head_with_declared_body_e2_e
 
 ```dr
-extern "C" def dragon_http_parse_request(buf: str, length: int) -> ptr
+extern "C" def dragon_http_parse_request_head(buf: str, length: int) -> ptr
 extern "C" def dragon_http_parsed_method(handle: ptr) -> str
 extern "C" def dragon_http_parsed_url(handle: ptr) -> str
-extern "C" def dragon_http_parsed_body(handle: ptr) -> str
+extern "C" def dragon_http_parsed_version(handle: ptr) -> str
 extern "C" def dragon_http_parsed_ok(handle: ptr) -> int
 extern "C" def dragon_http_parsed_free(handle: ptr)
 
 const crlf: str = "\r\n"
-const raw: str = "POST /api/data HTTP/1.1" + crlf + "Host: localhost" + crlf + "Content-Length: 13" + crlf + crlf + "{\"key\":\"val\"}"
-const parsed: ptr = dragon_http_parse_request(raw, len(raw))
+const head: str = "POST /api/data HTTP/1.1" + crlf + "Host: localhost" + crlf + "Content-Length: 13" + crlf + crlf
+const parsed: ptr = dragon_http_parse_request_head(head, len(head))
 print(dragon_http_parsed_ok(parsed))
 print(dragon_http_parsed_method(parsed))
 print(dragon_http_parsed_url(parsed))
-print(dragon_http_parsed_body(parsed))
+print(dragon_http_parsed_version(parsed))
 dragon_http_parsed_free(parsed)
 ```
 
@@ -233,50 +234,46 @@ print(square(7))
 #### :http_build_response_long_headers
 
 ```dr
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
-extern "C" def dragon_str_len(s: str) -> int
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
 hdrs: str = ""
 for i in range(100) {
   hdrs = hdrs + "x-custom: value\r\n"
 }
-resp: str = dragon_http_build_response(200, hdrs, "hello")
-print(dragon_str_len(resp))
+resp: bytes = dragon_http_build_response(200, hdrs, b"hello")
+print(len(resp))
 ```
 
 #### :http_build_response_empty_body
 
 ```dr
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
-extern "C" def dragon_str_len(s: str) -> int
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
 hdrs: str = "content-length: 0\r\n"
-resp: str = dragon_http_build_response(204, hdrs, "")
-print(dragon_str_len(resp))
+resp: bytes = dragon_http_build_response(204, hdrs, b"")
+print(len(resp))
 ```
 
 #### :http_build_response_large_body
 
 ```dr
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
-extern "C" def dragon_str_len(s: str) -> int
-body: str = ""
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
+body: bytes = b""
 for i in range(1024) {
-  body = body + "0123456789"
+  body = body + b"0123456789"
 }
 hdrs: str = "content-length: 10240\r\n"
-resp: str = dragon_http_build_response(200, hdrs, body)
-print(dragon_str_len(resp))
+resp: bytes = dragon_http_build_response(200, hdrs, body)
+print(len(resp))
 ```
 
 #### :http_build_response_loop_bounded
 
 ```dr
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
-extern "C" def dragon_str_len(s: str) -> int
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
 hdrs: str = "content-type: text/plain\r\ncontent-length: 5\r\n"
 last_len: int = 0
 for i in range(5000) {
-  resp: str = dragon_http_build_response(200, hdrs, "hello")
-  last_len = dragon_str_len(resp)
+  resp: bytes = dragon_http_build_response(200, hdrs, b"hello")
+  last_len = len(resp)
 }
 print(last_len)
 ```
@@ -284,8 +281,7 @@ print(last_len)
 #### :http_build_response_unknown_status
 
 ```dr
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
-extern "C" def dragon_str_len(s: str) -> int
-resp: str = dragon_http_build_response(999, "\r\n", "x")
-print(dragon_str_len(resp))
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
+resp: bytes = dragon_http_build_response(999, "\r\n", b"x")
+print(len(resp))
 ```

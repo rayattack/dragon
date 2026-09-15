@@ -19,7 +19,6 @@ extern "C" def dragon_str_contains(a: str, b: str) -> int
 extern "C" def dragon_str_eq(a: str, b: str) -> int
 extern "C" def dragon_str_len(s: str) -> int
 extern "C" def dragon_str_find(haystack: str, needle: str) -> int
-extern "C" def dragon_str_byte_len_pub(s: str) -> int
 extern "C" def dragon_str_split(s: str, delim: str) -> list
 extern "C" def dragon_str_lower(s: str) -> str
 extern "C" def dragon_str_strip(s: str) -> str
@@ -39,21 +38,19 @@ extern "C" def dragon_atomic_load(p: ptr) -> int
 extern "C" def dragon_atomic_store(p: ptr, val: int)
 extern "C" def dragon_atomic_add(p: ptr, val: int) -> int
 
-extern "C" def dragon_http_parse_request(buf: ptr, length: int) -> ptr
+extern "C" def dragon_http_parse_request_head(buf: ptr, length: int) -> ptr
 extern "C" def dragon_bytes_data(b: bytes) -> ptr
 extern "C" def dragon_http_parsed_method(handle: ptr) -> str
 extern "C" def dragon_http_parsed_url(handle: ptr) -> str
-extern "C" def dragon_http_parsed_body(handle: ptr) -> str
 extern "C" def dragon_http_parsed_header_count(handle: ptr) -> int
 extern "C" def dragon_http_parsed_header_key(handle: ptr, idx: int) -> str
 extern "C" def dragon_http_parsed_header_value(handle: ptr, idx: int) -> str
 extern "C" def dragon_http_parsed_ok(handle: ptr) -> int
 extern "C" def dragon_http_parsed_version(handle: ptr) -> str
 extern "C" def dragon_http_parsed_free(handle: ptr)
-extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
+extern "C" def dragon_http_build_response(status: int, headers: str, body: bytes) -> bytes
 
 extern "C" def dragon_zlib_compress(src: bytes, level: int) -> bytes
-extern "C" def dragon_str_from_bytes(b: bytes) -> str
 
 extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
 extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
@@ -64,8 +61,6 @@ extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
 extern "C" def dragon_sockaddr_in_size() -> intc
 
 extern "C" def dragon_file_open(filename: str, mode: str) -> ptr
-extern "C" def dragon_file_read(handle: ptr) -> str
-extern "C" def dragon_file_read_bytes(handle: ptr) -> str
 extern "C" def dragon_file_read_chunk(handle: ptr, size: int) -> bytes
 extern "C" def dragon_file_close(handle: ptr)
 extern "C" def dragon_stat_isfile(path: str) -> int
@@ -77,6 +72,8 @@ extern "C" def dragon_vthread_spawn(fn: ptr, args: ptr, nargs: int) -> ptr
 
 const _OMIT_LENGTH: list[str] = ["content-length"]
 const _OMIT_CONNECTION: list[str] = ["connection"]
+const _CRLF: bytes = b"\r\n"
+const _LAST_CHUNK: bytes = b"0\r\n\r\n"
 
 def _render_headers(headers: dict[str, str], omit: list[str]) -> str {
     parts: list[str] = []
@@ -92,10 +89,10 @@ def _render_headers(headers: dict[str, str], omit: list[str]) -> str {
     return "".join(parts)
 }
 
-def _build_headers(headers: dict[str, str], body: str) -> str {
+def _build_headers(headers: dict[str, str], body: bytes) -> str {
     return dragon_str_concat(_render_headers(headers, _OMIT_LENGTH),
         dragon_str_concat("content-length: ",
-            dragon_str_concat(dragon_int_to_str(dragon_str_byte_len_pub(body)), "\r\n")))
+            dragon_str_concat(dragon_int_to_str(len(body)), "\r\n")))
 }
 
 def _build_mime_types() -> dict[str, str] {
@@ -205,12 +202,12 @@ class Response {
     def() {
         self.status = 200
         self._headers = {"content-type": "text/plain", "x-content-type-options": "nosniff"}
-        self.body = ""
+        self.body = b""
         self._aborted = false
         self._deferred: list[Callable[[Router], None]] = []
         self._close: bool = false
         self._chunked: bool = false
-        self._chunks: list[str] = []
+        self._chunks: list[bytes] = []
         self._cede: bool = false
         self._cede_fn: Callable[[ConnReader], None] | None = none
         self._no_body: bool = false
@@ -240,19 +237,19 @@ class Response {
 
     def json(data: str) -> Response {
         self._headers["content-type"] = "application/json; charset=utf-8"
-        self.body = data
+        self.body = data.encode("utf-8")
         return self
     }
 
     def text(data: str) -> Response {
         self._headers["content-type"] = "text/plain; charset=utf-8"
-        self.body = data
+        self.body = data.encode("utf-8")
         return self
     }
 
     def html(data: HTML) -> Response {
         self._headers["content-type"] = "text/html; charset=utf-8"
-        self.body = data.to_str()
+        self.body = data.to_str().encode("utf-8")
         return self
     }
 
@@ -276,7 +273,7 @@ class Response {
         self._aborted = true
         if payload != "" {
             self.status = 404
-            self.body = payload
+            self.body = payload.encode("utf-8")
         }
     }
 
@@ -328,14 +325,14 @@ class Response {
     def file(filepath: str) -> Response {
         if not dragon_stat_isfile(filepath) {
             self.status = 404
-            self.body = "Not Found"
+            self.body = b"Not Found"
             return self
         }
         self._headers["content-type"] = _guess_mime_type(filepath)
         const fsize: int = dragon_stat_size(filepath)
         if fsize <= _MAX_BUFFERED_FILE_BYTES {
             const fh: ptr = dragon_file_open(filepath, "rb")
-            self.body = dragon_file_read_bytes(fh)
+            self.body = dragon_file_read_chunk(fh, fsize)
             dragon_file_close(fh)
             return self
         }
@@ -365,13 +362,13 @@ class Response {
 
     def out(status: int, body: str) -> Response {
         self.status = status
-        self.body = body
+        self.body = body.encode("utf-8")
         return self
     }
 
     def binary(status: int, body: bytes) -> Response {
         self.status = status
-        self.body = dragon_str_from_bytes(body)
+        self.body = body
         return self
     }
 
@@ -380,9 +377,9 @@ class Response {
         return self
     }
 
-    def chunk(data: str) -> Response {
+    def chunk(data: bytes) -> Response {
         self._chunked = true
-        if dragon_str_byte_len_pub(data) == 0 {
+        if len(data) == 0 {
             return self
         }
         const conn: ConnReader | None = self._conn
@@ -393,7 +390,7 @@ class Response {
         if not self._streaming {
             self._open_stream(conn)
         }
-        conn.send(_encode_chunk(data))
+        conn.send_bytes(_encode_chunk(data))
         self._stream_writes = self._stream_writes + 1
         return self
     }
@@ -412,28 +409,28 @@ class Response {
             finalize()
         }
         self._streaming = true
-        conn.send(self._serialize_chunk_headers())
+        conn.send_bytes(self._serialize_chunk_headers())
     }
 
-    def _serialize_chunk_headers() -> str {
+    def _serialize_chunk_headers() -> bytes {
         header_str: str = _render_headers(self._headers, _OMIT_LENGTH)
         header_str = dragon_str_concat(header_str, "transfer-encoding: chunked\r\n")
         header_str = dragon_str_concat(header_str, self._cookie_lines())
         if self._close {
             header_str = dragon_str_concat(header_str, "connection: close\r\n")
         }
-        return dragon_http_build_response(self.status, header_str, "")
+        return dragon_http_build_response(self.status, header_str, b"")
     }
 
     def end_stream() -> None {
         const conn: ConnReader | None = self._conn
         if self._streaming and not self._stream_failed and conn != none {
-            conn.send("0\r\n\r\n")
+            conn.send_bytes(_LAST_CHUNK)
         }
     }
 
     def cede(fn: Callable[[ConnReader], None]) -> Response {
-        if dragon_str_byte_len_pub(self.body) > 0 or len(self._chunks) > 0 {
+        if len(self.body) > 0 or len(self._chunks) > 0 {
             raise ValueError("cede: response already carries a body; a cede response sends headers only")
         }
         self._cede = true
@@ -442,7 +439,7 @@ class Response {
         return self
     }
 
-    def serialize() -> str {
+    def serialize() -> bytes {
         if self._no_body {
             return self._serialize_no_body()
         }
@@ -458,10 +455,8 @@ class Response {
         if (dragon_str_contains(dragon_str_lower(self._accept_encoding), "gzip") != 0
             and ("content-encoding" not in self._headers)
             and _is_compressible(self._headers["content-type"] if "content-type" in self._headers else "")
-            and dragon_str_byte_len_pub(self.body) >= _GZIP_MIN_BODY) {
-            const raw: bytes = self.body.encode("utf-8")
-            const gz: bytes = dragon_zlib_compress(raw, 9)
-            self.body = dragon_str_from_bytes(gz)
+            and len(self.body) >= _GZIP_MIN_BODY) {
+            self.body = dragon_zlib_compress(self.body, 9)
             self._headers["content-encoding"] = "gzip"
             self._headers["vary"] = "Accept-Encoding"
         }
@@ -470,7 +465,7 @@ class Response {
         return dragon_http_build_response(self.status, header_str, self.body)
     }
 
-    def _serialize_chunked() -> str {
+    def _serialize_chunked() -> bytes {
         header_str: str = _render_headers(self._headers, _OMIT_LENGTH)
         header_str = dragon_str_concat(header_str, "transfer-encoding: chunked\r\n")
         header_str = dragon_str_concat(header_str, self._cookie_lines())
@@ -478,45 +473,43 @@ class Response {
             header_str = dragon_str_concat(header_str, "connection: close\r\n")
         }
 
-        parts: list[str] = []
-        if dragon_str_byte_len_pub(self.body) > 0 {
+        parts: list[bytes] = []
+        if len(self.body) > 0 {
             _append_chunk(parts, self.body)
         }
         for piece in self._chunks {
             _append_chunk(parts, piece)
         }
-        parts.append("0\r\n\r\n")
-        return dragon_http_build_response(self.status, header_str, "".join(parts))
+        parts.append(_LAST_CHUNK)
+        return dragon_http_build_response(self.status, header_str, b"".join(parts))
     }
 
-    def _serialize_no_body() -> str {
+    def _serialize_no_body() -> bytes {
         header_str: str = dragon_str_concat(
             _render_headers(self._headers, _OMIT_LENGTH), self._cookie_lines())
-        return dragon_http_build_response(self.status, header_str, "")
+        return dragon_http_build_response(self.status, header_str, b"")
     }
 
-    def _serialize_ceded() -> str {
+    def _serialize_ceded() -> bytes {
         header_str: str = _render_headers(self._headers, _OMIT_CONNECTION)
         header_str = dragon_str_concat(header_str, "connection: close\r\n")
         header_str = dragon_str_concat(header_str, self._cookie_lines())
-        return dragon_http_build_response(self.status, header_str, "")
+        return dragon_http_build_response(self.status, header_str, b"")
     }
 }
 
-def _append_chunk(parts: list[str], data: str) -> None {
-    parts.append(_int_to_hex(dragon_str_byte_len_pub(data)))
-    parts.append("\r\n")
+def _append_chunk(parts: list[bytes], data: bytes) -> None {
+    parts.append(_int_to_hex(len(data)).encode("utf-8"))
+    parts.append(_CRLF)
     parts.append(data)
-    parts.append("\r\n")
+    parts.append(_CRLF)
 }
 
 
-def _encode_chunk(data: str) -> str {
-    const n: int = dragon_str_byte_len_pub(data)
-    out: str = dragon_str_concat(_int_to_hex(n), "\r\n")
-    out = dragon_str_concat(out, data)
-    out = dragon_str_concat(out, "\r\n")
-    return out
+def _encode_chunk(data: bytes) -> bytes {
+    const parts: list[bytes] = []
+    _append_chunk(parts, data)
+    return b"".join(parts)
 }
 
 def _int_to_hex(n: int) -> str {
@@ -1237,9 +1230,10 @@ class Router {
         }
     }
 
-    def _build_response(raw_bytes: bytes, body_bytes: bytes = b"",
+    def _build_response(head_bytes: bytes, body_bytes: bytes = b"",
                         conn: ConnReader | None = none) -> Response {
-        const parsed: ptr = dragon_http_parse_request(dragon_bytes_data(raw_bytes), len(raw_bytes))
+        const parsed: ptr = dragon_http_parse_request_head(dragon_bytes_data(head_bytes),
+                                                           len(head_bytes))
         if not dragon_http_parsed_ok(parsed) {
             dragon_http_parsed_free(parsed)
             const bad: Response = Response()
@@ -1250,7 +1244,6 @@ class Router {
 
         const method: str = dragon_http_parsed_method(parsed)
         const url: str = dragon_http_parsed_url(parsed)
-        const body: str = dragon_http_parsed_body(parsed)
         const version: str = dragon_http_parsed_version(parsed)
 
         headers: dict[str, str] = {}
@@ -1310,7 +1303,7 @@ class Router {
         params: dict[str, str] = {}
         const route: Route | None = self._match(method, path, target_sd, params)
 
-        const req: Request = Request(method, path, url, body, headers, query, params, version, body_bytes)
+        const req: Request = Request(method, path, url, body_bytes, headers, query, params, version)
         const res: Response = Response()
         const ctx: Context = Context()
 
@@ -1450,20 +1443,15 @@ class Router {
                     bad.text("Bad Request")
                 }
                 bad._close = true
-                const bs: str = bad.serialize()
-                reader.send(bs)
+                reader.send_bytes(bad.serialize())
                 break
             }
 
-            const raw_str: str = dragon_str_from_bytes(fr.raw)
-            const res: Response = self._build_response(fr.raw, fr.body, reader)
+            const res: Response = self._build_response(fr.head, fr.body, reader)
 
             served = served + 1
 
-            keep_alive: bool = true
-            if not self._wants_keepalive(raw_str) {
-                keep_alive = false
-            }
+            keep_alive: bool = fr.keep_alive
             if served >= _MAX_REQUESTS_PER_CONN {
                 keep_alive = false
             }
@@ -1480,8 +1468,7 @@ class Router {
             if res._streaming {
                 res.end_stream()
             } else {
-                const response_str: str = res.serialize()
-                reader.send(response_str)
+                reader.send_bytes(res.serialize())
             }
 
             for task in res._deferred {
@@ -1521,24 +1508,6 @@ class Router {
         }
 
         reader.close()
-    }
-
-    def _wants_keepalive(raw_str: str) -> bool {
-        const head_l: str = dragon_str_lower(raw_str)
-        const cpos: int = dragon_str_find(head_l, "\r\nconnection:")
-        const is_http11: bool = dragon_str_contains(head_l, "http/1.1") != 0
-        if cpos >= 0 {
-            const cline: str = head_l[cpos:]
-            const nlend: int = dragon_str_find(cline, "\r\n\r\n")
-            const cval: str = cline if nlend < 0 else cline[0:nlend]
-            if dragon_str_contains(cval, "close") != 0 {
-                return false
-            }
-            if dragon_str_contains(cval, "keep-alive") != 0 {
-                return true
-            }
-        }
-        return is_http11
     }
 }
 

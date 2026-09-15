@@ -296,15 +296,13 @@ _NO_SESSION: Session = Session("")
 
 
 class Request {
-    def(method: str, path: str, url: str, body: str,
+    def(method: str, path: str, url: str, body: bytes,
          headers: dict[str, str], query: dict[str, str],
-         params: dict[str, str], http_version: str,
-         body_bytes: bytes = b"") {
+         params: dict[str, str], http_version: str) {
         self.method = method
         self.path = path
         self.url = url
         self.body = body
-        self.body_bytes = body_bytes
         self.headers = headers
         self.query = query
         self.params = params
@@ -326,7 +324,11 @@ class Request {
     }
 
     def json() -> Data {
-        return loadb(self.body_bytes)
+        return loadb(self.body)
+    }
+
+    def text() -> str {
+        return self.body.decode("utf-8")
     }
 
     def form() -> dict[str, str] {
@@ -340,7 +342,7 @@ class Request {
             }
             return result
         }
-        return _parse_query_string(self.body)
+        return _parse_query_string(self.body.decode("utf-8"))
     }
 
     def files() -> list[Part] {
@@ -364,7 +366,7 @@ class Request {
             const empty: list[Part] = []
             return empty
         }
-        return parse_multipart(self.body_bytes, boundary)
+        return parse_multipart(self.body, boundary)
     }
 
     def param_int(name: str) -> int {

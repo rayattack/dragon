@@ -21,7 +21,7 @@ app.GET('/customers', lambda (req: Request, res: Response, ctx: Context) -> None
 app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
     const welcome: str = 'yoo!!';
     res.headers = 'Content-Type', 'application/html'
-    res.body = template {
+    res.out(200, template {
         <html>
             <head></head>
             <body>
@@ -29,12 +29,12 @@ app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
                 <p style="color: red">Testing out template functionality</p>
             <body>
         </html>
-    }
+    })
 });
 
 
 app.GET('/pricing', lambda (req: Request, res: Response, ctx: Context) -> None {
-    res.body = template('pricing.html');
+    res.out(200, template('pricing.html'));
 });
 
 

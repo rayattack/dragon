@@ -33,7 +33,7 @@ def api_publish(req: Request, res: Response, ctx: Context) -> None {
     const name: str = req.query_str("name", "")
     const version: str = req.query_str("version", "")
     const desc: str = req.headers.get("x-egg-description", "")
-    const tarball: bytes = b64decode(req.body.encode("utf-8"))
+    const tarball: bytes = b64decode(req.body)
     const signed_by: str = req.headers.get("x-egg-pubkey", "")
     const signature: str = req.headers.get("x-egg-signature", "")
     const r: PublishResult = REG.publish(uid, name, version, desc, tarball, signed_by, signature)

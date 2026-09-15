@@ -9,6 +9,8 @@ extern "C" def dragon_bytes_find_from(h: bytes, n: bytes, start: int) -> int
 extern "C" def dragon_str_concat(a: str, b: str) -> str
 extern "C" def dragon_str_contains(a: str, b: str) -> int
 extern "C" def dragon_str_find(haystack: str, needle: str) -> int
+extern "C" def dragon_str_from_bytes(b: bytes) -> str
+extern "C" def dragon_str_find_se(haystack: str, needle: str, start: int, end: int) -> int
 extern "C" def dragon_str_lower(s: str) -> str
 extern "C" def dragon_str_strip(s: str) -> str
 extern "C" def dragon_str_startswith(s: str, prefix: str) -> int
@@ -29,11 +31,11 @@ class ConnReader {
     }
 
     def send(data: str) -> int {
-        return 0
+        return self.send_bytes(data.encode("utf-8"))
     }
 
     def send_bytes(data: bytes) -> int {
-        return 0
+        raise NotImplementedError("ConnReader.send_bytes: a connection must implement send_bytes; send(str) encodes and forwards to it")
     }
 
     def close() -> None {
@@ -142,7 +144,7 @@ class MemoryReader(ConnReader) {
     }
 
     def send_bytes(data: bytes) -> int {
-        self._sent_parts.append(data.decode("utf-8"))
+        self._sent_parts.append(dragon_str_from_bytes(data))
         self.writes = self.writes + 1
         return len(data)
     }
@@ -179,19 +181,46 @@ class FramedRequest {
     ok: bool
     eof: bool
     bad: bool
-    raw: bytes
+    head: bytes
     body: bytes
     too_large: bool
+    keep_alive: bool
 
-    def(ok: bool, eof: bool, bad: bool, raw: bytes, body: bytes,
-        too_large: bool = false) {
+    def(ok: bool, eof: bool, bad: bool, head: bytes, body: bytes,
+        too_large: bool = false, keep_alive: bool = false) {
         self.ok = ok
         self.eof = eof
         self.bad = bad
-        self.raw = raw
+        self.head = head
         self.body = body
         self.too_large = too_large
+        self.keep_alive = keep_alive
     }
+}
+
+const _CONNECTION_HEADER: str = "\r\nconnection:"
+const _HTTP_1_1: str = "http/1.1"
+const _CRLF: str = "\r\n"
+
+def head_keeps_alive(head_l: str) -> bool {
+    const request_line_end: int = dragon_str_find(head_l, _CRLF)
+    const version_start: int = request_line_end - len(_HTTP_1_1)
+    const is_http11: bool = dragon_str_find_se(head_l, _HTTP_1_1,
+                                               version_start, request_line_end) >= 0
+
+    const cpos: int = dragon_str_find(head_l, _CONNECTION_HEADER)
+    if cpos < 0 {
+        return is_http11
+    }
+    const vstart: int = cpos + len(_CONNECTION_HEADER)
+    const vend: int = dragon_str_find_se(head_l, _CRLF, vstart, -1)
+    if dragon_str_find_se(head_l, "close", vstart, vend) >= 0 {
+        return false
+    }
+    if dragon_str_find_se(head_l, "keep-alive", vstart, vend) >= 0 {
+        return true
+    }
+    return is_http11
 }
 
 const _MAX_HEADER_BYTES: int = 65536
@@ -253,6 +282,42 @@ class RequestReader {
         return true
     }
 
+    def _read_body(head_end: int, body_len: int) -> bytes {
+        const buffered: int = len(self.buf) - head_end
+        if buffered >= body_len {
+            const body: bytes = self.buf[head_end:head_end + body_len]
+            self.consumed = head_end + body_len
+            return body
+        }
+
+        ba: bytearray = bytearray(body_len)
+        if buffered > 0 {
+            ba[0:buffered] = self.buf[head_end:]
+        }
+        filled: int = buffered
+        leftover: bytes = b""
+        while filled < body_len {
+            const want: int = body_len - filled
+            const ask: int = _RECV_CHUNK if want > _RECV_CHUNK else want
+            const chunk: bytes = self.reader.recv_timeout(ask, self.idle_timeout_ms)
+            const got: int = len(chunk)
+            if got == 0 {
+                return b""
+            }
+            if got <= want {
+                ba[filled:filled + got] = chunk
+                filled = filled + got
+            } else {
+                ba[filled:body_len] = chunk[0:want]
+                leftover = chunk[want:]
+                filled = body_len
+            }
+        }
+        self.buf = leftover
+        self.consumed = 0
+        return own ba
+    }
+
     def read_request() -> FramedRequest {
         const empty: bytes = b""
         const crlf2: bytes = b"\r\n\r\n"
@@ -292,8 +357,10 @@ class RequestReader {
             }
         }
 
+        const keep_alive: bool = head_keeps_alive(head_l)
+
         if chunked {
-            return self._read_chunked(head_end, head_bytes)
+            return self._read_chunked(head_end, head_bytes, keep_alive)
         }
 
         body_len: int = 0
@@ -303,17 +370,14 @@ class RequestReader {
             }
             body_len = cl
         }
-        const need: int = head_end + body_len
-        if not self._fill_to(need) {
+        const body: bytes = self._read_body(head_end, body_len)
+        if len(body) != body_len {
             return FramedRequest(false, false, true, empty, empty)
         }
-        const raw: bytes = self.buf[0:need]
-        const body: bytes = self.buf[head_end:need]
-        self.consumed = need
-        return FramedRequest(true, false, false, raw, body)
+        return FramedRequest(true, false, false, head_bytes, body, false, keep_alive)
     }
 
-    def _read_chunked(head_end: int, head_bytes: bytes) -> FramedRequest {
+    def _read_chunked(head_end: int, head_bytes: bytes, keep_alive: bool) -> FramedRequest {
         const empty: bytes = b""
         const crlf: bytes = b"\r\n"
         parts: list[bytes] = []
@@ -353,8 +417,8 @@ class RequestReader {
         const body: bytes = b"".join(parts)
         const head: str = head_bytes.decode("utf-8")
         const rebuilt_head: str = _rewrite_chunked_head(head, len(body))
-        const raw: bytes = rebuilt_head.encode("utf-8") + body
-        return FramedRequest(true, false, false, raw, body)
+        return FramedRequest(true, false, false, rebuilt_head.encode("utf-8"), body,
+                             false, keep_alive)
     }
 }
 
