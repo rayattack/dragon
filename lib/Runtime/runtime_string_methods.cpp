@@ -525,6 +525,27 @@ const char* dragon_str_expandtabs(const char* s, int64_t tabsize) {
     return dragon_str_finish_cps(out, dst, w, max_cp);
 }
 
+static const char* dragon_memmem(const char* hay, size_t hlen,
+                                 const char* needle, size_t nlen) {
+    if (nlen == 0) return hay;
+    if (nlen > hlen) return NULL;
+#if defined(__linux__) || defined(__APPLE__)
+    return (const char*)memmem(hay, hlen, needle, nlen);
+#else
+    const char first = needle[0];
+    const char* p = hay;
+    size_t remaining = hlen;
+    while (remaining >= nlen) {
+        const char* c = (const char*)memchr(p, first, remaining - nlen + 1);
+        if (!c) return NULL;
+        if (memcmp(c, needle, nlen) == 0) return c;
+        remaining -= (size_t)(c - p) + 1;
+        p = c + 1;
+    }
+    return NULL;
+#endif
+}
+
 static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
                                      int64_t start, int64_t end) {
     if (!haystack || !needle) return -1;
@@ -544,12 +565,9 @@ static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
     if (h_kind1 && n_kind1) {
         const char* base = haystack + start;
         int64_t window = end - start;
-        for (int64_t i = 0; i + nlen <= window; ++i) {
-            if (memcmp(base + i, needle, (size_t)nlen) == 0) {
-                return start + i;
-            }
-        }
-        return -1;
+        const char* hit = dragon_memmem(base, (size_t)window, needle,
+                                        (size_t)nlen);
+        return hit ? start + (int64_t)(hit - base) : -1;
     }
     for (int64_t i = start; i + nlen <= end; ++i) {
         bool match = true;
