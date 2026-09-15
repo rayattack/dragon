@@ -1,6 +1,13 @@
 from unittest import TestCase, main
-from socket import TcpListener, TcpStream, SocketHandle
+from socket import TcpListener, TcpStream, SocketHandle, AF_INET, SOCK_STREAM
 from http.server import FdReader
+from time import sleep_ms
+
+extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
+extern "C" def connect(fd: intc, addr: ptr, addrlen: intc) -> intc
+extern "C" def free(p: ptr)
+extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
+extern "C" def dragon_sockaddr_in_size() -> intc
 
 const TWO_POW_62: int = 4611686018427387904
 const INT64_MAX: int = 9223372036854775807
@@ -8,6 +15,15 @@ const INT64_MAX: int = 9223372036854775807
 
 def _peer(l: TcpListener) -> None {
     conn: TcpStream = l.accept()
+    conn.send("hello")
+    conn.recv(16)
+    conn.close()
+}
+
+
+def _slow_peer(l: TcpListener) -> None {
+    conn: TcpStream = l.accept()
+    sleep_ms(60)
     conn.send("hello")
     conn.recv(16)
     conn.close()
@@ -122,4 +138,41 @@ class SocketRecvOomTests(TestCase) {
     }
 }
 
-main([SocketHandleTest(), SocketVthreadTests(), SocketRecvOomTests()])
+
+class ForeignSocketTests(TestCase) {
+    """A socket the runtime never armed still reads and writes.
+
+    You hand Dragon a descriptor from somewhere else - your own `socket()` and
+    `connect()`, an inherited fd, a C library's connection - and wrap it in a
+    TcpStream. Nothing in that path ever set O_NONBLOCK, so a recv that arrives
+    before the peer writes has nothing to return. The receive must still park the
+    green thread and deliver the bytes when they land, never hold its carrier
+    waiting and never lose the payload.
+    """
+
+    def test_recv_and_send_on_an_unarmed_descriptor() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54491)
+        lis.bind()
+        lis.listen(4)
+        t: Task[None] = fire _slow_peer(lis)
+
+        const fd: int = socket(AF_INET, SOCK_STREAM, 0)
+        const addr: ptr = dragon_sockaddr_in_new(54491, "127.0.0.1")
+        const addrlen: int = dragon_sockaddr_in_size()
+        const rc: int = connect(fd, addr, addrlen)
+        free(addr)
+        self.assertEqual(rc, 0)
+
+        const c: TcpStream = TcpStream(SocketHandle.adopt_raw(fd))
+        self.assertEqual(c.recv(16), "hello")
+        c.send("bye")
+        c.close()
+
+        await t
+        lis.close()
+    }
+}
+
+
+main([SocketHandleTest(), SocketVthreadTests(), SocketRecvOomTests(),
+      ForeignSocketTests()])

@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define MINICORO_IMPL
 #include "runtime_internal.h"
 #include <errno.h>
@@ -19,6 +22,7 @@
   #include <arpa/inet.h>
   #include <poll.h>
   #include <semaphore.h>
+  #include <sys/mman.h>
   #ifdef __linux__
     #include <sys/epoll.h>
     #include <sys/timerfd.h>
@@ -619,9 +623,12 @@ static void sysmon_retake(DragonCarrier* c) {
     pthread_mutex_unlock(&__scheduler->lock);
 }
 
+#define DRAGON_SYSMON_SCAN_INTERVAL 100
+#define DRAGON_SYSMON_IDLE_CEILING 10000
+
 static void* sysmon_thread(void* arg) {
     (void)arg;
-    useconds_t interval = 1000;
+    useconds_t interval = DRAGON_SYSMON_SCAN_INTERVAL;
     while (1) {
 #ifdef _WIN32
         Sleep(interval / 1000 > 0 ? interval / 1000 : 1);
@@ -643,7 +650,13 @@ static void* sysmon_thread(void* arg) {
             }
             c->sysmon_last = t;
         }
-        interval = in_extern ? 100 : 1000;
+        if (in_extern) {
+            interval = DRAGON_SYSMON_SCAN_INTERVAL;
+        } else if (interval < DRAGON_SYSMON_IDLE_CEILING) {
+            interval *= 2;
+            if (interval > DRAGON_SYSMON_IDLE_CEILING)
+                interval = DRAGON_SYSMON_IDLE_CEILING;
+        }
     }
     return NULL;
 }
@@ -687,6 +700,85 @@ static void scheduler_init() {
     }
 }
 
+#define DRAGON_FIRE_POOL_MAX 64
+
+static pthread_mutex_t __coro_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static void*   __coro_pool_head = NULL;
+static int64_t __coro_pool_count = 0;
+static size_t  __coro_pool_block_size = 0;
+
+static void* coro_block_map(size_t size) {
+#ifdef _WIN32
+    return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p != MAP_FAILED ? p : NULL;
+#endif
+}
+
+static void coro_block_unmap(void* p, size_t size) {
+#ifdef _WIN32
+    (void)size;
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    munmap(p, size);
+#endif
+}
+
+static void* coro_block_alloc(size_t size, void* allocator_data) {
+    (void)allocator_data;
+    if (size == __atomic_load_n(&__coro_pool_block_size, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_lock(&__coro_pool_lock);
+        void* blk = __coro_pool_head;
+        if (blk) {
+            __coro_pool_head = *(void**)blk;
+            __coro_pool_count--;
+            dragon_asan_unpoison_region(blk, size);
+        }
+        pthread_mutex_unlock(&__coro_pool_lock);
+        if (blk) return blk;
+    }
+    return coro_block_map(size);
+}
+
+static void coro_block_free(void* ptr, size_t size, void* allocator_data) {
+    (void)allocator_data;
+    if (size == __atomic_load_n(&__coro_pool_block_size, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_lock(&__coro_pool_lock);
+        if (__coro_pool_count < DRAGON_FIRE_POOL_MAX) {
+            dragon_asan_unpoison_region(ptr, size);
+            *(void**)ptr = __coro_pool_head;
+            __coro_pool_head = ptr;
+            __coro_pool_count++;
+            dragon_asan_poison_region((char*)ptr + sizeof(void*),
+                                      size - sizeof(void*));
+            pthread_mutex_unlock(&__coro_pool_lock);
+            return;
+        }
+        pthread_mutex_unlock(&__coro_pool_lock);
+    }
+    coro_block_unmap(ptr, size);
+}
+
+mco_desc dragon_coro_desc_init(void (*entry)(mco_coro*)) {
+    mco_desc desc = mco_desc_init(entry, 0);
+    size_t unclaimed = 0;
+    __atomic_compare_exchange_n(&__coro_pool_block_size, &unclaimed,
+                                desc.coro_size, false,
+                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    desc.alloc_cb = coro_block_alloc;
+    desc.dealloc_cb = coro_block_free;
+    return desc;
+}
+
+int64_t dragon_fire_pool_size(void) {
+    pthread_mutex_lock(&__coro_pool_lock);
+    int64_t n = __coro_pool_count;
+    pthread_mutex_unlock(&__coro_pool_lock);
+    return n;
+}
+
 DragonVThread* dragon_vthread_spawn_typed(
     void (*trampoline)(mco_coro*), void* args, int64_t args_size) {
     pthread_once(&__scheduler_once, scheduler_init);
@@ -714,7 +806,7 @@ DragonVThread* dragon_vthread_spawn_typed(
         *(DragonVThread**)heap_args = vt;
     }
 
-    mco_desc desc = mco_desc_init(trampoline, 0);
+    mco_desc desc = dragon_coro_desc_init(trampoline);
     desc.user_data = heap_args;
     mco_result r = mco_create(&vt->coro, &desc);
     if (r != MCO_SUCCESS) {
@@ -913,6 +1005,7 @@ static void io_deadline_remove(IoRequest* req) {
 }
 
 static int io_deadline_wait_ms(int cap) {
+    if (!__io_deadline_head) return -1;
     long long now = io_now_ms();
     int budget = cap;
     for (IoRequest* r = __io_deadline_head; r; r = r->dl_next) {
@@ -1054,8 +1147,14 @@ static void* io_thread_entry(void*) {
     struct kevent events[64];
     while (!__io_shutdown) {
         int wait_ms = io_deadline_wait_ms(100);
-        struct timespec timeout = {wait_ms / 1000, (long)(wait_ms % 1000) * 1000000};
-        int n = kevent(__io_epfd, NULL, 0, events, 64, &timeout);
+        struct timespec timeout = {0, 0};
+        const struct timespec* deadline = NULL;
+        if (wait_ms >= 0) {
+            timeout.tv_sec = wait_ms / 1000;
+            timeout.tv_nsec = (long)(wait_ms % 1000) * 1000000;
+            deadline = &timeout;
+        }
+        int n = kevent(__io_epfd, NULL, 0, events, 64, deadline);
         for (int i = 0; i < n; i++) {
             if (events[i].udata == NULL) {
                 char buf[64];
@@ -2107,17 +2206,34 @@ void dragon_syncdict_destroy(DragonSyncDict* sd) {
     free(sd);
 }
 
+#ifdef __linux__
+#define DRAGON_NONBLOCK_PER_CALL 1
+#define DRAGON_MSG_NB MSG_DONTWAIT
+#else
+#define DRAGON_NONBLOCK_PER_CALL 0
+#define DRAGON_MSG_NB 0
+#endif
+
 static void make_nonblocking(int fd) {
 #ifdef _WIN32
     u_long nb = 1;
     ioctlsocket((SOCKET)fd, FIONBIO, &nb);
 #else
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags != -1) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags != -1 && !(flags & O_NONBLOCK))
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 #ifdef SO_NOSIGPIPE
     int nosigpipe = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
 #endif
+#endif
+}
+
+static inline void arm_stream_nonblocking(int fd) {
+#if DRAGON_NONBLOCK_PER_CALL
+    (void)fd;
+#else
+    make_nonblocking(fd);
 #endif
 }
 
@@ -2206,6 +2322,9 @@ int64_t dragon_nb_accept(int64_t server_fd, void* addr, void* addrlen) {
 #ifdef _WIN32
         int client = (int)accept((SOCKET)server_fd,
                                  (struct sockaddr*)addr, (int*)addrlen);
+#elif defined(__linux__) || defined(__FreeBSD__)
+        int client = accept4((int)server_fd, (struct sockaddr*)addr,
+                             (socklen_t*)addrlen, SOCK_NONBLOCK);
 #else
         int client = accept((int)server_fd, (struct sockaddr*)addr,
                             (socklen_t*)addrlen);
@@ -2235,12 +2354,12 @@ static int64_t dragon_recv_len_or_raise(int64_t max_len) {
 
 int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
     if (max_len <= 0) return 0;
-    make_nonblocking((int)fd);
+    arm_stream_nonblocking((int)fd);
     while (1) {
 #ifdef _WIN32
         int n = recv((SOCKET)fd, (char*)buf, (int)max_len, 0);
 #else
-        ssize_t n = recv((int)fd, buf, (size_t)max_len, 0);
+        ssize_t n = recv((int)fd, buf, (size_t)max_len, DRAGON_MSG_NB);
 #endif
         if (n >= 0) return (int64_t)n;
         if (dragon_sock_wouldblock()) {
@@ -2258,13 +2377,14 @@ int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
 }
 
 int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
-    make_nonblocking((int)fd);
+    arm_stream_nonblocking((int)fd);
     int64_t total = 0;
     while (total < len) {
 #ifdef _WIN32
         int n = send((SOCKET)fd, buf + total, (int)(len - total), 0);
 #else
-        ssize_t n = send((int)fd, buf + total, (size_t)(len - total), MSG_NOSIGNAL);
+        ssize_t n = send((int)fd, buf + total, (size_t)(len - total),
+                         MSG_NOSIGNAL | DRAGON_MSG_NB);
 #endif
         if (n >= 0) {
             total += n;
@@ -2315,7 +2435,7 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
     dragon_recv_len_or_raise(max_len);
     if (timeout_ms <= 0) return dragon_nb_recv_bytes(fd, max_len);
     if (max_len == 0) return dragon_bytes_new(nullptr, 0);
-    make_nonblocking((int)fd);
+    arm_stream_nonblocking((int)fd);
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
     int64_t n = 0;
@@ -2323,7 +2443,7 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
 #ifdef _WIN32
         int r = recv((SOCKET)fd, (char*)buf, (int)max_len, 0);
 #else
-        ssize_t r = recv((int)fd, buf, (size_t)max_len, 0);
+        ssize_t r = recv((int)fd, buf, (size_t)max_len, DRAGON_MSG_NB);
 #endif
         if (r >= 0) { n = (int64_t)r; break; }
         if (dragon_sock_wouldblock()) {
@@ -2354,12 +2474,12 @@ static int64_t dragon_nb_recv_deadline_raw(int64_t fd, void* buf, int64_t max_le
         int64_t n = dragon_nb_recv(fd, buf, max_len);
         return n < 0 ? 0 : n;
     }
-    make_nonblocking((int)fd);
+    arm_stream_nonblocking((int)fd);
     while (1) {
 #ifdef _WIN32
         int r = recv((SOCKET)fd, (char*)buf, (int)max_len, 0);
 #else
-        ssize_t r = recv((int)fd, buf, (size_t)max_len, 0);
+        ssize_t r = recv((int)fd, buf, (size_t)max_len, DRAGON_MSG_NB);
 #endif
         if (r >= 0) return (int64_t)r;
         if (dragon_sock_wouldblock()) {

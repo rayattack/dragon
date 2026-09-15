@@ -429,6 +429,7 @@ void dragon_gc_safe_end_slow(DragonMutator* m);
 #ifdef DRAGON_SANITIZED
 #define DRAGON_GC_MUTATION_GATE 1
 #include <sanitizer/lsan_interface.h>
+#include <sanitizer/asan_interface.h>
 
 static inline void dragon_lsan_root_whole_coroutine(mco_coro* co) {
     if (co && co->coro_size) __lsan_register_root_region(co, co->coro_size);
@@ -437,10 +438,23 @@ static inline void dragon_lsan_root_whole_coroutine(mco_coro* co) {
 static inline void dragon_lsan_unroot_whole_coroutine(mco_coro* co) {
     if (co && co->coro_size) __lsan_unregister_root_region(co, co->coro_size);
 }
+
+static inline void dragon_asan_poison_region(void* p, size_t n) {
+    __asan_poison_memory_region(p, n);
+}
+
+static inline void dragon_asan_unpoison_region(void* p, size_t n) {
+    __asan_unpoison_memory_region(p, n);
+}
 #else
 static inline void dragon_lsan_root_whole_coroutine(mco_coro*) {}
 static inline void dragon_lsan_unroot_whole_coroutine(mco_coro*) {}
+static inline void dragon_asan_poison_region(void*, size_t) {}
+static inline void dragon_asan_unpoison_region(void*, size_t) {}
 #endif
+
+mco_desc dragon_coro_desc_init(void (*entry)(mco_coro*));
+int64_t dragon_fire_pool_size(void);
 
 void dragon_fatal_mutation_in_safe_region(const char* where);
 void dragon_fatal_unregistered_mutation(const char* where);
@@ -857,6 +871,7 @@ void dragon_set_add(DragonSet* s, int64_t val);
 int64_t dragon_set_contains(DragonSet* s, int64_t val);
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len);
+DragonBytes* dragon_bytes_alloc_raw(int64_t len);
 DragonBytes* dragon_bytearray_new(int64_t len);
 void dragon_bytearray_write_slice(DragonBytes* ba, int64_t start,
                                   int64_t stop, DragonBytes* src);

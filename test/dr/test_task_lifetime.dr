@@ -5,6 +5,8 @@ from json import Data
 from fire_readers.reader import count_keys, count_items, longest_key
 from fire_readers.reader import count_with_bonus, count_with_tags, make_items
 
+extern "C" def dragon_fire_pool_size() -> int
+
 const SUM_OF_SQUARES_1_TO_50: int = 42925
 
 
@@ -575,6 +577,163 @@ class ConcurrencyCaptureTests(TestCase) {
 }
 
 
+def deep_sum(depth: int) -> int {
+    if depth <= 0 {
+        return 0
+    }
+    return depth + deep_sum(depth - 1)
+}
+
+
+def shallow_mark(n: int) -> int {
+    return n * 2 + 1
+}
+
+
+def raiser_then_value(n: int) -> int {
+    try {
+        if n % 2 == 0 {
+            raise ValueError("even")
+        }
+        return n
+    } except ValueError as e {
+        return -n
+    }
+}
+
+
+def park_then_value(n: int) -> int {
+    sleep_ms(1)
+    return n
+}
+
+
+def counter_upto(n: int) {
+    k: int = 0
+    while k < n {
+        yield k
+        k = k + 1
+    }
+}
+
+
+def drain_counter(n: int) -> int {
+    t: int = 0
+    for v in counter_upto(n) {
+        t = t + v
+    }
+    return t
+}
+
+
+class CoroutineRecycleTests(TestCase) {
+    """Every `fire` and every generator runs on its own coroutine stack, and the
+    runtime is free to hand a finished task's stack to the next one.
+
+    You write the obvious thing - fire a task, join it, fire another - and never
+    see the stack at all. Recycling is invisible by contract: a reused stack still
+    carries the last task's bytes, its exception landing pads and its parked
+    frames, so the axes below pin the values end to end. A wrong answer here means
+    a task read what the task before it left behind.
+    """
+
+    def test_deep_then_shallow_alternating() {
+        i: int = 0
+        while i < 300 {
+            deep: Task[int] = fire deep_sum(2000)
+            self.assertEqual(deep.join(), 2001000)
+            small: Task[int] = fire shallow_mark(i)
+            self.assertEqual(small.join(), i * 2 + 1)
+            i = i + 1
+        }
+    }
+
+    def test_sequential_churn_keeps_every_result() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            t: Task[int] = fire shallow_mark(i)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 4000000)
+    }
+
+    def test_exception_landing_pads_survive_reuse() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            t: Task[int] = fire raiser_then_value(i)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_parked_tasks_reuse_cleanly() {
+        i: int = 0
+        total: int = 0
+        while i < 300 {
+            t: Task[int] = fire park_then_value(i)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 44850)
+    }
+
+    def test_generators_and_fires_share_the_pool() {
+        i: int = 0
+        total: int = 0
+        while i < 500 {
+            total = total + drain_counter(20)
+            t: Task[int] = fire shallow_mark(1)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 96500)
+    }
+
+    def test_concurrent_wave_joins_in_order() {
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 300 {
+            tasks.append(fire deep_sum(500))
+            w = w + 1
+        }
+        total: int = 0
+        for t in tasks {
+            total = total + t.join()
+        }
+        self.assertEqual(total, 37575000)
+    }
+
+    def test_finished_stacks_return_to_a_bounded_pool() {
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 400 {
+            tasks.append(fire shallow_mark(w))
+            w = w + 1
+        }
+        for t in tasks {
+            t.join()
+        }
+        self.assertLessEqual(float(dragon_fire_pool_size()), 64.0,
+                             "finished coroutine stacks grew past the pool cap")
+    }
+
+    def test_nested_spawn_from_a_carrier() {
+        i: int = 0
+        total: int = 0
+        while i < 500 {
+            t: Task[int] = fire make_and_pass(i)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 41541750)
+    }
+}
+
+
 def linger_holding_a_string() -> int {
     held: str = "still-parked-at-exit"
     sleep_ms(4000)
@@ -600,4 +759,4 @@ class LingeringFireTests(TestCase) {
 
 main([ModuleTaskInMethodTests(), TaskDetachRcTests(), TaskOwnershipTests(),
       FireForgetTests(), FireReadOnlyShareTests(), ConcurrencyCaptureTests(),
-      LingeringFireTests()])
+      CoroutineRecycleTests(), LingeringFireTests()])

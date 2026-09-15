@@ -683,7 +683,7 @@ DragonGenerator* dragon_generator_create_typed(
     gen->args = heap_args;
     gen->args_decref_fn = args_decref_fn;
 
-    mco_desc desc = mco_desc_init(trampoline, 0);
+    mco_desc desc = dragon_coro_desc_init(trampoline);
     desc.user_data = heap_args;
     mco_result r = mco_create(&gen->coro, &desc);
     if (r == MCO_SUCCESS) dragon_lsan_root_whole_coroutine(gen->coro);
