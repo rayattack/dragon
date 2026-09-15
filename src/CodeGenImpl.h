@@ -1242,7 +1242,8 @@ struct CodeGen::Impl {
     }
 
     static bool producesOwnedCopy(Expr* expr) {
-        if (auto* nm = dynamic_cast<NameExpr*>(expr)) return nm->isDubMarked;
+        if (auto* nm = dynamic_cast<NameExpr*>(expr))
+            return nm->isDubMarked || nm->freezesByteArray;
         if (auto* at = dynamic_cast<AttributeExpr*>(expr)) return at->isDubMarked;
         return false;
     }
