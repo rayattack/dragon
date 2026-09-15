@@ -148,6 +148,54 @@ inline BytesInlineFields emitBytesFieldsOrEmpty(CodeGenImpl& impl,
 }
 
 template <typename CodeGenImpl>
+inline void emitByteArrayIndexStore(CodeGenImpl& impl, llvm::Value* obj,
+                                    llvm::Value* index, llvm::Value* value) {
+    auto* func = impl.currentFunction;
+    auto* liveBB = llvm::BasicBlock::Create(*impl.context, "ba.set.live", func);
+    auto* inBoundsBB = llvm::BasicBlock::Create(*impl.context, "ba.set.inb", func);
+    auto* storeBB = llvm::BasicBlock::Create(*impl.context, "ba.set.ok", func);
+    auto* oobBB = llvm::BasicBlock::Create(*impl.context, "ba.set.oob", func);
+    auto* badValBB = llvm::BasicBlock::Create(*impl.context, "ba.set.badval", func);
+
+    impl.builder->CreateCondBr(impl.builder->CreateIsNull(obj, "ba.isnull"),
+                               oobBB, liveBB);
+
+    impl.builder->SetInsertPoint(liveBB);
+    llvm::Value* len = emitBytesLen(impl, obj);
+    auto* isNeg = impl.builder->CreateICmpSLT(
+        index, llvm::ConstantInt::get(impl.i64Type, 0), "ba.idx.neg");
+    auto* adjusted = impl.builder->CreateAdd(index, len, "ba.idx.adj");
+    llvm::Value* finalIdx =
+        impl.builder->CreateSelect(isNeg, adjusted, index, "ba.idx.final");
+    impl.builder->CreateCondBr(
+        impl.builder->CreateICmpULT(finalIdx, len, "ba.idx.inbounds"),
+        inBoundsBB, oobBB);
+
+    impl.builder->SetInsertPoint(inBoundsBB);
+    impl.builder->CreateCondBr(
+        impl.builder->CreateICmpULT(value,
+                                    llvm::ConstantInt::get(impl.i64Type, 256),
+                                    "ba.val.inrange"),
+        storeBB, badValBB);
+
+    impl.builder->SetInsertPoint(oobBB);
+    impl.builder->CreateCall(impl.runtimeFuncs["dragon_bytearray_index_error"], {});
+    impl.builder->CreateUnreachable();
+
+    impl.builder->SetInsertPoint(badValBB);
+    impl.builder->CreateCall(impl.runtimeFuncs["dragon_bytearray_value_error"], {});
+    impl.builder->CreateUnreachable();
+
+    impl.builder->SetInsertPoint(storeBB);
+    auto* i8Type = llvm::Type::getInt8Ty(*impl.context);
+    auto* data = emitBytesData(impl, obj);
+    auto* gep = impl.builder->CreateGEP(i8Type, data, finalIdx, "ba.elem.gep");
+    auto* byte = impl.builder->CreateTrunc(value, i8Type, "ba.elem.byte");
+    auto* st = impl.builder->CreateStore(byte, gep);
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, bytesTbaaTag(impl, "bytes data"));
+}
+
+template <typename CodeGenImpl>
 inline llvm::Value* emitBytesIndexRead(CodeGenImpl& impl, llvm::Value* obj,
                                        llvm::Value* index, bool indexNonNeg) {
     auto* func = impl.currentFunction;

@@ -1,4 +1,5 @@
 #include "../CodeGenImpl.h"
+#include "BytesInline.h"
 
 namespace dragon {
 
@@ -80,9 +81,8 @@ void CodeGen::visit(AssignStmt& node) {
                 llvm::Value* byteVal = val;
                 if (byteVal->getType() == impl_->i1Type)
                     byteVal = impl_->builder->CreateZExt(byteVal, impl_->i64Type);
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_bytearray_set"],
-                    {impl_->toI8Ptr(ba), idx, byteVal});
+                emitByteArrayIndexStore(*impl_, impl_->toI8Ptr(ba), idx,
+                                        byteVal);
                 continue;
             }
             if (tryEmitDictSubscriptStore(*sub, node, val)) continue;

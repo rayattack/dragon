@@ -1350,6 +1350,14 @@ void dragon_bytes_index_error() {
     dragon_raise_exc_cstr(41, "IndexError: bytes index out of range");
 }
 
+void dragon_bytearray_index_error() {
+    dragon_raise_exc_cstr(41, "IndexError: bytearray index out of range");
+}
+
+void dragon_bytearray_value_error() {
+    dragon_raise_exc_cstr(90, "ValueError: byte must be in range(0, 256)");
+}
+
 static inline int64_t dragon_slice_count(int64_t start, int64_t stop, int64_t step) {
     uint64_t span = step > 0 ? (uint64_t)(stop - start) : (uint64_t)(start - stop);
     if ((step > 0 && stop <= start) || (step < 0 && start <= stop)) return 0;
