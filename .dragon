@@ -1236,8 +1236,11 @@ entry) is a separate, ordinary operation.
   a fresh value hands the caller sole ownership. `-> own T` pins the promise
   (checked, never inserts a copy); returning a still-held value from a `-> own`
   function is an error. `return own s` is refused (a return already hands over
-  its reference). Moving/`del`-ing a call result the callee still owns is an
-  error (declare the callee `-> own` or `dub`).
+  its reference), with ONE exception: `return own buf` on a `bytearray` in a
+  function declared `-> bytes` is the freeze (section 11), where `own` is not
+  a redundant handover but the thing that turns the buffer immutable.
+  Moving/`del`-ing a call result the callee still owns is an error (declare the
+  callee `-> own` or `dub`).
 
 ### `dub` (the priced copy)
 
