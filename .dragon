@@ -14,10 +14,11 @@ language story needs them.
 
 This file describes the language as designed. Every section was re-verified on
 2026-09-05 by compiling and running probe programs against the compiler, and
-every claim touched by the fixes landed through 2026-09-06 (commit d93bc92) was
-re-probed on 2026-09-06, so the examples are real code, not aspiration. When
-this text and the compiler disagree, the compiler wins and the text is wrong;
-report it.
+every claim touched by the fixes landed since was re-probed on 2026-09-13 (the
+stop-the-world cycle collector, the task-handle rules, green-thread sleep
+parking and the reserved-symbol rule), so the examples are real code, not
+aspiration. When this text and the compiler disagree, the compiler wins and the
+text is wrong; report it.
 
 ## 1. Design rules (why the language is shaped this way)
 
