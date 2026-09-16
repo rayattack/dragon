@@ -1367,8 +1367,12 @@ fire { cleanup()  notify() }       # fire-and-forget a block
 ```
 
 `t: Task = fire f()` (bare Task) is accepted; the inner type is pinned for you.
-When a green thread does I/O the runtime parks it and runs another. Fan-out is
-several fires, then join each.
+A green thread that waits PARKS and its carrier runs another one: I/O, sleeping
+(`time.sleep_secs`, `time.sleep_ms`, `time.sleep_float`), joining a task, and
+waiting on a Lock, RWLock, Semaphore or Barrier all park rather than pin the
+carrier thread. A blocked C call detaches the carrier instead, so an FFI call
+that blocks cannot stall the other green threads. Fan-out is several fires, then
+join each, one local handle per fire (section 21).
 
 ### `async def` and `await` (legacy spelling, slated for deprecation)
 
