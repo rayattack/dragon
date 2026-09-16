@@ -1355,7 +1355,7 @@ the call site, but never changes a function's signature.
 
 | Tier | Syntax | Backed by | For |
 |---|---|---|---|
-| Green thread | `fire fn()` / `fire { }` | M:N scheduler (~64KB each; spawn thousands) | tasks, I/O fan-out |
+| Green thread | `fire fn()` / `fire { }` | M:N scheduler (2040KB of address space each, mmap-reserved and paged in on use) | tasks, I/O fan-out |
 | Scoped OS thread | `thread { }` | one OS thread, auto-joins at scope exit | CPU bursts |
 | Manual OS thread | `Thread(target=fn)` | one OS thread you start/join | daemons, custom lifecycles |
 
