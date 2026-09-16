@@ -1301,6 +1301,19 @@ is a compile error ("silently discarded; bind it, then await, join, or del
 it"); `fire fn()` in statement position stays legal (the keyword IS the visible
 detach). `dub t` on a task refuses (a second joiner would race the move).
 
+Because that move has to be tracked, the handle you JOIN is a local binding and
+nothing else. Joining through anything the compiler cannot follow is a compile
+error at the join site: a field (`self.t.join()`), a list element
+(`ts[0].join()`), or a module global, meaning a binding at the top level of the
+file ("'g' is a module global or an outer binding; a task's result moves out
+exactly once and that move cannot be tracked here (v1: locals only). Join it
+where it is bound, or fire the task into a local"). Rebinding a handle is
+refused for the same reason ("a task handle is single-owner; binding 't' again
+would give the same task a second joiner"). STORING a Task in a field or a
+global is fine as long as you never join it there, and `is_alive()` works
+anywhere: on a local, on `self.t`, on a global. Fan-out that wants results keeps
+one local handle per fire.
+
 ### What the compiler frees for you (no keyword needed)
 
 Ownership keywords mark the values YOU hand around. Values the compiler mints on
@@ -1347,8 +1360,8 @@ the call site, but never changes a function's signature.
 
 ```dragon
 t: Task[int] = fire compute(9)     # the annotation is REQUIRED (a bare = or := binding refuses)
-r: int = t.join()                  # wait and take the result (consumes the task)
-alive: bool = t.is_alive()
+r: int = t.join()                  # wait and take the result (consumes the task); t must be a LOCAL
+alive: bool = t.is_alive()         # is_alive works anywhere: a local, a field, a global
 fire log_event("x", 7)             # fire-and-forget a call
 fire { cleanup()  notify() }       # fire-and-forget a block
 ```
