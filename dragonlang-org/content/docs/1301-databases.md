@@ -194,6 +194,10 @@ try {
 | `NoRows` / `MultipleRows` | `one`/`val` got zero / more than one row |
 | `TxError` | a transaction operation failed |
 
+`with db.transaction() as tx` rolls back when the block exits unless you call `tx.commit()`, so a
+`TxError` (or any other exception) leaves the database untouched. See
+[Transactions](/docs/1303-transactions).
+
 ## A complete example
 
 ```dragon
