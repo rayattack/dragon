@@ -98,6 +98,18 @@ program go after `--`; a stray flag before it is the same error and says so.
 Environment: `DRAGON_STDLIB_PATH` overrides the bundled stdlib root (for working
 on the stdlib itself).
 
+Platforms: Linux x86_64 and macOS (arm64 and x86_64) are built and released from
+CI; Windows x86_64 builds under MSYS2/MinGW and ships as an experimental release
+artifact.
+
+`dragonsp` is the Dragon language server, itself written in Dragon
+(`tools/dragonsp/*.dr`, built as the `dragonsp` target and installed beside
+`dragon`). It serves LSP over stdin/stdout and gets its diagnostics from
+`dragon check`, never from a second implementation of the type rules, so an
+editor squiggle and a build error are the same sentence. Hover, go-to-definition,
+completion, document symbols and workspace symbol search come from a scanner over
+Dragon syntax.
+
 The REPL accepts multi-line cells (Alt+Enter or Esc,Enter runs a cell), echoes
 the value of a bare expression, and has `:help`, `:reset`, `:quit`/`:q`. It is
 itself written in Dragon (`tools/repl/*.dr`) and JIT-compiles cells.
