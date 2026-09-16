@@ -1850,7 +1850,8 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
 - Automatic reference counting with DETERMINISTIC frees: the count drops at
   scope exit, reassignment, or last use, and the object frees immediately, on
   that line. Every block is a scope, so a heap value declared in a block dies
-  at the closing brace. No pauses, no collector thread on the hot path.
+  at the closing brace. Refcounting itself never pauses anything: there is no
+  collector thread and no safepoint poll in the code you write.
 - Exceptions unwind and free owned locals as they go; error paths do not leak.
   That includes the collections you never named: a loop over `dub self.field`,
   over `d` (its key list), or over a call result frees the temporary when the
@@ -1858,9 +1859,18 @@ main([MathTests()])          # INSTANCES, not classes; returns the exit status
 - A walrus binding is a declaration and releases at its value's real type, in a
   loop condition as well as in a statement. A parameter the body reassigns is
   retained on entry and released at exit.
-- Cycles (A <-> B) are reclaimed by an incremental cycle collector backstop
-  (with adaptive back-off when it finds nothing); `own` fields form trees and
-  are excluded from cycle tracking.
+- Cycles (A <-> B) are reclaimed by a cycle collector backstop that runs off an
+  allocation threshold (with adaptive back-off when it finds nothing); `own`
+  fields form trees and are excluded from cycle tracking. Single-threaded, it
+  runs on the allocating thread with nothing else in flight, so there is no
+  pause to observe. Once the program has spawned a green thread or an OS thread
+  the collector STOPS THE WORLD before it sweeps: whichever thread tripped the
+  threshold asks the others to pause at a safe point, walks the heap, then
+  resumes them, and it abandons the collection entirely if one does not stop in
+  time. That is the single pause in the model and it is bounded by the heap
+  walk. It is not a tax that could be optimized away: a collector reading lists
+  while other threads were still mutating them freed objects that were still in
+  use, which killed multi-threaded servers.
 - `--gc=none` disables refcount emission for one-shot programs (benchmarks,
   short CLI filters); never ship a service with it. `--gc=rc` is the default
   and the only other mode; any other spelling is "Unknown --gc mode". Both
