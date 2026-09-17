@@ -456,6 +456,9 @@ static inline void dragon_asan_unpoison_region(void*, size_t) {}
 
 mco_desc dragon_fire_desc_init(void (*entry)(mco_coro*));
 int64_t dragon_fire_pool_size(void);
+int64_t dragon_gc_safe_depth(void);
+void dragon_foreign_abandon(void);
+int64_t dragon_carrier_extern_balanced(void);
 
 void dragon_fatal_mutation_in_safe_region(const char* where);
 void dragon_fatal_unregistered_mutation(const char* where);

@@ -125,6 +125,7 @@ void* dragon_exc_retain_obj(void* o) {
 
 static void dragon_raise_exc_impl(int64_t type, void* obj, const char* msg,
                                   int consume) {
+    dragon_foreign_abandon();
     dragon_exc_msg_set(msg, consume);
     dragon_exc_obj_set(obj, 1);
     if (EXC_VT) {

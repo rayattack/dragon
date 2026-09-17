@@ -443,6 +443,13 @@ void dragon_foreign_exit(void) {
     dragon_gc_safe_end();
 }
 
+void dragon_foreign_abandon(void) {
+    DragonCarrier* c = __current_carrier;
+    if (c && __current_vthread && (__atomic_load_n(&c->tick, __ATOMIC_ACQUIRE) & 1u))
+        dragon_extern_exit();
+    dragon_gc_safe_region_reset();
+}
+
 int64_t dragon_safe_region_suspend(void) {
     DragonMutator* m = __dragon_mutator;
     if (!m) {
@@ -774,6 +781,17 @@ mco_desc dragon_fire_desc_init(void (*entry)(mco_coro*)) {
     desc.alloc_cb = fire_block_alloc;
     desc.dealloc_cb = fire_block_free;
     return desc;
+}
+
+int64_t dragon_gc_safe_depth(void) {
+    DragonMutator* m = __dragon_mutator;
+    return m ? m->safe_depth : 0;
+}
+
+int64_t dragon_carrier_extern_balanced(void) {
+    DragonCarrier* c = __current_carrier;
+    if (!c || !__current_vthread) return 1;
+    return (int64_t)(__atomic_load_n(&c->tick, __ATOMIC_ACQUIRE) & 1u);
 }
 
 int64_t dragon_fire_pool_size(void) {

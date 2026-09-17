@@ -8,6 +8,9 @@ Verifies two things end to end:
      proving the cc->c++ link-driver switch works.
   2. The blessed FFI accessors dragon_str_to_utf8_bytes / dragon_bytes_data hand
      a correct, NUL-terminated UTF-8 buffer to C, for both non-ASCII and ASCII text.
+  3. A shim that raises a Dragon exception leaves the runtime believing the thread
+     is back from C: the collector safepoint depth is zero and the carrier's extern
+     tick is balanced once the except block runs, on the main thread and in a fired task.
 """
 
 extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes
@@ -15,6 +18,26 @@ extern "C" def dragon_bytes_data(b: bytes) -> ptr
 extern "C" def dragon_bytes_len(b: bytes) -> int
 
 extern "C" def shim_strlen(s: ptr) -> int
+extern "C" def shim_raise_value_error(msg: str)
+extern "C" def dragon_gc_safe_depth() -> int
+extern "C" def dragon_carrier_extern_balanced() -> int
+
+
+def raise_from_c_and_recover(rounds: int) -> int {
+    caught: int = 0
+    i: int = 0
+    while i < rounds {
+        try {
+            shim_raise_value_error("from the shim")
+        } except ValueError {
+            caught = caught + 1
+        }
+        assert dragon_gc_safe_depth() == 0
+        assert dragon_carrier_extern_balanced() == 1
+        i = i + 1
+    }
+    return caught
+}
 
 text: str = "héllo"
 buf: bytes = dragon_str_to_utf8_bytes(text)
@@ -25,5 +48,11 @@ assert shim_strlen(dragon_bytes_data(buf)) == 6
 ascii_buf: bytes = dragon_str_to_utf8_bytes("opencv")
 assert dragon_bytes_len(ascii_buf) == 6
 assert shim_strlen(dragon_bytes_data(ascii_buf)) == 6
+
+warm: Task[int] = fire raise_from_c_and_recover(1)
+assert warm.join() == 1
+assert raise_from_c_and_recover(50) == 50
+in_task: Task[int] = fire raise_from_c_and_recover(50)
+assert in_task.join() == 50
 
 print("ffi_cxx_shim: OK")
