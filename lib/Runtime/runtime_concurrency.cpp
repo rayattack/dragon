@@ -908,7 +908,6 @@ static int            __io_wakeup_pipe[2];
 #endif
 static pthread_t      __io_thread;
 static pthread_once_t __io_once = PTHREAD_ONCE_INIT;
-static volatile int   __io_shutdown = 0;
 
 static IoRequest*       __io_pending_head = NULL;
 static pthread_mutex_t  __io_pending_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -1052,7 +1051,7 @@ static void io_process_pending() {
 
 static void* io_thread_entry(void*) {
     struct epoll_event events[64];
-    while (!__io_shutdown) {
+    while (1) {
         int wait_ms = io_deadline_wait_ms(100);
         int n = epoll_wait(__io_epfd, events, 64, wait_ms);
         for (int i = 0; i < n; i++) {
@@ -1145,7 +1144,7 @@ static void io_process_pending() {
 
 static void* io_thread_entry(void*) {
     struct kevent events[64];
-    while (!__io_shutdown) {
+    while (1) {
         int wait_ms = io_deadline_wait_ms(100);
         struct timespec timeout = {0, 0};
         const struct timespec* deadline = NULL;
@@ -1239,7 +1238,7 @@ static void io_process_pending() {
 }
 
 static void* io_thread_entry(void*) {
-    while (!__io_shutdown) {
+    while (1) {
         io_process_pending();
 
         long long now = win_now_ms();
