@@ -341,11 +341,37 @@ class TaskDetachRcTests(TestCase) {
 }
 
 
+def _joined_text(a: str) -> str {
+    return a + "def"
+}
+
+
+def _joined_items(n: int) -> list[int] {
+    out: list[int] = []
+    i: int = 0
+    while i < n {
+        out.append(i)
+        i = i + 1
+    }
+    return out
+}
+
+
 class TaskOwnershipTests(TestCase) {
     """Task result ownership (docs/1604 outbound edge): the result slot is an own
     field of the task, join/await moves it out, del detaches, and a task that dies
     unclaimed releases what it still owns. ASan CI proves the release; the value
     assertions here prove the moves and the del path still run the work."""
+
+    def test_joined_str_in_argument_position_is_released() {
+        t: Task[str] = fire _joined_text("abc")
+        self.assertEqual(t.join(), "abcdef")
+    }
+
+    def test_joined_list_in_argument_position_is_released() {
+        t: Task[list[int]] = fire _joined_items(5)
+        self.assertEqual(len(t.join()), 5)
+    }
 
     def test_await_moves_result_out() {
         got: str = await make_payload(7)

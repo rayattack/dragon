@@ -739,7 +739,16 @@ void CodeGen::Impl::releaseDiscardedArm(Expr* armExpr, llvm::Value* val) {
         emitDecrefByKind(val, kind);
     }
 
+static bool isTaskJoinResult(llvm::Value* v) {
+    auto* cast = llvm::dyn_cast<llvm::IntToPtrInst>(v);
+    if (!cast) return false;
+    auto* call = llvm::dyn_cast<llvm::CallInst>(cast->getOperand(0));
+    if (!call || !call->getCalledFunction()) return false;
+    return call->getCalledFunction()->getName() == "dragon_vthread_join";
+}
+
 bool CodeGen::Impl::isOwnedStrResult(llvm::Value* v) {
+        if (isTaskJoinResult(v)) return true;
         if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
             if (phi->getType() != i8PtrType || phi->getNumIncomingValues() == 0)
                 return false;
@@ -770,6 +779,7 @@ bool CodeGen::Impl::isBorrowedStrReturnerName(const std::string& name) {
     }
 
 bool CodeGen::Impl::isOwnedPtrResult(llvm::Value* v) {
+        if (isTaskJoinResult(v)) return true;
         if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
             if (phi->getType() != i8PtrType || phi->getNumIncomingValues() == 0)
                 return false;
