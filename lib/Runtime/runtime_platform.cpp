@@ -125,20 +125,6 @@ void dragon_ptr_write_i32(void* p, int64_t offset, int64_t val) {
     *((int32_t*)((char*)p + offset)) = (int32_t)val;
 }
 
-const char* dragon_recv_to_str(int64_t fd, void* buf, int64_t length, int64_t flags) {
-    if (!buf || length <= 0) return dragon_string_alloc("", 0);
-    if (length > DRAGON_MAX_RECV_BYTES)
-        dragon_raise_exc_cstr(43, "MemoryError: receive size exceeds the 1 GiB per-call limit");
-#ifdef _WIN32
-    int n = recv((SOCKET)fd, (char*)buf, (int)(length - 1), (int)flags);
-#else
-    ssize_t n = recv((int)fd, buf, (size_t)(length - 1), (int)flags);
-#endif
-    if (n < 0) n = 0;
-    ((char*)buf)[n] = '\0';
-    return dragon_string_alloc((const char*)buf, (int64_t)n);
-}
-
 int64_t dragon_udp_sendto(int64_t fd, const char* buf, int64_t len,
                           int64_t flags, void* addr, int64_t addrlen) {
     if (!buf || len <= 0) return 0;

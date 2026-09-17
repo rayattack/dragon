@@ -2244,7 +2244,8 @@ static int nb_wait_fd(int fd, short events) {
     while (1) {
         int r = WSAPoll(&pfd, 1, -1);
         if (r > 0) {
-            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+            if (pfd.revents & POLLNVAL) { WSASetLastError(WSAENOTSOCK); return -1; }
+            if (pfd.revents & (POLLERR | POLLHUP)) { WSASetLastError(WSAECONNRESET); return -1; }
             return 0;
         }
         if (r < 0 && WSAGetLastError() == WSAEINTR) continue;
@@ -2259,7 +2260,8 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     int r = WSAPoll(&pfd, 1, timeout_ms);
     dragon_gc_safe_end();
     if (r > 0) {
-        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+        if (pfd.revents & POLLNVAL) { WSASetLastError(WSAENOTSOCK); return -1; }
+        if (pfd.revents & (POLLERR | POLLHUP)) { WSASetLastError(WSAECONNRESET); return -1; }
         return 1;
     }
     return r == 0 ? 0 : -1;
@@ -2270,14 +2272,16 @@ static int nb_wait_fd(int fd, short events) {
     while (1) {
         dragon_gc_safe_begin();
         int r = poll(&pfd, 1, -1);
+        int poll_errno = errno;
         dragon_gc_safe_end();
         if (r > 0) {
             // POLLHUP/POLLERR still mean "the syscall will not block": macOS raises
             // POLLHUP on peer close with data still buffered, so only POLLNVAL fails here.
-            if (pfd.revents & POLLNVAL) return -1;
+            if (pfd.revents & POLLNVAL) { errno = EBADF; return -1; }
             return 0;
         }
-        if (r < 0 && errno == EINTR) continue;
+        if (r < 0 && poll_errno == EINTR) continue;
+        errno = poll_errno;
         return -1;
     }
 }
@@ -2289,13 +2293,14 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     while (1) {
         dragon_gc_safe_begin();
         int r = poll(&pfd, 1, remaining);
+        int poll_errno = errno;
         dragon_gc_safe_end();
         if (r > 0) {
-            if (pfd.revents & POLLNVAL) return -1;
+            if (pfd.revents & POLLNVAL) { errno = EBADF; return -1; }
             return 1;
         }
         if (r == 0) return 0;
-        if (errno != EINTR) return -1;
+        if (poll_errno != EINTR) { errno = poll_errno; return -1; }
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         long elapsed = (now.tv_sec - start.tv_sec) * 1000
@@ -2313,6 +2318,43 @@ static inline bool dragon_sock_wouldblock() {
 #else
     return errno == EAGAIN || errno == EWOULDBLOCK;
 #endif
+}
+
+static inline int dragon_sock_last_error() {
+#ifdef _WIN32
+    return WSAGetLastError();
+#else
+    return errno;
+#endif
+}
+
+static void dragon_raise_sock_error(int err, const char* what) {
+    int64_t code;
+    const char* name;
+#ifdef _WIN32
+    switch (err) {
+        case WSAECONNRESET:   code = 61; name = "ConnectionResetError"; break;
+        case WSAECONNABORTED: code = 59; name = "ConnectionAbortedError"; break;
+        case WSAECONNREFUSED: code = 60; name = "ConnectionRefusedError"; break;
+        case WSAESHUTDOWN:    code = 58; name = "BrokenPipeError"; break;
+        case WSAETIMEDOUT:    code = 56; name = "TimeoutError"; break;
+        default:              code = 50; name = "OSError"; break;
+    }
+    char msg[224];
+    snprintf(msg, sizeof(msg), "%s: %s failed: winsock error %d", name, what, err);
+#else
+    switch (err) {
+        case ECONNRESET:   code = 61; name = "ConnectionResetError"; break;
+        case ECONNABORTED: code = 59; name = "ConnectionAbortedError"; break;
+        case ECONNREFUSED: code = 60; name = "ConnectionRefusedError"; break;
+        case EPIPE:        code = 58; name = "BrokenPipeError"; break;
+        case ETIMEDOUT:    code = 56; name = "TimeoutError"; break;
+        default:           code = 50; name = "OSError"; break;
+    }
+    char msg[224];
+    snprintf(msg, sizeof(msg), "%s: %s failed: %s", name, what, strerror(err));
+#endif
+    dragon_raise_exc_cstr(code, msg);
 }
 
 int64_t dragon_nb_accept(int64_t server_fd, void* addr, void* addrlen) {
@@ -2351,7 +2393,8 @@ static int64_t dragon_recv_len_or_raise(int64_t max_len) {
     return max_len;
 }
 
-int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
+static int64_t nb_recv_into(int64_t fd, void* buf, int64_t max_len, int* err_out) {
+    *err_out = 0;
     if (max_len <= 0) return 0;
     arm_stream_nonblocking((int)fd);
     while (1) {
@@ -2368,11 +2411,20 @@ int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
                 mco_yield(vt->coro);
                 continue;
             }
-            if (nb_wait_fd((int)fd, POLLIN) < 0) return -1;
+            if (nb_wait_fd((int)fd, POLLIN) < 0) {
+                *err_out = dragon_sock_last_error();
+                return -1;
+            }
             continue;
         }
+        *err_out = dragon_sock_last_error();
         return -1;
     }
+}
+
+int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
+    int err = 0;
+    return nb_recv_into(fd, buf, max_len, &err);
 }
 
 int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
@@ -2408,8 +2460,12 @@ const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
     dragon_recv_len_or_raise(max_len);
     int64_t cap = max_len > 0 ? max_len : 1;
     char* buf = (char*)dragon_xmalloc_ex(cap, 1, 1);
-    int64_t n = dragon_nb_recv(fd, buf, max_len);
-    if (n < 0) n = 0;
+    int err = 0;
+    int64_t n = nb_recv_into(fd, buf, max_len, &err);
+    if (n < 0) {
+        free(buf);
+        dragon_raise_sock_error(err, "receive");
+    }
     buf[n] = '\0';
     int32_t clbase = dragon_cleanup_depth();
     dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
@@ -2423,11 +2479,36 @@ DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len) {
     dragon_recv_len_or_raise(max_len);
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
-    int64_t n = dragon_nb_recv(fd, buf, max_len);
-    if (n < 0) n = 0;
+    int err = 0;
+    int64_t n = nb_recv_into(fd, buf, max_len, &err);
+    if (n < 0) {
+        free(buf);
+        dragon_raise_sock_error(err, "receive");
+    }
     DragonBytes* result = dragon_bytes_new(buf, n);
     free(buf);
     return result;
+}
+
+enum RecvParkOutcome {
+    RECV_PARK_READY     = 0,
+    RECV_PARK_TIMED_OUT = 1,
+    RECV_PARK_FAILED    = 2
+};
+
+static int dragon_recv_park_deadline(int64_t fd, int64_t timeout_ms, int* err_out) {
+    DragonVThread* vt = __current_vthread;
+    if (vt && vt->coro) {
+        vt->io_timed_out = 0;
+        dragon_io_watch_fd_deadline((int)fd, IO_EVENT_FD_READ, vt, timeout_ms);
+        mco_yield(vt->coro);
+        return vt->io_timed_out ? RECV_PARK_TIMED_OUT : RECV_PARK_READY;
+    }
+    int pr = nb_wait_fd_timeout((int)fd, POLLIN, (int)timeout_ms);
+    if (pr > 0) return RECV_PARK_READY;
+    if (pr == 0) return RECV_PARK_TIMED_OUT;
+    *err_out = dragon_sock_last_error();
+    return RECV_PARK_FAILED;
 }
 
 DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout_ms) {
@@ -2438,6 +2519,7 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
     int64_t n = 0;
+    int err = 0;
     while (1) {
 #ifdef _WIN32
         int r = recv((SOCKET)fd, (char*)buf, (int)max_len, 0);
@@ -2445,20 +2527,15 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
         ssize_t r = recv((int)fd, buf, (size_t)max_len, DRAGON_MSG_NB);
 #endif
         if (r >= 0) { n = (int64_t)r; break; }
-        if (dragon_sock_wouldblock()) {
-            DragonVThread* vt = __current_vthread;
-            if (vt && vt->coro) {
-                vt->io_timed_out = 0;
-                dragon_io_watch_fd_deadline((int)fd, IO_EVENT_FD_READ, vt, timeout_ms);
-                mco_yield(vt->coro);
-                if (vt->io_timed_out) { n = 0; break; }
-                continue;
-            }
-            int pr = nb_wait_fd_timeout((int)fd, POLLIN, (int)timeout_ms);
-            if (pr <= 0) { n = 0; break; }
-            continue;
-        }
-        n = 0; break;
+        if (!dragon_sock_wouldblock()) { err = dragon_sock_last_error(); break; }
+        int parked = dragon_recv_park_deadline(fd, timeout_ms, &err);
+        if (parked == RECV_PARK_READY) continue;
+        n = 0;
+        break;
+    }
+    if (err != 0) {
+        free(buf);
+        dragon_raise_sock_error(err, "receive");
     }
     DragonBytes* result = dragon_bytes_new(buf, n);
     free(buf);
@@ -2466,13 +2543,12 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
 }
 
 static int64_t dragon_nb_recv_deadline_raw(int64_t fd, void* buf, int64_t max_len,
-                                           int64_t timeout_ms, int* timed_out) {
+                                           int64_t timeout_ms, int* timed_out,
+                                           int* err_out) {
     *timed_out = 0;
+    *err_out = 0;
     if (max_len <= 0) return 0;
-    if (timeout_ms <= 0) {
-        int64_t n = dragon_nb_recv(fd, buf, max_len);
-        return n < 0 ? 0 : n;
-    }
+    if (timeout_ms <= 0) return nb_recv_into(fd, buf, max_len, err_out);
     arm_stream_nonblocking((int)fd);
     while (1) {
 #ifdef _WIN32
@@ -2481,21 +2557,14 @@ static int64_t dragon_nb_recv_deadline_raw(int64_t fd, void* buf, int64_t max_le
         ssize_t r = recv((int)fd, buf, (size_t)max_len, DRAGON_MSG_NB);
 #endif
         if (r >= 0) return (int64_t)r;
-        if (dragon_sock_wouldblock()) {
-            DragonVThread* vt = __current_vthread;
-            if (vt && vt->coro) {
-                vt->io_timed_out = 0;
-                dragon_io_watch_fd_deadline((int)fd, IO_EVENT_FD_READ, vt, timeout_ms);
-                mco_yield(vt->coro);
-                if (vt->io_timed_out) { *timed_out = 1; return 0; }
-                continue;
-            }
-            int pr = nb_wait_fd_timeout((int)fd, POLLIN, (int)timeout_ms);
-            if (pr == 0) { *timed_out = 1; return 0; }
-            if (pr < 0) return 0;
-            continue;
+        if (!dragon_sock_wouldblock()) {
+            *err_out = dragon_sock_last_error();
+            return -1;
         }
-        return 0;
+        int parked = dragon_recv_park_deadline(fd, timeout_ms, err_out);
+        if (parked == RECV_PARK_READY) continue;
+        *timed_out = (parked == RECV_PARK_TIMED_OUT);
+        return *timed_out ? 0 : -1;
     }
 }
 
@@ -2504,10 +2573,15 @@ const char* dragon_nb_recv_str_deadline(int64_t fd, int64_t max_len, int64_t tim
     int64_t cap = max_len > 0 ? max_len : 1;
     char* buf = (char*)dragon_xmalloc_ex(cap, 1, 1);
     int timed_out = 0;
-    int64_t n = dragon_nb_recv_deadline_raw(fd, buf, max_len, timeout_ms, &timed_out);
+    int err = 0;
+    int64_t n = dragon_nb_recv_deadline_raw(fd, buf, max_len, timeout_ms, &timed_out, &err);
     if (timed_out) {
         free(buf);
         dragon_raise_exc_cstr(56, "TimeoutError: receive timed out");
+    }
+    if (n < 0) {
+        free(buf);
+        dragon_raise_sock_error(err, "receive");
     }
     buf[n] = '\0';
     int32_t clbase = dragon_cleanup_depth();
@@ -2523,10 +2597,15 @@ DragonBytes* dragon_nb_recv_bytes_deadline(int64_t fd, int64_t max_len, int64_t 
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
     int timed_out = 0;
-    int64_t n = dragon_nb_recv_deadline_raw(fd, buf, max_len, timeout_ms, &timed_out);
+    int err = 0;
+    int64_t n = dragon_nb_recv_deadline_raw(fd, buf, max_len, timeout_ms, &timed_out, &err);
     if (timed_out) {
         free(buf);
         dragon_raise_exc_cstr(56, "TimeoutError: receive timed out");
+    }
+    if (n < 0) {
+        free(buf);
+        dragon_raise_sock_error(err, "receive");
     }
     DragonBytes* result = dragon_bytes_new(buf, n);
     free(buf);

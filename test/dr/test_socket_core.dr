@@ -1,17 +1,27 @@
 from unittest import TestCase, main
-from socket import TcpListener, TcpStream, SocketHandle, AF_INET, SOCK_STREAM
+from socket import TcpListener, TcpStream, UdpSocket, SocketHandle, AF_INET, SOCK_STREAM, SOL_SOCKET
 from http.server import FdReader
-from time import sleep_ms
+from time import sleep_ms, monotonic
+import os
 
 extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
 extern "C" def connect(fd: intc, addr: ptr, addrlen: intc) -> intc
+extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
+extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
 extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
 extern "C" def dragon_sockaddr_in_size() -> intc
+extern "C" def dragon_ptr_write_i32(p: ptr, offset: intc, val: intc)
 extern "C" def dragon_close_fd(fd: int)
+
+const _carriers_pinned: int = os.setenv("DRAGON_WORKER_THREADS", "2", 1)
+const _carrier_cap_pinned: int = os.setenv("DRAGON_MAX_CARRIERS", "2", 1)
 
 const TWO_POW_62: int = 4611686018427387904
 const INT64_MAX: int = 9223372036854775807
+const SO_LINGER: int = 13
+const LINGER_STRUCT_BYTES: int = 8
+const LINGER_SECONDS_OFFSET: int = 4
 
 
 def _peer(l: TcpListener) -> None {
@@ -36,6 +46,63 @@ def _echo_once(lis: TcpListener) -> None {
     const msg: str = conn.recv(1024)
     conn.send("echo:" + msg)
     conn.close()
+}
+
+
+def _udp_park_receiver(s: UdpSocket) -> str {
+    return s.recvfrom(64)
+}
+
+
+def _probe() -> int {
+    return 7
+}
+
+
+def _rst_peer(l: TcpListener) -> None {
+    const conn: TcpStream = l.accept()
+    const linger: ptr = malloc(LINGER_STRUCT_BYTES)
+    dragon_ptr_write_i32(linger, 0, 1)
+    dragon_ptr_write_i32(linger, LINGER_SECONDS_OFFSET, 0)
+    setsockopt(conn.raw_fd(), SOL_SOCKET, SO_LINGER, linger, LINGER_STRUCT_BYTES)
+    free(linger)
+    conn.close()
+}
+
+
+def _poisoned_stream() -> TcpStream {
+    const c: TcpStream = TcpStream(SocketHandle.adopt_raw(socket(AF_INET, SOCK_STREAM, 0)))
+    c.close()
+    return c
+}
+
+
+def _recvfrom_on_a_closed_socket() -> None {
+    const s: UdpSocket = UdpSocket("127.0.0.1", 0)
+    s.close()
+    s.recvfrom(64)
+}
+
+
+def _recv_on_a_closed_stream() -> None {
+    _poisoned_stream().recv(16)
+}
+
+
+def _recv_bytes_on_a_closed_stream() -> None {
+    _poisoned_stream().recv_bytes(16)
+}
+
+
+def _recv_timeout_on_a_closed_stream() -> None {
+    _poisoned_stream().recv_timeout(16, 50)
+}
+
+
+def _recv_deadline_on_a_closed_stream() -> None {
+    const c: TcpStream = _poisoned_stream()
+    c.set_timeout(50)
+    c.recv(16)
 }
 
 
@@ -175,6 +242,114 @@ class ForeignSocketTests(TestCase) {
 }
 
 
+class UdpParkingTests(TestCase) {
+    """A datagram receive must park the green thread, not sit on its carrier.
+
+    This file pins the scheduler to two carriers and caps it at two, so a receive
+    that holds its carrier cannot be rescued by the sysmon spawning a third: two
+    blocked receivers own every carrier in the process and nothing else can run.
+    """
+
+    def test_recvfrom_parks_instead_of_holding_its_carrier() {
+        const a: UdpSocket = UdpSocket("127.0.0.1", 54551)
+        a.bind()
+        const b: UdpSocket = UdpSocket("127.0.0.1", 54552)
+        b.bind()
+
+        r1: Task[str] = fire _udp_park_receiver(a)
+        r2: Task[str] = fire _udp_park_receiver(b)
+        sleep_ms(50)
+
+        p: Task[int] = fire _probe()
+        const t0: float = monotonic()
+        while p.is_alive() and monotonic() - t0 < 2.0 {
+            sleep_ms(5)
+        }
+        const probe_ran: bool = not p.is_alive()
+
+        const sender: UdpSocket = UdpSocket("127.0.0.1", 0)
+        sender.sendto("alpha", "127.0.0.1", 54551)
+        sender.sendto("beta", "127.0.0.1", 54552)
+        const got1: str = r1.join()
+        const got2: str = r2.join()
+        const probe_value: int = p.join()
+        sender.close()
+        a.close()
+        b.close()
+
+        self.assertTrue(probe_ran, "probe starved: recvfrom held both carriers instead of parking")
+        self.assertEqual(got1, "alpha")
+        self.assertEqual(got2, "beta")
+        self.assertEqual(probe_value, 7)
+    }
+
+    def test_a_parked_receiver_gets_the_whole_datagram() {
+        const s: UdpSocket = UdpSocket("127.0.0.1", 54553)
+        s.bind()
+        const r: Task[str] = fire _udp_park_receiver(s)
+        sleep_ms(30)
+        const sender: UdpSocket = UdpSocket("127.0.0.1", 0)
+        sender.sendto("0123456789abcdef", "127.0.0.1", 54553)
+        self.assertEqual(r.join(), "0123456789abcdef")
+        sender.close()
+        s.close()
+    }
+}
+
+
+class RecvErrorTests(TestCase) {
+    """A receive that fails must say so, not hand back an empty read.
+
+    Every one of these reads looks like EOF to the caller if the failure is
+    swallowed: the loop ends, the connection is treated as finished, and nothing
+    in the program ever learns the kernel refused the read.
+    """
+
+    def test_recvfrom_error_raises_instead_of_an_empty_datagram() {
+        self.assertRaises(OSError, _recvfrom_on_a_closed_socket)
+    }
+
+    def test_recv_error_raises_instead_of_eof() {
+        self.assertRaises(OSError, _recv_on_a_closed_stream)
+    }
+
+    def test_recv_bytes_error_raises_instead_of_eof() {
+        self.assertRaises(OSError, _recv_bytes_on_a_closed_stream)
+    }
+
+    def test_recv_timeout_error_raises_instead_of_eof() {
+        self.assertRaises(OSError, _recv_timeout_on_a_closed_stream)
+    }
+
+    def test_deadline_recv_error_raises_instead_of_eof() {
+        self.assertRaises(OSError, _recv_deadline_on_a_closed_stream)
+    }
+
+    def test_a_reset_peer_raises_connection_reset() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 54554)
+        lis.bind()
+        lis.listen(4)
+        const t: Task[None] = fire _rst_peer(lis)
+        const c: TcpStream = TcpStream.open("127.0.0.1", 54554)
+
+        caught: str = "nothing"
+        try {
+            c.recv(64)
+            caught = "returned"
+        } except ConnectionResetError {
+            caught = "reset"
+        } except OSError {
+            caught = "oserror"
+        }
+
+        await t
+        c.close()
+        lis.close()
+        self.assertEqual(caught, "reset")
+    }
+}
+
+
 class CloseVisibilityTests(TestCase) {
     """Closing a socket goes through the runtime, so the descriptor is really gone.
 
@@ -215,8 +390,15 @@ class CloseVisibilityTests(TestCase) {
         c.close()
         self.assertEqual(c.raw_fd(), -1)
     }
+
+    def test_a_closed_stream_refuses_to_read_a_recycled_descriptor() {
+        const c: TcpStream = _poisoned_stream()
+        self.assertEqual(c.raw_fd(), -1)
+        self.assertRaises(OSError, _recv_on_a_closed_stream)
+    }
 }
 
 
 main([SocketHandleTest(), SocketVthreadTests(), SocketRecvOomTests(),
-      ForeignSocketTests(), CloseVisibilityTests()])
+      ForeignSocketTests(), UdpParkingTests(), RecvErrorTests(),
+      CloseVisibilityTests()])

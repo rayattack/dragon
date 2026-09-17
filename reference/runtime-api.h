@@ -1453,16 +1453,6 @@ int64_t dragon_sockaddr_in_size() { return 0; }
 void dragon_ptr_write_i32(void* p, int64_t offset, int64_t val) {}
 
 /**
- * Receive from socket and return as a Dragon string.
- * @param fd Socket file descriptor
- * @param buf Receive buffer
- * @param length Max bytes to receive
- * @param flags recv() flags
- * @return Heap-allocated string with received data
- */
-const char* dragon_recv_to_str(int64_t fd, void* buf, int64_t length, int64_t flags) { return nullptr; }
-
-/**
  * Send UDP datagram.
  * @param fd Socket file descriptor
  * @param buf Data to send
