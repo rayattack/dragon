@@ -49,6 +49,16 @@
 
 namespace dragon {
 
+struct ExcFrameSite {
+    llvm::Function* func = nullptr;
+    llvm::CallInst* push = nullptr;
+    llvm::CallInst* setjmp = nullptr;
+    llvm::Instruction* normalCond = nullptr;
+    llvm::BranchInst* armBranch = nullptr;
+    llvm::BasicBlock* bodyBB = nullptr;
+    std::vector<llvm::CallInst*> pops;
+};
+
 struct CodeGen::Impl {
     CodeGenOptions options;
     std::vector<CodeGenDiagnostic> diagnostics;
@@ -116,12 +126,22 @@ struct CodeGen::Impl {
         return !loopStack.empty() && scopes.size() <= loopStack.top().scopeDepth;
     }
 
-    std::vector<llvm::Function*> tryFrameFuncs;
+    std::vector<ExcFrameSite> excFrameSites;
+
+    struct ActiveExcFrame {
+        llvm::Function* func = nullptr;
+        size_t site = 0;
+    };
+    std::vector<ActiveExcFrame> tryFrameFuncs;
+
+    size_t armExcFrame(llvm::BasicBlock* bodyBB, llvm::BasicBlock* unwindBB);
+    void emitExcFramePop(size_t site);
+    void elideUnreachableExcFrames();
 
     size_t currentFnTryFrames() {
         size_t n = 0;
         for (auto it = tryFrameFuncs.rbegin(); it != tryFrameFuncs.rend(); ++it) {
-            if (*it != currentFunction) break;
+            if (it->func != currentFunction) break;
             ++n;
         }
         return n;
@@ -132,7 +152,7 @@ struct CodeGen::Impl {
         auto* bb = builder->GetInsertBlock();
         if (!bb || bb->getTerminator()) return;
         for (size_t i = 0; i < n; ++i)
-            builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
+            emitExcFramePop(tryFrameFuncs[tryFrameFuncs.size() - 1 - i].site);
     }
 
     struct WithCleanupItem {

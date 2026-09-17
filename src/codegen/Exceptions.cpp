@@ -100,15 +100,7 @@ void CodeGen::visit(TryStmt& node) {
     llvm::BasicBlock* afterHandlerBB = finallyBB ? finallyBB : reraiseCheckBB;
     llvm::BasicBlock* afterTryBodyBB = elseBB ? elseBB : afterHandlerBB;
 
-    auto* jmpbufPtr = impl_->builder->CreateCall(
-        impl_->runtimeFuncs["dragon_exc_push_frame"], {}, "jmpbuf");
-    auto* setjmpResult = impl_->builder->CreateCall(
-        impl_->runtimeFuncs["setjmp"], {jmpbufPtr}, "setjmp.result");
-    auto* isNormal = impl_->builder->CreateICmpEQ(
-        setjmpResult,
-        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0),
-        "is.normal");
-    impl_->builder->CreateCondBr(isNormal, tryBodyBB, dispatchBB);
+    const size_t frameSite = impl_->armExcFrame(tryBodyBB, dispatchBB);
 
     if (!node.finallyBody.empty()) {
         Impl::ExitCleanup ec;
@@ -120,7 +112,7 @@ void CodeGen::visit(TryStmt& node) {
     }
 
     impl_->builder->SetInsertPoint(tryBodyBB);
-    impl_->tryFrameFuncs.push_back(func);
+    impl_->tryFrameFuncs.push_back({func, frameSite});
     // The try body is its own lexical scope: its owned heap locals are freed EITHER by codegen (normal completion)
     // OR by dragon_exc_cleanup_unwind (longjmp), never both - in the enclosing scope they'd double-free on the caught path.
     impl_->pushScope();
@@ -132,7 +124,7 @@ void CodeGen::visit(TryStmt& node) {
     impl_->popScope();
     impl_->tryFrameFuncs.pop_back();
     if (!tryTerminated) {
-        impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
+        impl_->emitExcFramePop(frameSite);
         impl_->builder->CreateBr(afterTryBodyBB);
     }
 
@@ -408,18 +400,10 @@ void CodeGen::visit(WithStmt& node) {
         auto* cleanupBB = llvm::BasicBlock::Create(*impl_->context, "with.cleanup", func);
         auto* endBB = llvm::BasicBlock::Create(*impl_->context, "with.end", func);
 
-        auto* jmpbufPtr = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_exc_push_frame"], {}, "jmpbuf");
-        auto* setjmpResult = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["setjmp"], {jmpbufPtr}, "setjmp.result");
-        auto* isNormal = impl_->builder->CreateICmpEQ(
-            setjmpResult,
-            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0),
-            "is.normal");
-        impl_->builder->CreateCondBr(isNormal, bodyBB, excBB);
+        const size_t frameSite = impl_->armExcFrame(bodyBB, excBB);
 
         impl_->builder->SetInsertPoint(bodyBB);
-        impl_->tryFrameFuncs.push_back(func);
+        impl_->tryFrameFuncs.push_back({func, frameSite});
         {
             Impl::ExitCleanup ec;
             ec.isWith = true;
@@ -437,7 +421,7 @@ void CodeGen::visit(WithStmt& node) {
         impl_->exitCleanupStack.pop_back();
         impl_->tryFrameFuncs.pop_back();
         if (!impl_->builder->GetInsertBlock()->getTerminator()) {
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
+            impl_->emitExcFramePop(frameSite);
             impl_->builder->CreateBr(cleanupBB);
         }
 

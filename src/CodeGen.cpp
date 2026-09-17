@@ -773,6 +773,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
         }
     }
 
+    impl_->elideUnreachableExcFrames();
+
     hintSmallFunctionsForInlining(*impl_->module);
 
     impl_->finalizeDebugLines();

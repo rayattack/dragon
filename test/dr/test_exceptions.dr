@@ -248,6 +248,322 @@ def _fromhex_odd() {
 }
 
 
+def _pure_add(a: int, b: int) -> int {
+    return a + b
+}
+
+
+def _pure_chain(a: int) -> int {
+    return _pure_add(a, _pure_add(a, 1))
+}
+
+
+def _indirect_boom(n: int) -> int {
+    if n > 0 { raise ValueError("indirect-boom") }
+    return n
+}
+
+
+def _ping(n: int) -> int {
+    if n <= 0 { return 0 }
+    return _pong(n - 1)
+}
+
+
+def _pong(n: int) -> int {
+    if n == 3 { raise RuntimeError("pong-boom") }
+    return _ping(n - 1)
+}
+
+
+class Runner {
+    def() { }
+    def run(n: int) -> int { return n + 1 }
+}
+
+
+class BoomRunner(Runner) {
+    def() { }
+    def run(n: int) -> int { raise ValueError("override-boom") }
+}
+
+
+class ExitBoom {
+    entered: int = 0
+    def() { self.entered = 0 }
+    def __enter__() -> ExitBoom { self.entered = self.entered + 1; return self }
+    def __exit__() -> int { raise RuntimeError("exit-boom") }
+}
+
+
+class StopOnly {
+    n: int = 0
+    def() { self.n = 0 }
+    def __iter__() -> StopOnly { return self }
+    def __next__() -> int {
+        self.n = self.n + 1
+        if self.n > 4 { raise StopIteration("done") }
+        return self.n
+    }
+}
+
+
+class NextBoom {
+    n: int = 0
+    def() { self.n = 0 }
+    def __iter__() -> NextBoom { return self }
+    def __next__() -> int {
+        self.n = self.n + 1
+        if self.n == 3 { raise ValueError("next-boom") }
+        if self.n > 5 { raise StopIteration("done") }
+        return self.n
+    }
+}
+
+
+class Ledger {
+    total: int = 0
+    def() { self.total = 0 }
+    def add(n: int) -> int {
+        self.total = self.total + n
+        return self.total
+    }
+}
+
+
+class FrameElisionTests(TestCase) {
+    """A try/with whose protected region provably cannot raise must arm no frame, and
+    every raise that CAN reach one must still be caught: these pin the unsafe direction."""
+
+    def test_noraise_body_runs_else_then_finally() {
+        order: list[str] = []
+        a: int = 0
+        try {
+            a = _pure_chain(4)
+        } except Exception {
+            order.append("except")
+        } else {
+            order.append("else")
+        } finally {
+            order.append("finally")
+        }
+        self.assertEqual(a, 9)
+        self.assertEqual(order, ["else", "finally"])
+    }
+
+    def test_indirect_callable_raise_caught() {
+        f: Callable[[int], int] = _indirect_boom
+        caught: str = ""
+        try {
+            f(1)
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(caught, "indirect-boom")
+    }
+
+    def test_vtable_override_raise_caught() {
+        r: Runner = BoomRunner()
+        caught: str = ""
+        try {
+            r.run(1)
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(caught, "override-boom")
+    }
+
+    def test_base_dispatch_still_returns() {
+        r: Runner = Runner()
+        self.assertEqual(r.run(1), 2)
+    }
+
+    def test_with_exit_raise_propagates() {
+        caught: str = ""
+        c: ExitBoom = ExitBoom()
+        try {
+            with c as h {
+                h.entered = h.entered + 0
+            }
+        } except RuntimeError as e {
+            caught = str(e)
+        }
+        self.assertEqual(caught, "exit-boom")
+        self.assertEqual(c.entered, 1)
+    }
+
+    def test_for_protocol_stopiteration_terminates() {
+        seen: int = 0
+        for x in StopOnly() {
+            seen = seen + x
+        }
+        self.assertEqual(seen, 10)
+    }
+
+    def test_for_protocol_other_exception_propagates() {
+        seen: int = 0
+        caught: str = ""
+        try {
+            for x in NextBoom() {
+                seen = seen + x
+            }
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(seen, 3)
+        self.assertEqual(caught, "next-boom")
+    }
+
+    def test_mutual_recursion_raise_caught() {
+        caught: str = ""
+        try {
+            _ping(6)
+        } except RuntimeError as e {
+            caught = str(e)
+        }
+        self.assertEqual(caught, "pong-boom")
+    }
+
+    def test_scalar_try_then_raise_stays_caught() {
+        led: Ledger = Ledger()
+        caught: str = ""
+        try {
+            try {
+                led.add(2)
+            } finally {
+                led.add(3)
+            }
+            raise ValueError("after-scalar-try")
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(led.total, 5)
+        self.assertEqual(caught, "after-scalar-try")
+    }
+
+    def test_break_out_of_scalar_try_keeps_outer_frame() {
+        led: Ledger = Ledger()
+        caught: str = ""
+        try {
+            i: int = 0
+            while i < 5 {
+                try {
+                    led.add(1)
+                    if i == 2 { break }
+                } finally {
+                    led.add(10)
+                }
+                i = i + 1
+            }
+            raise ValueError("after-break")
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(led.total, 33)
+        self.assertEqual(caught, "after-break")
+    }
+
+    def test_continue_out_of_scalar_try_keeps_outer_frame() {
+        led: Ledger = Ledger()
+        caught: str = ""
+        try {
+            i: int = 0
+            while i < 4 {
+                i = i + 1
+                try {
+                    led.add(1)
+                    continue
+                } finally {
+                    led.add(10)
+                }
+            }
+            raise ValueError("after-continue")
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(led.total, 44)
+        self.assertEqual(caught, "after-continue")
+    }
+
+    def test_return_out_of_scalar_try_keeps_caller_frame() {
+        caught: str = ""
+        try {
+            self.assertEqual(_returns_from_scalar_try(4), 5)
+            raise ValueError("after-return")
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(caught, "after-return")
+    }
+
+    def test_nested_scalar_try_inside_raising_try() {
+        led: Ledger = Ledger()
+        caught: str = ""
+        try {
+            try {
+                led.add(1)
+            } finally {
+                led.add(2)
+            }
+            _indirect_boom(1)
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(led.total, 3)
+        self.assertEqual(caught, "indirect-boom")
+    }
+
+    def test_repeated_scalar_try_then_deep_raise() {
+        led: Ledger = Ledger()
+        i: int = 0
+        while i < 2000 {
+            try {
+                led.add(1)
+            } finally {
+                i = i + 1
+            }
+        }
+        caught: str = ""
+        try {
+            _ping(6)
+        } except RuntimeError as e {
+            caught = str(e)
+        }
+        self.assertEqual(led.total, 2000)
+        self.assertEqual(caught, "pong-boom")
+    }
+
+    def test_with_lock_scalar_body_then_raise_caught() {
+        lk: Lock = Lock()
+        led: Ledger = Ledger()
+        caught: str = ""
+        try {
+            i: int = 0
+            while i < 500 {
+                with lk {
+                    led.add(1)
+                }
+                i = i + 1
+            }
+            raise ValueError("after-lock")
+        } except ValueError as e {
+            caught = str(e)
+        }
+        self.assertEqual(led.total, 500)
+        self.assertEqual(caught, "after-lock")
+    }
+}
+
+
+def _returns_from_scalar_try(n: int) -> int {
+    try {
+        return n + 1
+    } finally {
+        n = n + 100
+    }
+}
+
+
 class WithEarlyExitTests(TestCase) {
     def test_return_runs_exit() {
         exit_order.clear()
@@ -703,5 +1019,5 @@ class CatchableBuiltinErrors(TestCase) {
 
 
 main([WithEarlyExitTests(), ExceptBindingTests(), UserExceptionTextTests(),
-      RaiseNonStrTests(),
+      RaiseNonStrTests(), FrameElisionTests(),
       CatchableContainerErrors(), CatchableBuiltinErrors()])

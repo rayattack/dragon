@@ -70,6 +70,7 @@ set(DRAGON_SOURCES
     src/codegen/AugAnnAssign.cpp
     src/codegen/ForLoop.cpp
     src/codegen/Exceptions.cpp
+    src/codegen/FrameElision.cpp
     src/codegen/Classes.cpp
     src/codegen/ClassSynthesis.cpp
     src/codegen/Module.cpp
