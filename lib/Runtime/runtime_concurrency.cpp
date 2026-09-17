@@ -706,12 +706,12 @@ static void scheduler_init() {
 
 #define DRAGON_FIRE_POOL_MAX 64
 
-static pthread_mutex_t __coro_pool_lock = PTHREAD_MUTEX_INITIALIZER;
-static void*   __coro_pool_head = NULL;
-static int64_t __coro_pool_count = 0;
-static size_t  __coro_pool_block_size = 0;
+static pthread_mutex_t __fire_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static void*   __fire_pool_head = NULL;
+static int64_t __fire_pool_count = 0;
+static size_t  __fire_pool_block_size = 0;
 
-static void* coro_block_map(size_t size) {
+static void* fire_block_map(size_t size) {
 #ifdef _WIN32
     return VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #else
@@ -721,7 +721,7 @@ static void* coro_block_map(size_t size) {
 #endif
 }
 
-static void coro_block_unmap(void* p, size_t size) {
+static void fire_block_unmap(void* p, size_t size) {
 #ifdef _WIN32
     (void)size;
     VirtualFree(p, 0, MEM_RELEASE);
@@ -730,56 +730,56 @@ static void coro_block_unmap(void* p, size_t size) {
 #endif
 }
 
-static void* coro_block_alloc(size_t size, void* allocator_data) {
+static void* fire_block_alloc(size_t size, void* allocator_data) {
     (void)allocator_data;
-    if (size == __atomic_load_n(&__coro_pool_block_size, __ATOMIC_ACQUIRE)) {
-        pthread_mutex_lock(&__coro_pool_lock);
-        void* blk = __coro_pool_head;
+    if (size == __atomic_load_n(&__fire_pool_block_size, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_lock(&__fire_pool_lock);
+        void* blk = __fire_pool_head;
         if (blk) {
-            __coro_pool_head = *(void**)blk;
-            __coro_pool_count--;
+            __fire_pool_head = *(void**)blk;
+            __fire_pool_count--;
             dragon_asan_unpoison_region(blk, size);
         }
-        pthread_mutex_unlock(&__coro_pool_lock);
+        pthread_mutex_unlock(&__fire_pool_lock);
         if (blk) return blk;
     }
-    return coro_block_map(size);
+    return fire_block_map(size);
 }
 
-static void coro_block_free(void* ptr, size_t size, void* allocator_data) {
+static void fire_block_free(void* ptr, size_t size, void* allocator_data) {
     (void)allocator_data;
-    if (size == __atomic_load_n(&__coro_pool_block_size, __ATOMIC_ACQUIRE)) {
-        pthread_mutex_lock(&__coro_pool_lock);
-        if (__coro_pool_count < DRAGON_FIRE_POOL_MAX) {
+    if (size == __atomic_load_n(&__fire_pool_block_size, __ATOMIC_ACQUIRE)) {
+        pthread_mutex_lock(&__fire_pool_lock);
+        if (__fire_pool_count < DRAGON_FIRE_POOL_MAX) {
             dragon_asan_unpoison_region(ptr, size);
-            *(void**)ptr = __coro_pool_head;
-            __coro_pool_head = ptr;
-            __coro_pool_count++;
+            *(void**)ptr = __fire_pool_head;
+            __fire_pool_head = ptr;
+            __fire_pool_count++;
             dragon_asan_poison_region((char*)ptr + sizeof(void*),
                                       size - sizeof(void*));
-            pthread_mutex_unlock(&__coro_pool_lock);
+            pthread_mutex_unlock(&__fire_pool_lock);
             return;
         }
-        pthread_mutex_unlock(&__coro_pool_lock);
+        pthread_mutex_unlock(&__fire_pool_lock);
     }
-    coro_block_unmap(ptr, size);
+    fire_block_unmap(ptr, size);
 }
 
-mco_desc dragon_coro_desc_init(void (*entry)(mco_coro*)) {
+mco_desc dragon_fire_desc_init(void (*entry)(mco_coro*)) {
     mco_desc desc = mco_desc_init(entry, 0);
     size_t unclaimed = 0;
-    __atomic_compare_exchange_n(&__coro_pool_block_size, &unclaimed,
+    __atomic_compare_exchange_n(&__fire_pool_block_size, &unclaimed,
                                 desc.coro_size, false,
                                 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-    desc.alloc_cb = coro_block_alloc;
-    desc.dealloc_cb = coro_block_free;
+    desc.alloc_cb = fire_block_alloc;
+    desc.dealloc_cb = fire_block_free;
     return desc;
 }
 
 int64_t dragon_fire_pool_size(void) {
-    pthread_mutex_lock(&__coro_pool_lock);
-    int64_t n = __coro_pool_count;
-    pthread_mutex_unlock(&__coro_pool_lock);
+    pthread_mutex_lock(&__fire_pool_lock);
+    int64_t n = __fire_pool_count;
+    pthread_mutex_unlock(&__fire_pool_lock);
     return n;
 }
 
@@ -810,7 +810,7 @@ DragonVThread* dragon_vthread_spawn_typed(
         *(DragonVThread**)heap_args = vt;
     }
 
-    mco_desc desc = dragon_coro_desc_init(trampoline);
+    mco_desc desc = dragon_fire_desc_init(trampoline);
     desc.user_data = heap_args;
     mco_result r = mco_create(&vt->coro, &desc);
     if (r != MCO_SUCCESS) {

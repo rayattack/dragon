@@ -454,7 +454,7 @@ static inline void dragon_asan_poison_region(void*, size_t) {}
 static inline void dragon_asan_unpoison_region(void*, size_t) {}
 #endif
 
-mco_desc dragon_coro_desc_init(void (*entry)(mco_coro*));
+mco_desc dragon_fire_desc_init(void (*entry)(mco_coro*));
 int64_t dragon_fire_pool_size(void);
 
 void dragon_fatal_mutation_in_safe_region(const char* where);
