@@ -8,6 +8,7 @@ extern "C" def connect(fd: intc, addr: ptr, addrlen: intc) -> intc
 extern "C" def free(p: ptr)
 extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
 extern "C" def dragon_sockaddr_in_size() -> intc
+extern "C" def dragon_close_fd(fd: int)
 
 const TWO_POW_62: int = 4611686018427387904
 const INT64_MAX: int = 9223372036854775807
@@ -174,5 +175,48 @@ class ForeignSocketTests(TestCase) {
 }
 
 
+class CloseVisibilityTests(TestCase) {
+    """Closing a socket goes through the runtime, so the descriptor is really gone.
+
+    A close the runtime never sees leaves the descriptor registered in its
+    readiness set; the number it occupied is the honest witness that the close
+    reached the kernel through the one path the runtime controls.
+    """
+
+    def test_close_frees_the_descriptor_number() {
+        const first: int = socket(AF_INET, SOCK_STREAM, 0)
+        self.assertTrue(first > 0)
+        const h: SocketHandle = SocketHandle.adopt_raw(first)
+        h.close()
+        self.assertEqual(h.fd(), -1)
+        h.close()
+        self.assertEqual(h.fd(), -1)
+
+        const reused: int = socket(AF_INET, SOCK_STREAM, 0)
+        dragon_close_fd(reused)
+        self.assertEqual(reused, first, "close() never reached the kernel: the descriptor number stayed taken")
+    }
+
+    def test_a_live_stream_closes_through_the_same_one_path() {
+        const lis: TcpListener = TcpListener("127.0.0.1", 54555)
+        lis.bind()
+        lis.listen(4)
+        const t: Task[None] = fire _peer(lis)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 54555)
+        self.assertTrue(c.raw_fd() > 0)
+        self.assertEqual(c.recv(16), "hello")
+        c.send("bye")
+        await t
+        lis.close()
+
+        c.close()
+        self.assertEqual(c.raw_fd(), -1)
+        c.close()
+        self.assertEqual(c.raw_fd(), -1)
+    }
+}
+
+
 main([SocketHandleTest(), SocketVthreadTests(), SocketRecvOomTests(),
-      ForeignSocketTests()])
+      ForeignSocketTests(), CloseVisibilityTests()])

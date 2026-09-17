@@ -10,7 +10,7 @@ extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
 extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
 extern "C" def listen(fd: intc, backlog: intc) -> intc
-extern "C" def close(fd: intc) -> intc
+extern "C" def dragon_close_fd(fd: int)
 extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
 extern "C" def shutdown(fd: intc, how: intc) -> intc
 
@@ -80,7 +80,7 @@ class SocketHandle {
         can only be put down once, however many times someone tries."""
         if not self._closed {
             self._closed = True
-            close(self._fd)
+            dragon_close_fd(self._fd)
         }
     }
 }
@@ -116,11 +116,11 @@ class TcpStream {
             const rc: int = dragon_nb_connect_timeout(fd, addr, addrlen, timeout)
             free(addr)
             if rc == -2 {
-                close(fd)
+                dragon_close_fd(fd)
                 raise TimeoutError(f"connect to {host}:{port} timed out")
             }
             if rc != 0 {
-                close(fd)
+                dragon_close_fd(fd)
                 raise ConnectionError(f"connect to {host}:{port} failed")
             }
             const stream: TcpStream = TcpStream(SocketHandle.adopt_raw(fd))
