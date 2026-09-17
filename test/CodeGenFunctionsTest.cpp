@@ -198,16 +198,17 @@ TEST(CodeGenTest, NestedDefDoesNotLeakIntoModule) {
 
 TEST(CodeGenTest, GeneratorStoredInVarIR) {
     auto ir = generateIR(code("generator_stored_in_var_ir"));
-    EXPECT_NE(ir.find("dragon_generator_next"), std::string::npos) << "Missing generator_next in IR:\n" << ir;
+    EXPECT_NE(ir.find("dragon_generator_advance"), std::string::npos) << "Missing generator_advance in IR:\n" << ir;
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos) << "Missing print_int in IR:\n" << ir;
 }
 
 TEST(CodeGenTest, GeneratorIR) {
     auto ir = generateIR(code("generator_ir"));
     EXPECT_NE(ir.find("dragon_generator_create"), std::string::npos);
-    EXPECT_NE(ir.find("dragon_generator_next"), std::string::npos);
-    EXPECT_NE(ir.find("dragon_generator_yield"), std::string::npos);
+    EXPECT_NE(ir.find("dragon_generator_advance"), std::string::npos);
+    EXPECT_NE(ir.find("dragon_generator_yield_value"), std::string::npos);
     EXPECT_NE(ir.find("gen__gen_body"), std::string::npos);
+    EXPECT_NE(ir.find("llvm.coro.suspend"), std::string::npos);
 }
 
 TEST(CodeGenE2E, GeneratorBasic) {
@@ -300,11 +301,13 @@ TEST(CodeGenE2E, VarArgsUnionElem) {
     EXPECT_EQ(out, "[1, 2]\nhi\n");
 }
 
-TEST(CodeGenIR, GeneratorReraiseEmitsScopeCleanup) {
+TEST(CodeGenIR, GeneratorLoopBranchesOnExhaustion) {
     auto ir = generateIR(code("generator_reraise_emits_scope_cleanup"));
-    EXPECT_NE(ir.find("dragon_generator_next"), std::string::npos);
-    EXPECT_NE(ir.find("gen.reraise"), std::string::npos)
-        << "Expected gen.reraise basic block\nIR:\n" << ir;
+    EXPECT_NE(ir.find("dragon_generator_advance"), std::string::npos);
+    EXPECT_EQ(ir.find("gen.reraise"), std::string::npos)
+        << "The loop must not arm a frame per element to re-raise\nIR:\n" << ir;
+    EXPECT_EQ(ir.find("StopIteration"), std::string::npos)
+        << "Exhaustion is a returned value, never a synthesized raise\nIR:\n" << ir;
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
         << "Expected scope cleanup (decref_str) in caller\nIR:\n" << ir;
 }
@@ -319,22 +322,25 @@ TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates) {
     EXPECT_EQ(out, "1\n1\n");
 }
 
-TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate) {
+TEST(CodeGenIR, GeneratorWrapperBuildsCoroutineFrame) {
     auto ir = generateIR(code("generator_wrapper_uses_typed_create"));
-    EXPECT_NE(ir.find("dragon_generator_create_typed"), std::string::npos)
-        << "Expected dragon_generator_create_typed call\nIR:\n" << ir;
+    EXPECT_NE(ir.find("dragon_generator_create"), std::string::npos)
+        << "Expected dragon_generator_create call\nIR:\n" << ir;
     EXPECT_NE(ir.find("echo__gen_body"), std::string::npos);
-    EXPECT_NE(ir.find("__dragon_gen_tramp_echo"), std::string::npos)
-        << "Expected per-callsite generator trampoline\nIR:\n" << ir;
-    EXPECT_NE(ir.find("__dragon_gen_decref_echo"), std::string::npos)
-        << "Expected per-callsite generator decref fn\nIR:\n" << ir;
+    EXPECT_NE(ir.find("llvm.coro.begin"), std::string::npos)
+        << "Expected the body to open an LLVM coroutine frame\nIR:\n" << ir;
+    EXPECT_NE(ir.find("__dragon_coro_resume"), std::string::npos)
+        << "Expected the shared resume thunk\nIR:\n" << ir;
+    EXPECT_NE(ir.find("__dragon_coro_destroy"), std::string::npos)
+        << "Expected the shared destroy thunk\nIR:\n" << ir;
+    EXPECT_EQ(ir.find("__dragon_gen_tramp_"), std::string::npos)
+        << "A generator must not spawn a stack-switching trampoline\nIR:\n" << ir;
 }
 
-TEST(CodeGenIR, GeneratorTypedCreateDeclaration) {
+TEST(CodeGenIR, GeneratorCreateDeclaration) {
     auto ir = generateIR(code("generator_typed_create_declaration"));
-    EXPECT_NE(ir.find("dragon_generator_create_typed(ptr, ptr, i64, ptr)"),
-              std::string::npos)
-        << "Expected 4-arg signature for dragon_generator_create_typed\n"
+    EXPECT_NE(ir.find("dragon_generator_create(ptr, ptr)"), std::string::npos)
+        << "Expected the two-thunk signature for dragon_generator_create\n"
         << "IR:\n" << ir;
 }
 

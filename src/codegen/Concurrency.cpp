@@ -363,9 +363,34 @@ void CodeGen::visit(YieldExpr& node) {
 
     auto* genPtr = impl_->builder->CreateLoad(impl_->i8PtrType, impl_->generatorPtr, "__gen.ptr");
     impl_->builder->CreateCall(
-        impl_->runtimeFuncs["dragon_generator_yield"],
+        impl_->runtimeFuncs["dragon_generator_yield_value"],
         {genPtr, yieldVal, llvm::ConstantInt::get(impl_->i64Type, yieldTag)});
 
+    auto& frame = *impl_->genFrame;
+    auto* func = impl_->currentFunction;
+    auto* i8Ty = llvm::Type::getInt8Ty(*impl_->context);
+    int64_t selector = ++frame.suspendCounter;
+
+    auto* resumeBB = llvm::BasicBlock::Create(
+        *impl_->context, "gen.resume." + std::to_string(selector), func);
+    auto* dropBB = llvm::BasicBlock::Create(
+        *impl_->context, "gen.drop." + std::to_string(selector), func);
+    auto* suspendVal = impl_->builder->CreateIntrinsic(
+        i8Ty, llvm::Intrinsic::coro_suspend,
+        {llvm::ConstantTokenNone::get(*impl_->context),
+         llvm::ConstantInt::getFalse(*impl_->context)}, nullptr,
+        "gen.suspended");
+    auto* suspendSwitch =
+        impl_->builder->CreateSwitch(suspendVal, frame.suspendBB, 2);
+    suspendSwitch->addCase(llvm::ConstantInt::get(i8Ty, 0), resumeBB);
+    suspendSwitch->addCase(llvm::ConstantInt::get(i8Ty, 1), dropBB);
+
+    impl_->builder->SetInsertPoint(dropBB);
+    impl_->emitGeneratorArgRelease();
+    impl_->builder->CreateBr(frame.cleanupBB);
+
+    impl_->builder->SetInsertPoint(resumeBB);
+    impl_->rearmGeneratorPads();
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 void CodeGen::visit(ThreadStmt& node) {

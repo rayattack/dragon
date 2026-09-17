@@ -124,10 +124,49 @@ void dropFrame(ExcFrameSite& site) {
 
 }
 
+void CodeGen::Impl::armGeneratorPad(llvm::Value* jmpbufPtr,
+                                    llvm::BasicBlock* bodyBB,
+                                    llvm::BasicBlock* unwindBB) {
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* slot = createEntryAlloca(currentFunction, "genpad.buf", i8PtrType);
+    builder->CreateStore(jmpbufPtr, slot);
+    auto* setjmpResult = builder->CreateCall(runtimeFuncs["setjmp"], {jmpbufPtr}, "setjmp.result");
+    builder->CreateCondBr(
+        builder->CreateICmpEQ(setjmpResult, llvm::ConstantInt::get(i32Ty, 0), "is.normal"),
+        bodyBB, unwindBB);
+    genFrame->pads.push_back({slot, unwindBB});
+}
+
+void CodeGen::Impl::rearmGeneratorPads() {
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    for (size_t i = 0; i < genFrame->pads.size(); ++i) {
+        const GeneratorPad& pad = genFrame->pads[i];
+        auto* buf = builder->CreateLoad(i8PtrType, pad.jmpbufSlot, "genpad.buf.l");
+        auto* setjmpResult = builder->CreateCall(runtimeFuncs["setjmp"], {buf}, "setjmp.result");
+        auto* armedBB = llvm::BasicBlock::Create(
+            *context, "gen.rearm." + std::to_string(i), currentFunction);
+        builder->CreateCondBr(
+            builder->CreateICmpEQ(setjmpResult, llvm::ConstantInt::get(i32Ty, 0), "is.normal"),
+            armedBB, pad.unwindBB);
+        builder->SetInsertPoint(armedBB);
+    }
+}
+
+void CodeGen::Impl::popGeneratorPad() {
+    if (genFrame && !genFrame->pads.empty()) genFrame->pads.pop_back();
+}
+
 size_t CodeGen::Impl::armExcFrame(llvm::BasicBlock* bodyBB,
                                   llvm::BasicBlock* unwindBB) {
     auto* jmpbufPtr =
         builder->CreateCall(runtimeFuncs["dragon_exc_push_frame"], {}, "jmpbuf");
+    if (genFrame) {
+        armGeneratorPad(jmpbufPtr, bodyBB, unwindBB);
+        ExcFrameSite pinned;
+        pinned.func = currentFunction;
+        excFrameSites.push_back(pinned);
+        return excFrameSites.size() - 1;
+    }
     auto* setjmpResult =
         builder->CreateCall(runtimeFuncs["setjmp"], {jmpbufPtr}, "setjmp.result");
     auto* isNormal = builder->CreateICmpEQ(

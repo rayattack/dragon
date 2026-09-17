@@ -456,7 +456,12 @@ void CodeGen::visit(ReturnStmt& node) {
         impl_->emitExcFramePops(impl_->currentFnTryFrames());
         impl_->emitEarlyExitCleanups(*this, 0,
                                      impl_->currentFnExitCleanupBase());
-        impl_->builder->CreateRetVoid();
+        impl_->emitGeneratorArgRelease();
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_generator_finish"],
+            {impl_->builder->CreateLoad(impl_->i8PtrType, impl_->generatorPtr,
+                                        "gen.return.ptr")});
+        impl_->builder->CreateBr(impl_->genFrame->cleanupBB);
         auto* deadBB = llvm::BasicBlock::Create(
             *impl_->context, "ret.dead", impl_->currentFunction);
         impl_->builder->SetInsertPoint(deadBB);

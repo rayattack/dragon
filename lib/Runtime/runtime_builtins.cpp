@@ -665,49 +665,44 @@ const char* dragon_file_readline(void* handle) {
 #define GEN_STATE_SUSPENDED 1
 #define GEN_STATE_EXHAUSTED 2
 
-DragonGenerator* dragon_generator_create_typed(
-    void (*trampoline)(mco_coro*), void* args, int64_t args_size,
-    void (*args_decref_fn)(void*)) {
+DragonGenerator* dragon_generator_create(void (*resume_fn)(void*),
+                                         void (*destroy_fn)(void*)) {
     DragonGenerator* gen = (DragonGenerator*)dragon_xcalloc_n(1, sizeof(DragonGenerator));
     dragon_obj_init(&gen->header, DRAGON_TAG_GENERATOR);
     gen->state = GEN_STATE_INITIAL;
-    gen->yielded_value = 0;
-
-    void* heap_args = NULL;
-    if (args_size > 0 && args) {
-        heap_args = dragon_malloc_nullable((size_t)args_size);
-        if (!heap_args) { free(gen); dragon_raise_oom(); }
-        memcpy(heap_args, args, (size_t)args_size);
-        *(DragonGenerator**)heap_args = gen;
-    }
-    gen->args = heap_args;
-    gen->args_decref_fn = args_decref_fn;
-
-    mco_desc desc = dragon_coro_desc_init(trampoline);
-    desc.user_data = heap_args;
-    mco_result r = mco_create(&gen->coro, &desc);
-    if (r == MCO_SUCCESS) dragon_lsan_root_whole_coroutine(gen->coro);
-    if (r != MCO_SUCCESS) {
-        fprintf(stderr, "generator: failed to create coroutine: %s\n",
-                mco_result_description(r));
-        if (heap_args) {
-            if (args_decref_fn) args_decref_fn(heap_args);
-            free(heap_args);
-        }
-        free(gen);
-        return NULL;
-    }
+    gen->resume_fn = resume_fn;
+    gen->destroy_fn = destroy_fn;
+    gen->exc_vt = (DragonVThread*)dragon_xcalloc_n(1, sizeof(DragonVThread));
+    gen->exc_vt->exc_sp = -1;
     return gen;
 }
 
-void dragon_generator_set_exhausted(void* gen_ptr) {
+void* dragon_generator_frame_alloc(int64_t size) {
+    return dragon_xmalloc_n(size, 1);
+}
+
+void dragon_generator_frame_free(void* mem) {
+    free(mem);
+}
+
+void dragon_generator_attach(void* gen_ptr, void* frame) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
-    if (gen) gen->state = GEN_STATE_EXHAUSTED;
+    if (gen) gen->frame = frame;
+}
+
+void dragon_generator_finish(void* gen_ptr) {
+    DragonGenerator* gen = (DragonGenerator*)gen_ptr;
+    if (!gen) return;
+    gen->state = GEN_STATE_EXHAUSTED;
+    gen->frame = NULL;
 }
 
 void dragon_generator_set_raised(void* gen_ptr) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
-    if (gen) gen->pending_exc = 1;
+    if (!gen) return;
+    gen->pending_exc = 1;
+    gen->state = GEN_STATE_EXHAUSTED;
+    gen->frame = NULL;
 }
 
 static void dragon_generator_release_yielded(DragonGenerator* gen) {
@@ -720,31 +715,24 @@ static void dragon_generator_release_yielded(DragonGenerator* gen) {
     gen->yielded_tag = 0;
 }
 
-void dragon_generator_yield(void* gen_ptr, int64_t value, int64_t tag) {
+void dragon_generator_yield_value(void* gen_ptr, int64_t value, int64_t tag) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
-    dragon_generator_release_yielded(gen);
+    if (gen->yielded_tag) dragon_generator_release_yielded(gen);
     gen->yielded_value = value;
     gen->yielded_tag = tag;
     gen->state = GEN_STATE_SUSPENDED;
-    mco_yield(gen->coro);
 }
 
-int64_t dragon_generator_next(void* gen_ptr) {
+int64_t dragon_generator_advance(void* gen_ptr, int64_t* out_value) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
-    if (!gen || gen->state == GEN_STATE_EXHAUSTED) {
-        dragon_raise_exc_cstr(11, "StopIteration");
-        return 0;
-    }
-    if (!gen->exc_vt) {
-        gen->exc_vt = (DragonVThread*)dragon_xcalloc_n(1, sizeof(DragonVThread));
-        gen->exc_vt->exc_sp = -1;
-    }
+    if (!gen || gen->state == GEN_STATE_EXHAUSTED) return 0;
+
     DragonVThread* prev_exc_vt = __dragon_exc_vt;
     int prev_active_frames = __dragon_active_frames;
     __dragon_exc_vt = gen->exc_vt;
     __dragon_active_frames = gen->exc_vt->active_frames;
 
-    mco_resume(gen->coro);
+    gen->resume_fn(gen->frame);
 
     gen->exc_vt->active_frames = __dragon_active_frames;
     __dragon_exc_vt = prev_exc_vt;
@@ -752,43 +740,39 @@ int64_t dragon_generator_next(void* gen_ptr) {
 
     if (gen->pending_exc) {
         gen->pending_exc = 0;
-        gen->state = GEN_STATE_EXHAUSTED;
-        dragon_raise_exc_obj(gen->exc_vt->exc_type, gen->exc_vt->exc_obj,
-                             gen->exc_vt->exc_msg);
+        void* raised = gen->exc_vt->exc_obj;
+        gen->exc_vt->exc_obj = NULL;
+        dragon_raise_exc_obj(gen->exc_vt->exc_type, raised, gen->exc_vt->exc_msg);
         return 0;
     }
-    if (gen->state == GEN_STATE_EXHAUSTED || mco_status(gen->coro) == MCO_DEAD) {
-        gen->state = GEN_STATE_EXHAUSTED;
-        dragon_raise_exc_cstr(11, "StopIteration");
-        return 0;
-    }
-    return gen->yielded_value;
+    if (gen->state == GEN_STATE_EXHAUSTED) return 0;
+    *out_value = gen->yielded_value;
+    return 1;
 }
 
 void dragon_generator_destroy(void* gen_ptr) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
     if (!gen) return;
     dragon_generator_release_yielded(gen);
-    if (gen->coro) {
-        mco_state st = mco_status(gen->coro);
-        if (st == MCO_DEAD || st == MCO_SUSPENDED) {
-            dragon_lsan_unroot_whole_coroutine(gen->coro);
-            mco_destroy(gen->coro);
-        }
-    }
-    if (gen->args) {
-        if (gen->args_decref_fn) gen->args_decref_fn(gen->args);
-        free(gen->args);
-    }
-    if (gen->exc_vt) {
+    if (gen->frame) {
+        DragonVThread* prev_exc_vt = __dragon_exc_vt;
+        int prev_active_frames = __dragon_active_frames;
+        __dragon_exc_vt = gen->exc_vt;
+        __dragon_active_frames = gen->exc_vt->active_frames;
         dragon_cleanup_stack_drain(&gen->exc_vt->cleanup, 0);
-        free(gen->exc_vt->cleanup.vals);
-        free(gen->exc_vt->cleanup.kinds);
-        free(gen->exc_vt->cleanup.tags);
-        dragon_decref_str_dispatch(gen->exc_vt->exc_msg);
-        if (gen->exc_vt->exc_obj) dragon_decref_dispatch(gen->exc_vt->exc_obj);
-        free(gen->exc_vt);
+        void* frame = gen->frame;
+        gen->frame = NULL;
+        gen->destroy_fn(frame);
+        __dragon_exc_vt = prev_exc_vt;
+        __dragon_active_frames = prev_active_frames;
     }
+    dragon_cleanup_stack_drain(&gen->exc_vt->cleanup, 0);
+    free(gen->exc_vt->cleanup.vals);
+    free(gen->exc_vt->cleanup.kinds);
+    free(gen->exc_vt->cleanup.tags);
+    dragon_decref_str_dispatch(gen->exc_vt->exc_msg);
+    if (gen->exc_vt->exc_obj) dragon_decref_dispatch(gen->exc_vt->exc_obj);
+    free(gen->exc_vt);
     free(gen);
 }
 

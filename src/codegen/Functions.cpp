@@ -369,6 +369,10 @@ void CodeGen::visit(LambdaExpr& node) {
 
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
+    auto* prevGenPtr = impl_->generatorPtr;
+    auto* prevGenFrame = impl_->genFrame;
+    impl_->generatorPtr = nullptr;
+    impl_->genFrame = nullptr;
     auto savedScopes = std::move(impl_->scopes);
     impl_->scopes.clear();
     auto savedCellPromoted = std::move(impl_->cellPromotedLocals);
@@ -444,6 +448,8 @@ void CodeGen::visit(LambdaExpr& node) {
     impl_->scopes = std::move(savedScopes);
     impl_->cellPromotedLocals = std::move(savedCellPromoted);
     impl_->currentFunction = prevFunc;
+    impl_->generatorPtr = prevGenPtr;
+    impl_->genFrame = prevGenFrame;
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
 
     if (hasCaptures) {
@@ -689,14 +695,17 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
     if (hasSelf) bodyParamTypes.push_back(impl_->i8PtrType);
     for (size_t i = userParamStart; i < node.params.size(); ++i)
         bodyParamTypes.push_back(impl_->typeExprToLLVM(node.params[i].type.get()));
-    auto* bodyFuncType = llvm::FunctionType::get(impl_->voidType, bodyParamTypes, false);
+    auto* bodyFuncType =
+        llvm::FunctionType::get(impl_->i8PtrType, bodyParamTypes, false);
     auto* bodyFunc = llvm::Function::Create(
         bodyFuncType, llvm::Function::InternalLinkage, siteName + "__gen_body",
         impl_->module.get());
+    bodyFunc->addFnAttr(llvm::Attribute::PresplitCoroutine);
 
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
     auto* prevGenPtr = impl_->generatorPtr;
+    auto* prevGenFrame = impl_->genFrame;
     std::string prevClassName = impl_->currentClassName;
     auto savedGlobalDecls = impl_->globalDeclaredVars;
     auto savedNonlocalDecls = impl_->nonlocalDeclaredVars;
@@ -711,6 +720,9 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
     if (hasSelf) impl_->currentClassName = selfClass;
     impl_->pushScope();
 
+    Impl::GeneratorFrame frame;
+    impl_->genFrame = &frame;
+
     auto argIt = bodyFunc->arg_begin();
     argIt->setName("__gen");
     auto* genAlloca = impl_->createEntryAlloca(bodyFunc, "__gen", impl_->i8PtrType);
@@ -723,6 +735,7 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
         impl_->builder->CreateStore(&*argIt, selfAlloca);
         impl_->setVar("self", selfAlloca, Impl::VarKind::ClassInstance);
         impl_->scopes.back().borrowed.insert("self");
+        frame.ownedArgs.push_back({&*argIt, Impl::VarKind::ClassInstance});
         ++argIt;
     }
     for (size_t pi = userParamStart; argIt != bodyFunc->arg_end(); ++argIt, ++pi) {
@@ -733,18 +746,99 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
         auto paramKind = impl_->typeExprToKind(node.params[pi].type.get());
         impl_->setVar(paramName, alloca, paramKind);
         impl_->trackPtrParam(paramName, node.params[pi].type.get());
-        if (Impl::isHeapKind(paramKind))
+        if (Impl::isHeapKind(paramKind)) {
             impl_->scopes.back().borrowed.insert(paramName);
+            if (paramKind != Impl::VarKind::Union)
+                frame.ownedArgs.push_back({&*argIt, paramKind});
+        }
     }
 
+    frame.handleSlot = impl_->createEntryAlloca(bodyFunc, "gen.hdl", impl_->i8PtrType);
+    auto* nullPtr = llvm::ConstantPointerNull::get(
+        llvm::cast<llvm::PointerType>(impl_->i8PtrType));
+    frame.coroId = impl_->builder->CreateIntrinsic(
+        llvm::Type::getTokenTy(*impl_->context), llvm::Intrinsic::coro_id,
+        {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0),
+         nullPtr, nullPtr, nullPtr}, nullptr, "gen.coro.id");
+    auto* frameSize = impl_->builder->CreateIntrinsic(
+        impl_->i64Type, llvm::Intrinsic::coro_size, {}, nullptr, "gen.frame.size");
+    auto* frameMem = impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_generator_frame_alloc"], {frameSize}, "gen.frame");
+    auto* handle = impl_->builder->CreateIntrinsic(
+        impl_->i8PtrType, llvm::Intrinsic::coro_begin, {frame.coroId, frameMem},
+        nullptr, "gen.handle");
+    impl_->builder->CreateStore(handle, frame.handleSlot);
+
+    frame.cleanupBB = llvm::BasicBlock::Create(*impl_->context, "gen.free", bodyFunc);
+    frame.suspendBB = llvm::BasicBlock::Create(*impl_->context, "gen.suspend", bodyFunc);
+    auto* startBB = llvm::BasicBlock::Create(*impl_->context, "gen.start", bodyFunc);
+    auto* dropBB = llvm::BasicBlock::Create(*impl_->context, "gen.drop.initial", bodyFunc);
+    auto* initial = impl_->builder->CreateIntrinsic(
+        llvm::Type::getInt8Ty(*impl_->context), llvm::Intrinsic::coro_suspend,
+        {llvm::ConstantTokenNone::get(*impl_->context),
+         llvm::ConstantInt::getFalse(*impl_->context)}, nullptr, "gen.initial");
+    auto* initialSwitch = impl_->builder->CreateSwitch(initial, frame.suspendBB, 2);
+    initialSwitch->addCase(
+        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*impl_->context), 0), startBB);
+    initialSwitch->addCase(
+        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*impl_->context), 1), dropBB);
+
+    impl_->builder->SetInsertPoint(dropBB);
+    impl_->emitGeneratorArgRelease();
+    impl_->builder->CreateBr(frame.cleanupBB);
+
+    impl_->builder->SetInsertPoint(startBB);
+    auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "gen.body", bodyFunc);
+    auto* raisedBB = llvm::BasicBlock::Create(*impl_->context, "gen.raised", bodyFunc);
+    const size_t bodySite = impl_->armExcFrame(bodyBB, raisedBB);
+    impl_->tryFrameFuncs.push_back({bodyFunc, bodySite});
+
+    impl_->builder->SetInsertPoint(raisedBB);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
+    impl_->emitGeneratorArgRelease();
+    impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_generator_set_raised"],
+        {impl_->builder->CreateLoad(impl_->i8PtrType, genAlloca, "gen.raised.ptr")});
+    impl_->builder->CreateBr(frame.cleanupBB);
+
+    impl_->builder->SetInsertPoint(bodyBB);
     for (auto& stmt : node.body) stmt->accept(*this);
 
     if (!impl_->builder->GetInsertBlock()->getTerminator()) {
         impl_->emitScopeCleanup();
-        impl_->builder->CreateRetVoid();
+        impl_->emitExcFramePops(1);
+        impl_->emitGeneratorArgRelease();
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_generator_finish"],
+            {impl_->builder->CreateLoad(impl_->i8PtrType, genAlloca, "gen.done.ptr")});
+        impl_->builder->CreateBr(frame.cleanupBB);
     }
+    impl_->popGeneratorPad();
+    impl_->tryFrameFuncs.pop_back();
+
+    impl_->builder->SetInsertPoint(frame.cleanupBB);
+    auto* handleReload =
+        impl_->builder->CreateLoad(impl_->i8PtrType, frame.handleSlot, "gen.hdl.free");
+    auto* freeMem = impl_->builder->CreateIntrinsic(
+        impl_->i8PtrType, llvm::Intrinsic::coro_free, {frame.coroId, handleReload},
+        nullptr, "gen.frame.mem");
+    impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_generator_frame_free"], {freeMem});
+    impl_->builder->CreateBr(frame.suspendBB);
+
+    impl_->builder->SetInsertPoint(frame.suspendBB);
+    auto* handleRet =
+        impl_->builder->CreateLoad(impl_->i8PtrType, frame.handleSlot, "gen.hdl.ret");
+    impl_->builder->CreateIntrinsic(
+        impl_->voidType, llvm::Intrinsic::coro_end,
+        {handleRet, llvm::ConstantInt::getFalse(*impl_->context),
+         llvm::ConstantTokenNone::get(*impl_->context)}, nullptr);
+    impl_->builder->CreateRet(handleRet);
+
     impl_->popScope();
     impl_->generatorPtr = prevGenPtr;
+    impl_->genFrame = prevGenFrame;
     impl_->scopes = std::move(savedScopes);
     impl_->currentFunction = prevFunc;
     impl_->currentClassName = prevClassName;
@@ -753,43 +847,33 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
 
     impl_->builder->SetInsertPoint(
         llvm::BasicBlock::Create(*impl_->context, "entry", wrapper));
+    impl_->currentFunction = wrapper;
     unsigned nwrap = (unsigned)wrapper->arg_size();
     std::vector<Impl::VarKind> argKinds;
-    std::vector<llvm::Type*> argTypes;
-    if (hasSelf) {
-        argKinds.push_back(Impl::VarKind::ClassInstance);
-        argTypes.push_back(impl_->i8PtrType);
-    }
-    for (size_t i = userParamStart; i < node.params.size(); ++i) {
+    if (hasSelf) argKinds.push_back(Impl::VarKind::ClassInstance);
+    for (size_t i = userParamStart; i < node.params.size(); ++i)
         argKinds.push_back(impl_->typeExprToKind(node.params[i].type.get()));
-        argTypes.push_back(impl_->typeExprToLLVM(node.params[i].type.get()));
-    }
-    auto* argsStructType = impl_->makeSpawnArgsStructType(argTypes, "gen.args." + siteName);
-    auto* tramp = impl_->buildGeneratorTrampoline(bodyFunc, argsStructType, siteName);
-    auto* decrefFn = impl_->buildGeneratorDecrefFn(argsStructType, argKinds, siteName);
-    impl_->builder->SetInsertPoint(&wrapper->getEntryBlock());
 
     for (unsigned i = 0; i < nwrap; ++i)
         if (Impl::isHeapKind(argKinds[i]) && argKinds[i] != Impl::VarKind::Union)
             impl_->emitIncrefByKind(wrapper->getArg(i), argKinds[i]);
 
-    std::vector<llvm::Value*> userArgs;
-    for (unsigned i = 0; i < nwrap; ++i) userArgs.push_back(wrapper->getArg(i));
-    auto* argsAlloca = impl_->createEntryAlloca(wrapper, "gen.args", argsStructType);
-    impl_->populateSpawnArgs(argsAlloca, argsStructType, userArgs);
-
-    const auto& dl = impl_->module->getDataLayout();
-    uint64_t argsSize = dl.getTypeAllocSize(argsStructType);
-    auto* argsAsI8 = impl_->builder->CreateBitCast(argsAlloca, impl_->i8PtrType);
-    auto* trampAsI8 = impl_->builder->CreateBitCast(tramp, impl_->i8PtrType);
-    llvm::Value* decrefAsI8 = decrefFn
-        ? impl_->builder->CreateBitCast(decrefFn, impl_->i8PtrType)
-        : llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(impl_->i8PtrType));
+    auto* resumeThunk = impl_->builder->CreateBitCast(
+        impl_->getCoroResumeThunk(), impl_->i8PtrType);
+    auto* destroyThunk = impl_->builder->CreateBitCast(
+        impl_->getCoroDestroyThunk(), impl_->i8PtrType);
     auto* genObj = impl_->builder->CreateCall(
-        impl_->runtimeFuncs["dragon_generator_create_typed"],
-        {trampAsI8, argsAsI8,
-         llvm::ConstantInt::get(impl_->i64Type, (int64_t)argsSize), decrefAsI8},
-        "gen.obj");
+        impl_->runtimeFuncs["dragon_generator_create"],
+        {resumeThunk, destroyThunk}, "gen.obj");
+
+    std::vector<llvm::Value*> bodyArgs;
+    bodyArgs.push_back(genObj);
+    for (unsigned i = 0; i < nwrap; ++i)
+        bodyArgs.push_back(impl_->coerceToFieldType(
+            wrapper->getArg(i), bodyFuncType->getParamType(i + 1)));
+    auto* bodyHandle = impl_->builder->CreateCall(bodyFunc, bodyArgs, "gen.handle");
+    impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_generator_attach"], {genObj, bodyHandle});
     impl_->builder->CreateRet(genObj);
 
     impl_->currentFunction = prevFunc;
@@ -1248,6 +1332,10 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     std::optional<Impl::VarMetaScope> bodyMeta(*impl_);
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
+    auto* prevGenPtr = impl_->generatorPtr;
+    auto* prevGenFrame = impl_->genFrame;
+    impl_->generatorPtr = nullptr;
+    impl_->genFrame = nullptr;
     auto savedScopes = std::move(impl_->scopes);
     impl_->scopes.clear();
     auto savedGlobalDecls = impl_->globalDeclaredVars;
@@ -1323,6 +1411,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     impl_->nonlocalDeclaredVars = std::move(savedNonlocalDecls);
     impl_->cellPromotedLocals = std::move(savedCellPromoted);
     impl_->currentFunction = prevFunc;
+    impl_->generatorPtr = prevGenPtr;
+    impl_->genFrame = prevGenFrame;
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
     bodyMeta.reset();
 

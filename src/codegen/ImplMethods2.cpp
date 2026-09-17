@@ -1563,123 +1563,57 @@ llvm::Function* CodeGen::Impl::buildDeferThunk(llvm::Function* targetFn,
         return thunk;
     }
 
-llvm::Function* CodeGen::Impl::buildGeneratorTrampoline(
-    llvm::Function* bodyFn,
-    llvm::StructType* argsStructType,
-    const std::string& siteName) {
-        auto* trampType = llvm::FunctionType::get(voidType, {i8PtrType}, false);
-        auto* tramp = llvm::Function::Create(
-            trampType, llvm::Function::InternalLinkage,
-            "__dragon_gen_tramp_" + siteName, module.get());
-
-        auto* prevFunc = currentFunction;
-        auto* prevBlock = builder->GetInsertBlock();
-        currentFunction = tramp;
-
-        auto* entry = llvm::BasicBlock::Create(*context, "entry", tramp);
-        builder->SetInsertPoint(entry);
-
-        llvm::Value* coArg = &*tramp->arg_begin();
-        coArg->setName("co");
-        auto* udRaw = builder->CreateCall(
-            runtimeFuncs["mco_get_user_data"], {coArg}, "args.raw");
-        auto* ud = builder->CreateBitCast(
-            udRaw, llvm::PointerType::getUnqual(*context), "args.typed");
-
-        auto* genAddr = builder->CreateStructGEP(argsStructType, ud, 0, "gen.addr");
-        auto* gen = builder->CreateLoad(i8PtrType, genAddr, "gen");
-        auto* genSlot = builder->CreateAlloca(i8PtrType, nullptr, "gen.slot");
-        builder->CreateStore(gen, genSlot);
-
-        auto* jmpbufPtr = builder->CreateCall(
-            runtimeFuncs["dragon_exc_push_frame"], {}, "gen.barrier.jmpbuf");
-        auto* setjmpResult = builder->CreateCall(
-            runtimeFuncs["setjmp"], {jmpbufPtr}, "gen.barrier.sj");
-        auto* isNormal = builder->CreateICmpEQ(
-            setjmpResult,
-            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
-            "gen.barrier.normal");
-        auto* normalBB = llvm::BasicBlock::Create(*context, "gen.body.normal", tramp);
-        auto* caughtBB = llvm::BasicBlock::Create(*context, "gen.body.caught", tramp);
-        builder->CreateCondBr(isNormal, normalBB, caughtBB);
-
-        builder->SetInsertPoint(normalBB);
-        std::vector<llvm::Value*> callArgs;
-        callArgs.push_back(gen);
-        unsigned numUserArgs = argsStructType->getNumElements() - 1;
-        for (unsigned i = 0; i < numUserArgs; i++) {
-            auto* fieldType = argsStructType->getElementType(i + 1);
-            auto* slot = builder->CreateStructGEP(argsStructType, ud, i + 1);
-            auto* v = builder->CreateLoad(fieldType, slot);
-            callArgs.push_back(v);
-        }
-        builder->CreateCall(bodyFn, callArgs);
-        builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
-        builder->CreateCall(
-            runtimeFuncs["dragon_generator_set_exhausted"], {gen});
-        builder->CreateRetVoid();
-
-        builder->SetInsertPoint(caughtBB);
-        auto* genReload = builder->CreateLoad(i8PtrType, genSlot, "gen.reload");
-        builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
-        builder->CreateCall(
-            runtimeFuncs["dragon_generator_set_raised"], {genReload});
-        builder->CreateCall(
-            runtimeFuncs["dragon_generator_set_exhausted"], {genReload});
-        builder->CreateRetVoid();
-
-        currentFunction = prevFunc;
-        if (prevBlock) builder->SetInsertPoint(prevBlock);
-        return tramp;
-    }
-
-llvm::Function* CodeGen::Impl::buildGeneratorDecrefFn(
-    llvm::StructType* argsStructType,
-    const std::vector<VarKind>& argKinds,
-    const std::string& siteName) {
-        bool anyHeap = false;
-        for (auto k : argKinds) {
-            if (isHeapKind(k) && k != VarKind::Union) { anyHeap = true; break; }
-        }
-        if (!anyHeap) return nullptr;
-
+llvm::Function* CodeGen::Impl::getCoroResumeThunk() {
+        if (coroResumeThunk) return coroResumeThunk;
         auto* fnType = llvm::FunctionType::get(voidType, {i8PtrType}, false);
         auto* fn = llvm::Function::Create(
-            fnType, llvm::Function::InternalLinkage,
-            "__dragon_gen_decref_" + siteName, module.get());
-
+            fnType, llvm::Function::InternalLinkage, "__dragon_coro_resume",
+            module.get());
         auto* prevFunc = currentFunction;
         auto* prevBlock = builder->GetInsertBlock();
         currentFunction = fn;
+        builder->SetInsertPoint(llvm::BasicBlock::Create(*context, "entry", fn));
+        builder->CreateIntrinsic(voidType, llvm::Intrinsic::coro_resume,
+                                 {&*fn->arg_begin()});
+        builder->CreateRetVoid();
+        currentFunction = prevFunc;
+        if (prevBlock) builder->SetInsertPoint(prevBlock);
+        coroResumeThunk = fn;
+        return fn;
+    }
 
-        auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
-        builder->SetInsertPoint(entry);
+llvm::Function* CodeGen::Impl::getCoroDestroyThunk() {
+        if (coroDestroyThunk) return coroDestroyThunk;
+        auto* fnType = llvm::FunctionType::get(voidType, {i8PtrType}, false);
+        auto* fn = llvm::Function::Create(
+            fnType, llvm::Function::InternalLinkage, "__dragon_coro_destroy",
+            module.get());
+        auto* prevFunc = currentFunction;
+        auto* prevBlock = builder->GetInsertBlock();
+        currentFunction = fn;
+        builder->SetInsertPoint(llvm::BasicBlock::Create(*context, "entry", fn));
+        builder->CreateIntrinsic(voidType, llvm::Intrinsic::coro_destroy,
+                                 {&*fn->arg_begin()});
+        builder->CreateRetVoid();
+        currentFunction = prevFunc;
+        if (prevBlock) builder->SetInsertPoint(prevBlock);
+        coroDestroyThunk = fn;
+        return fn;
+    }
 
-        llvm::Value* udRaw = &*fn->arg_begin();
-        udRaw->setName("args");
-        auto* ud = builder->CreateBitCast(
-            udRaw, llvm::PointerType::getUnqual(*context), "args.typed");
-
-        unsigned numUserArgs = argsStructType->getNumElements() - 1;
-        for (unsigned i = 0; i < numUserArgs && i < argKinds.size(); i++) {
-            VarKind k = argKinds[i];
-            if (!isHeapKind(k) || k == VarKind::Union) continue;
-            auto* slot = builder->CreateStructGEP(argsStructType, ud, i + 1);
-            auto* v = builder->CreateLoad(argsStructType->getElementType(i + 1), slot);
-            llvm::Value* p = v->getType()->isPointerTy()
-                ? v
-                : builder->CreateIntToPtr(v, i8PtrType);
-            const char* fname = (k == VarKind::Str)
+void CodeGen::Impl::emitGeneratorArgRelease() {
+        if (!genFrame || options.gcMode != GCMode::RC) return;
+        auto* bb = builder->GetInsertBlock();
+        if (!bb || bb->getTerminator()) return;
+        for (auto& [arg, kind] : genFrame->ownedArgs) {
+            llvm::Value* p = arg->getType()->isPointerTy()
+                ? arg
+                : builder->CreateIntToPtr(arg, i8PtrType);
+            const char* fname = (kind == VarKind::Str)
                 ? "dragon_decref_str_atomic"
                 : "dragon_decref_atomic";
             builder->CreateCall(runtimeFuncs[fname], {p});
         }
-
-        builder->CreateRetVoid();
-
-        currentFunction = prevFunc;
-        if (prevBlock) builder->SetInsertPoint(prevBlock);
-        return fn;
     }
 
 void CodeGen::Impl::populateSpawnArgs(
@@ -2234,12 +2168,37 @@ std::string renderLoopRemark(const LoopRemark& loop) {
 
 }
 
+void CodeGen::Impl::runCoroutinePasses() {
+        llvm::LoopAnalysisManager LAM;
+        llvm::FunctionAnalysisManager FAM;
+        llvm::CGSCCAnalysisManager CGAM;
+        llvm::ModuleAnalysisManager MAM;
+        llvm::PassBuilder PB(targetMachine.get());
+        PB.registerModuleAnalyses(MAM);
+        PB.registerCGSCCAnalyses(CGAM);
+        PB.registerFunctionAnalyses(FAM);
+        PB.registerLoopAnalyses(LAM);
+        PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+        llvm::ModulePassManager MPM;
+        MPM.addPass(llvm::GlobalDCEPass());
+        MPM.addPass(llvm::CoroEarlyPass());
+        llvm::CGSCCPassManager CGPM;
+        CGPM.addPass(llvm::CoroSplitPass());
+        MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(std::move(CGPM)));
+        MPM.addPass(llvm::CoroCleanupPass());
+        MPM.run(*module, MAM);
+    }
+
 void CodeGen::Impl::runOptimizationPasses() {
         if (options.vectorizeReport && options.optimizationLevel < 2)
             vectorizeReportLines.push_back(
                 "vectorize report: loops vectorize at -O2 or higher, this "
                 "build is -O" + std::to_string(options.optimizationLevel));
-        if (options.optimizationLevel == 0) return;
+        if (options.optimizationLevel == 0) {
+            runCoroutinePasses();
+            return;
+        }
 
         llvm::LoopAnalysisManager LAM;
         llvm::FunctionAnalysisManager FAM;

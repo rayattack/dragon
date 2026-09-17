@@ -14,6 +14,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/LegacyPassManager.h"
@@ -32,6 +33,10 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Transforms/Utils/LoopUtils.h"
+#include "llvm/Transforms/Coroutines/CoroEarly.h"
+#include "llvm/Transforms/Coroutines/CoroSplit.h"
+#include "llvm/Transforms/Coroutines/CoroCleanup.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
 
 #include <fstream>
 #include <unordered_map>
@@ -186,6 +191,32 @@ struct CodeGen::Impl {
 
     llvm::AllocaInst* generatorPtr = nullptr;
     std::unordered_set<std::string> generatorFunctions;
+
+    struct GeneratorPad {
+        llvm::AllocaInst* jmpbufSlot = nullptr;
+        llvm::BasicBlock* unwindBB = nullptr;
+    };
+    struct GeneratorFrame {
+        llvm::Value* coroId = nullptr;
+        llvm::AllocaInst* handleSlot = nullptr;
+        llvm::BasicBlock* cleanupBB = nullptr;
+        llvm::BasicBlock* suspendBB = nullptr;
+        std::vector<GeneratorPad> pads;
+        std::vector<std::pair<llvm::Value*, VarKind>> ownedArgs;
+        int suspendCounter = 0;
+    };
+    GeneratorFrame* genFrame = nullptr;
+
+    llvm::Function* coroResumeThunk = nullptr;
+    llvm::Function* coroDestroyThunk = nullptr;
+
+    llvm::Function* getCoroResumeThunk();
+    llvm::Function* getCoroDestroyThunk();
+    void emitGeneratorArgRelease();
+    void armGeneratorPad(llvm::Value* jmpbufPtr, llvm::BasicBlock* bodyBB,
+                         llvm::BasicBlock* unwindBB);
+    void popGeneratorPad();
+    void rearmGeneratorPads();
 
     std::unordered_set<std::string> funcReturnsType;
 
@@ -2306,16 +2337,6 @@ struct CodeGen::Impl {
                                     const std::string& siteName,
                                     int vtableIndex = -1);
 
-    llvm::Function* buildGeneratorTrampoline(
-        llvm::Function* bodyFn,
-        llvm::StructType* argsStructType,
-        const std::string& siteName);
-
-    llvm::Function* buildGeneratorDecrefFn(
-        llvm::StructType* argsStructType,
-        const std::vector<VarKind>& argKinds,
-        const std::string& siteName);
-
     void populateSpawnArgs(
         llvm::Value* argsAlloca,
         llvm::StructType* argsStructType,
@@ -2368,6 +2389,7 @@ struct CodeGen::Impl {
     }
 
     void runOptimizationPasses();
+    void runCoroutinePasses();
 
     std::unique_ptr<llvm::TargetMachine> targetMachine;
     llvm::TargetMachine* getTargetMachine();

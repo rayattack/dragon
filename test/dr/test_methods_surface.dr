@@ -1,6 +1,7 @@
 type Boxed = int | float | bool | str | bytes | list[Boxed] | dict[str, Boxed]
 
 from unittest import TestCase, main
+from time import sleep_ms
 
 
 class Store {
@@ -408,4 +409,315 @@ class StaticMethodDefaultTests(TestCase) {
 }
 
 
-main([MethodKwargsTests(), MethodKwargsEscapeTests(), MethodGeneratorTests(), IterProtocolClassTests(), StaticMethodDefaultTests()])
+class GenErr(Exception) {
+    code: int
+    def(c: int) { self.code = c }
+}
+
+
+class YieldHolder {
+    tag: str
+    def(t: str) { self.tag = t }
+}
+
+
+def str_across(prefix: str, n: int) {
+    k: int = 0
+    while k < n {
+        s: str = prefix + str(k)
+        yield k
+        k = k + 1
+    }
+}
+
+
+def list_across(n: int) {
+    k: int = 0
+    while k < n {
+        xs: list[int] = [k, k + 1, k + 2]
+        yield xs[0]
+        k = k + 1
+    }
+}
+
+
+def obj_across(n: int) {
+    k: int = 0
+    while k < n {
+        h: YieldHolder = YieldHolder("h" + str(k))
+        yield k
+        k = k + 1
+    }
+}
+
+
+def raiser(n: int, bad: int) {
+    k: int = 0
+    while k < n {
+        if k == bad { raise GenErr(k) }
+        yield k
+        k = k + 1
+    }
+}
+
+
+def try_around_yield(n: int) {
+    k: int = 0
+    while k < n {
+        try {
+            if k == 1 { raise GenErr(k) }
+            yield k
+        } except GenErr {
+            yield -1
+        }
+        k = k + 1
+    }
+}
+
+
+def finally_around_yield(n: int, sink: list[int]) {
+    try {
+        k: int = 0
+        while k < n {
+            yield k
+            k = k + 1
+        }
+    } finally {
+        sink.append(99)
+    }
+}
+
+
+class YieldGuard {
+    sink: list[int]
+    def(s: list[int]) { self.sink = s }
+    def __enter__() -> YieldGuard { return self }
+    def __exit__() -> None { self.sink.append(7) }
+}
+
+
+def with_around_yield(n: int, sink: list[int]) {
+    with YieldGuard(sink) as g {
+        k: int = 0
+        while k < n {
+            yield k
+            k = k + 1
+        }
+    }
+}
+
+
+def inner_gen(n: int) {
+    k: int = 0
+    while k < n {
+        s: str = "i" + str(k)
+        yield k
+        k = k + 1
+    }
+}
+
+
+def outer_gen(n: int) {
+    for v in inner_gen(n) {
+        t: str = "o" + str(v)
+        yield v * 2
+    }
+}
+
+
+def heap_yield(n: int) {
+    k: int = 0
+    while k < n {
+        yield "v" + str(k)
+        k = k + 1
+    }
+}
+
+
+def early_return(n: int) {
+    k: int = 0
+    while k < n {
+        s: str = "e" + str(k)
+        if k == 2 { return }
+        yield k
+        k = k + 1
+    }
+}
+
+
+def parking_gen(n: int) {
+    k: int = 0
+    while k < n {
+        sleep_ms(1)
+        yield k
+        k = k + 1
+    }
+}
+
+
+def drain_parking(n: int) -> int {
+    t: int = 0
+    for v in parking_gen(n) { t = t + v }
+    return t
+}
+
+
+def drain_plain(n: int) -> int {
+    t: int = 0
+    for v in str_across("t", n) { t = t + v }
+    return t
+}
+
+
+class GeneratorFrameTests(TestCase) {
+    def test_break_releases_str_held_across_yield() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            for v in str_across("p", 50) {
+                total = total + v
+                if v == 3 { break }
+            }
+            i = i + 1
+        }
+        self.assertEqual(total, 12000)
+    }
+
+    def test_break_releases_list_held_across_yield() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            for v in list_across(50) {
+                total = total + v
+                if v == 2 { break }
+            }
+            i = i + 1
+        }
+        self.assertEqual(total, 6000)
+    }
+
+    def test_break_releases_instance_held_across_yield() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            for v in obj_across(50) {
+                total = total + v
+                if v == 4 { break }
+            }
+            i = i + 1
+        }
+        self.assertEqual(total, 20000)
+    }
+
+    def test_body_raise_reaches_consumer_try() {
+        i: int = 0
+        caught: int = 0
+        seen: int = 0
+        while i < 2000 {
+            try {
+                for v in raiser(10, 3) { seen = seen + 1 }
+            } except GenErr {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 2000)
+        self.assertEqual(seen, 6000)
+    }
+
+    def test_try_inside_generator_body_catches_and_yields() {
+        out: list[int] = []
+        for v in try_around_yield(4) { out.append(v) }
+        self.assertEqual(out, [0, -1, 2, 3])
+    }
+
+    def test_finally_inside_generator_runs_when_drained() {
+        sink: list[int] = []
+        total: int = 0
+        for v in finally_around_yield(3, sink) { total = total + v }
+        self.assertEqual(total, 3)
+        self.assertEqual(sink, [99])
+    }
+
+    def test_with_inside_generator_exits_when_drained() {
+        sink: list[int] = []
+        total: int = 0
+        for v in with_around_yield(3, sink) { total = total + v }
+        self.assertEqual(total, 3)
+        self.assertEqual(sink, [7])
+    }
+
+    def test_nested_generators_drain_and_abandon() {
+        full: int = 0
+        for v in outer_gen(5) { full = full + v }
+        self.assertEqual(full, 20)
+        i: int = 0
+        part: int = 0
+        while i < 2000 {
+            for v2 in outer_gen(50) {
+                part = part + v2
+                if v2 >= 4 { break }
+            }
+            i = i + 1
+        }
+        self.assertEqual(part, 12000)
+    }
+
+    def test_heap_yield_owned_by_consumer() {
+        out: list[str] = []
+        for s in heap_yield(4) { out.append(s) }
+        self.assertEqual(out, ["v0", "v1", "v2", "v3"])
+        i: int = 0
+        kept: int = 0
+        while i < 2000 {
+            seen: list[str] = []
+            for s2 in heap_yield(50) {
+                seen.append(s2)
+                if len(seen) == 3 { break }
+            }
+            kept = kept + len(seen)
+            i = i + 1
+        }
+        self.assertEqual(kept, 6000)
+    }
+
+    def test_early_return_inside_generator() {
+        out: list[int] = []
+        i: int = 0
+        while i < 2000 {
+            for v in early_return(10) { out.append(v) }
+            i = i + 1
+        }
+        self.assertEqual(len(out), 4000)
+    }
+
+    def test_generator_in_fired_task() {
+        i: int = 0
+        total: int = 0
+        while i < 200 {
+            t: Task[int] = fire drain_plain(20)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 38000)
+    }
+
+    def test_parking_generator_in_fired_task() {
+        i: int = 0
+        total: int = 0
+        while i < 20 {
+            t: Task[int] = fire drain_parking(4)
+            total = total + t.join()
+            i = i + 1
+        }
+        self.assertEqual(total, 120)
+    }
+
+    def test_parking_generator_on_main_thread() {
+        self.assertEqual(drain_parking(4), 6)
+    }
+}
+
+
+main([MethodKwargsTests(), MethodKwargsEscapeTests(), MethodGeneratorTests(), GeneratorFrameTests(),
+      IterProtocolClassTests(), StaticMethodDefaultTests()])

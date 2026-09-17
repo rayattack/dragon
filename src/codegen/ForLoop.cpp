@@ -222,6 +222,7 @@ void CodeGen::visit(ForStmt& node) {
 
             auto* genAlloca = impl_->createEntryAlloca(func, "__gen_iter", impl_->i8PtrType);
             impl_->builder->CreateStore(genObj, genAlloca);
+            auto* yieldSlot = impl_->createEntryAlloca(func, "__gen_val", impl_->i64Type);
             llvm::Value* genCleanupBase =
                 impl_->emitCleanupPushTemp(genObj, Impl::DCLEAN_OBJ);
 
@@ -237,24 +238,16 @@ void CodeGen::visit(ForStmt& node) {
 
             impl_->builder->SetInsertPoint(condBB);
             auto* genPtr = impl_->builder->CreateLoad(impl_->i8PtrType, genAlloca, "gen.ptr");
-
-            auto* jmpbufPtr = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_exc_push_frame"], {}, "jmpbuf");
-            auto* setjmpResult = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["setjmp"], {jmpbufPtr}, "setjmp.result");
-            auto* isNormal = impl_->builder->CreateICmpEQ(
-                setjmpResult,
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0),
-                "is.normal");
-
+            auto* produced = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_generator_advance"],
+                {genPtr, yieldSlot}, "gen.produced");
+            auto* hasValue = impl_->builder->CreateICmpNE(
+                produced, llvm::ConstantInt::get(impl_->i64Type, 0), "gen.has");
             auto* nextBB = llvm::BasicBlock::Create(*impl_->context, "gen.next", func);
-            auto* excBB = llvm::BasicBlock::Create(*impl_->context, "gen.exc", func);
-            impl_->builder->CreateCondBr(isNormal, nextBB, excBB);
+            impl_->builder->CreateCondBr(hasValue, nextBB, elseBB);
 
             impl_->builder->SetInsertPoint(nextBB);
-            auto* nextVal = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_generator_next"], {genPtr}, "gen.val");
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
+            auto* nextVal = impl_->builder->CreateLoad(impl_->i64Type, yieldSlot, "gen.val");
             if (yieldIsHeap) {
                 llvm::Value* asPtr = impl_->builder->CreateIntToPtr(
                     nextVal, impl_->i8PtrType, "gen.val.ptr");
@@ -263,51 +256,6 @@ void CodeGen::visit(ForStmt& node) {
                 impl_->builder->CreateStore(nextVal, loopVar);
             }
             impl_->builder->CreateBr(bodyBB);
-
-            impl_->builder->SetInsertPoint(excBB);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
-            auto* excType = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_exc_get_type"], {}, "exc.type");
-            auto* isStopIter = impl_->builder->CreateICmpEQ(
-                excType,
-                llvm::ConstantInt::get(impl_->i64Type, 11),
-                "is.stopiter");
-            auto* reraiseBB = llvm::BasicBlock::Create(*impl_->context, "gen.reraise", func);
-            impl_->builder->CreateCondBr(isStopIter, elseBB, reraiseBB);
-
-            // Re-raise: no emitAllScopeCleanup() here - it double-decref'd a still-live
-            // local (e.g. generator's `self`, held by the coroutine) -> use-after-free.
-            impl_->builder->SetInsertPoint(reraiseBB);
-            {
-                auto* reType = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
-                auto* reMsg = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_exc_get_msg"], {}, "reraise.msg");
-                auto* reObj = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_exc_retain_obj"],
-                    {impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_exc_get_obj"], {},
-                        "reraise.obj.raw")},
-                    "reraise.obj");
-                {
-                    auto* gAb = impl_->builder->CreateLoad(
-                        impl_->i8PtrType, genAlloca, "gen.abandon");
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_generator_abandon"], {gAb});
-                }
-                // This re-raise bypasses endBB's decref, so decref the generator here
-                // (else it leaks); mirror endBB exactly (decref then pop cleanup-stack) to avoid a double-free.
-                if (impl_->options.gcMode == GCMode::RC) {
-                    auto* g = impl_->builder->CreateLoad(
-                        impl_->i8PtrType, genAlloca, "gen.reraise.cleanup");
-                    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {g});
-                    impl_->emitCleanupPopTemp(genCleanupBase);
-                }
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_raise_exc_obj"], {reType, reObj, reMsg});
-            }
-            impl_->builder->CreateUnreachable();
 
             impl_->builder->SetInsertPoint(bodyBB);
             impl_->pushScope();

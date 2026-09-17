@@ -1699,27 +1699,52 @@ const char* dragon_template_escape_url(const char* s) { return nullptr; }
 
 
 // ============================================================================
-// 26. GENERATORS (minicoro-based coroutines)
+// 26. GENERATORS (LLVM coroutine state machines)
 // ============================================================================
 
 /**
- * Yield a value from within a generator function body.
- * Suspends the minicoro coroutine and passes the value to the caller.
- * @param gen_ptr Pointer to DragonGenerator
- * @param value Value to yield (as i64)
+ * Create a generator handle whose body is an LLVM switched-resume coroutine.
+ * @param resume_fn Thunk that resumes the coroutine frame
+ * @param destroy_fn Thunk that runs the frame's cleanup edge and frees it
+ * @return Pointer to DragonGenerator
  */
-void dragon_generator_yield(void* gen_ptr, int64_t value) {}
+DragonGenerator* dragon_generator_create(void (*resume_fn)(void*), void (*destroy_fn)(void*)) { return nullptr; }
 
 /**
- * Resume generator and get the next yielded value.
- * Raises StopIteration (code 11) when generator is exhausted.
- * @param gen_ptr Pointer to DragonGenerator
- * @return Next yielded value as i64
+ * Allocate and free the coroutine frame sized by llvm.coro.size.
  */
-int64_t dragon_generator_next(void* gen_ptr) { return 0; }
+void* dragon_generator_frame_alloc(int64_t size) { return nullptr; }
+void dragon_generator_frame_free(void* mem) {}
 
 /**
- * Destroy generator and free its minicoro coroutine resources.
+ * Attach the coroutine frame handle returned by the ramp to its generator.
+ */
+void dragon_generator_attach(void* gen_ptr, void* frame) {}
+
+/**
+ * Record a yielded value on the generator; the body then suspends in place.
+ * @param gen_ptr Pointer to DragonGenerator
+ * @param value Value yielded (as i64)
+ * @param tag Value tag, so a heap value can be released when overwritten
+ */
+void dragon_generator_yield_value(void* gen_ptr, int64_t value, int64_t tag) {}
+
+/**
+ * Resume the generator once. Exhaustion is a returned value, never a raise.
+ * @param gen_ptr Pointer to DragonGenerator
+ * @param out_value Receives the yielded value when the result is 1
+ * @return 1 when a value was produced, 0 when the generator is exhausted
+ */
+int64_t dragon_generator_advance(void* gen_ptr, int64_t* out_value) { return 0; }
+
+/**
+ * Mark the body finished (normal completion) or raised (exception pending).
+ */
+void dragon_generator_finish(void* gen_ptr) {}
+void dragon_generator_set_raised(void* gen_ptr) {}
+
+/**
+ * Destroy generator: drains its cleanup stack, destroys a suspended frame, frees the handle.
  * @param gen_ptr Pointer to DragonGenerator
  */
 void dragon_generator_destroy(void* gen_ptr) {}

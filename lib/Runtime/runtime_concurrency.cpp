@@ -581,11 +581,15 @@ static void* scheduler_worker(void* arg) {
 
         int __saved_active_frames = __dragon_active_frames;
         __dragon_active_frames = vt->active_frames;
+        DragonVThread* __saved_exc_vt = __dragon_exc_vt;
+        __dragon_exc_vt = vt->exc_override;
 
         dragon_gc_assert_running("scheduler resume");
         mco_resume(vt->coro);
         dragon_gc_safe_region_reset();
 
+        vt->exc_override = __dragon_exc_vt;
+        __dragon_exc_vt = __saved_exc_vt;
         vt->active_frames = __dragon_active_frames;
         __dragon_active_frames = __saved_active_frames;
         __current_vthread = NULL;
@@ -870,18 +874,6 @@ void dragon_vthread_detach(DragonVThread* vt) {
 int64_t dragon_vthread_is_alive(DragonVThread* vt) {
     if (!vt) return 0;
     return !__atomic_load_n(&vt->done, __ATOMIC_ACQUIRE) ? 1 : 0;
-}
-
-void dragon_generator_abandon(void* gen_ptr) {
-    DragonGenerator* gen = (DragonGenerator*)gen_ptr;
-    if (!gen || !gen->coro) return;
-    mco_coro* co = gen->coro;
-    if (mco_status(co) != MCO_RUNNING) return;
-    mco_coro* resumer = co->prev_co;
-    if (resumer) resumer->state = MCO_RUNNING;
-    mco_current_co = resumer;
-    co->prev_co = NULL;
-    co->state = MCO_DEAD;
 }
 
 enum IoEventType {

@@ -798,19 +798,23 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_vthread_yield",
         llvm::FunctionType::get(voidType, {}, false));
 
-    getOrDeclareRuntime("dragon_generator_create_typed",
-        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType, i64Type, i8PtrType}, false));
-    getOrDeclareRuntime("dragon_generator_set_exhausted",
+    getOrDeclareRuntime("dragon_generator_create",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_generator_attach",
+        llvm::FunctionType::get(voidType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_generator_frame_alloc",
+        llvm::FunctionType::get(i8PtrType, {i64Type}, false));
+    getOrDeclareRuntime("dragon_generator_frame_free",
+        llvm::FunctionType::get(voidType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_generator_finish",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_generator_set_raised",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_generator_yield",
+    getOrDeclareRuntime("dragon_generator_yield_value",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
-    getOrDeclareRuntime("dragon_generator_next",
-        llvm::FunctionType::get(i64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_generator_advance",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_generator_destroy",
-        llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_generator_abandon",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
 
     getOrDeclareRuntime("dragon_osthread_new",

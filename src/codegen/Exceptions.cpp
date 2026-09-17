@@ -122,6 +122,7 @@ void CodeGen::visit(TryStmt& node) {
         impl_->emitScopeCleanup();
     }
     impl_->popScope();
+    impl_->popGeneratorPad();
     impl_->tryFrameFuncs.pop_back();
     if (!tryTerminated) {
         impl_->emitExcFramePop(frameSite);
@@ -419,6 +420,7 @@ void CodeGen::visit(WithStmt& node) {
             impl_->emitScopeCleanup();
         impl_->popScope();
         impl_->exitCleanupStack.pop_back();
+        impl_->popGeneratorPad();
         impl_->tryFrameFuncs.pop_back();
         if (!impl_->builder->GetInsertBlock()->getTerminator()) {
             impl_->emitExcFramePop(frameSite);

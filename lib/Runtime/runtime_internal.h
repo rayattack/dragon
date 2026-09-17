@@ -280,6 +280,7 @@ typedef struct DragonVThread {
     DragonCleanupStack cleanup;
     int32_t     cleanup_saved[DRAGON_EXC_STACK_SIZE];
     int         active_frames;
+    struct DragonVThread* exc_override;
     mco_coro*   coro;
     int64_t     result;
     int64_t     result_tag;
@@ -301,13 +302,13 @@ typedef struct DragonVThread {
 
 struct DragonGenerator {
     DragonObjectHeader header;
-    mco_coro*   coro;
+    void*       frame;
+    void      (*resume_fn)(void*);
+    void      (*destroy_fn)(void*);
     int64_t     yielded_value;
     int64_t     yielded_tag;
-    int8_t      state;
-    void*       args;
-    void      (*args_decref_fn)(void*);
     DragonVThread* exc_vt;
+    int8_t      state;
     int8_t      pending_exc;
 };
 
@@ -904,7 +905,6 @@ void dragon_set_destroy(DragonSet* s);
 void dragon_bytes_destroy(DragonBytes* b);
 void dragon_deque_destroy(DragonDeque* d);
 void dragon_generator_destroy(void* gen_ptr);
-void dragon_generator_abandon(void* gen_ptr);
 
 void dragon_raise_exc(int64_t type, const char* msg);
 void dragon_raise_exc_cstr(int64_t type, const char* msg);
