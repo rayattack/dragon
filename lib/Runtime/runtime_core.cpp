@@ -1337,6 +1337,11 @@ void dragon_mark_shared_deep(void* obj) {
             case DRAGON_TAG_DEQUE:
                 shared_walk_deque((DragonDeque*)cur, &w);
                 break;
+            case DRAGON_TAG_BYTES: {
+                DragonString* owner = dragon_bytes_borrowed_owner((DragonBytes*)cur);
+                if (owner) dragon_mark_shared_str(owner->data);
+                break;
+            }
             case DRAGON_TAG_CLOSURE: {
                 DragonClosure* cl = (DragonClosure*)cur;
                 DragonEnv* env = cl->env;

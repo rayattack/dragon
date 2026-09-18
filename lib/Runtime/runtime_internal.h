@@ -63,6 +63,7 @@ typedef struct {
 #define GC_FLAG_REACHABLE 0x02
 #define GC_FLAG_SHARED    0x04
 #define GC_FLAG_IN_TO_FREE 0x08
+#define GC_FLAG_BORROWED_BUFFER 0x10
 #define GC_FLAG_HEAP_OBJ  0x80
 
 #define DRAGON_IMMORTAL_REFCOUNT ((int64_t)0x4000000000000000LL)
@@ -270,6 +271,15 @@ struct DragonBytes {
     int64_t len;
     uint8_t* data;
 };
+
+static inline DragonString** dragon_bytes_owner_slot(DragonBytes* b) {
+    return (DragonString**)(b + 1);
+}
+
+static inline DragonString* dragon_bytes_borrowed_owner(DragonBytes* b) {
+    if (!(b->header.gc_flags & GC_FLAG_BORROWED_BUFFER)) return NULL;
+    return *dragon_bytes_owner_slot(b);
+}
 
 typedef struct DragonVThread {
     jmp_buf     exc_stack[DRAGON_EXC_STACK_SIZE];
@@ -875,6 +885,7 @@ void dragon_set_add(DragonSet* s, int64_t val);
 int64_t dragon_set_contains(DragonSet* s, int64_t val);
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len);
+DragonBytes* dragon_bytes_of_utf8_str(const char* s);
 DragonBytes* dragon_bytes_alloc_raw(int64_t len);
 DragonBytes* dragon_bytearray_new(int64_t len);
 void dragon_bytearray_write_slice(DragonBytes* ba, int64_t start,

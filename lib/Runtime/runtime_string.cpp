@@ -214,17 +214,14 @@ DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
         return dragon_bytes_new(nullptr, 0);
     }
     if (!s) return dragon_bytes_new(nullptr, 0);
+    if (is_utf8) return dragon_bytes_of_utf8_str(s);
     int64_t blen = 0;
     char* enc = dragon_str_to_utf8_alloc(s, &blen);
     const char* src = enc ? enc : s;
-    if (is_utf8) {
-        DragonBytes* bts = dragon_bytes_new((const uint8_t*)src, blen);
-        if (enc) free(enc);
-        return bts;
-    }
     if (dragon_ascii_prefix((const unsigned char*)src, blen) == blen) {
+        if (!enc) return dragon_bytes_of_utf8_str(s);
         DragonBytes* bts = dragon_bytes_new((const uint8_t*)src, blen);
-        if (enc) free(enc);
+        free(enc);
         return bts;
     }
     if (pol == 0) {

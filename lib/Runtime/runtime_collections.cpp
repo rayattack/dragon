@@ -1166,6 +1166,30 @@ DragonBytes* dragon_bytes_alloc_raw(int64_t len) {
     return dragon_bytes_alloc(len);
 }
 
+static DragonBytes* dragon_bytes_borrow_str(const char* s, DragonString* owner) {
+    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes) + sizeof(DragonString*));
+    dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
+    b->header.gc_flags |= GC_FLAG_BORROWED_BUFFER;
+    b->len = owner->len;
+    b->data = (uint8_t*)owner->data;
+    *dragon_bytes_owner_slot(b) = owner;
+    dragon_incref_str(s);
+    return b;
+}
+
+DragonBytes* dragon_bytes_of_utf8_str(const char* s) {
+    if (!s) return dragon_bytes_empty();
+    DragonString* ds = dragon_str_is_heap(s) ? dragon_string_from_data(s) : nullptr;
+    if (ds && ds->kind == 1) {
+        return ds->len > 0 ? dragon_bytes_borrow_str(s, ds) : dragon_bytes_empty();
+    }
+    int64_t blen = 0;
+    char* enc = dragon_str_to_utf8_alloc(s, &blen);
+    DragonBytes* b = dragon_bytes_new((const uint8_t*)(enc ? enc : s), blen);
+    if (enc) free(enc);
+    return b;
+}
+
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
     DragonBytes* b = dragon_bytes_alloc(len);
     if (len <= 0) return b;
@@ -1191,8 +1215,19 @@ DragonBytes* dragon_bytearray_copy(DragonBytes* src) {
     return out;
 }
 
+static void dragon_fatal_freeze_of_non_bytearray(uint8_t tag) {
+    fprintf(stderr,
+        "DRAGON FATAL: freeze reached an object with type tag %u that is not a bytearray\n",
+        (unsigned)tag);
+    fflush(stderr);
+    abort();
+}
+
 DragonBytes* dragon_bytearray_freeze(DragonBytes* ba) {
     if (!ba) return dragon_bytes_new(nullptr, 0);
+    if (ba->header.type_tag != DRAGON_TAG_BYTEARRAY ||
+        (ba->header.gc_flags & GC_FLAG_BORROWED_BUFFER))
+        dragon_fatal_freeze_of_non_bytearray(ba->header.type_tag);
     __atomic_store_n(&ba->header.type_tag, (uint8_t)DRAGON_TAG_BYTES,
                      __ATOMIC_RELEASE);
     dragon_incref(ba);
@@ -1441,22 +1476,11 @@ const char* dragon_str_from_bytes(DragonBytes* b) {
 }
 
 DragonBytes* dragon_str_encode(const char* s) {
-    if (!s) return dragon_bytes_empty();
-    int64_t blen = 0;
-    char* enc = dragon_str_to_utf8_alloc(s, &blen);
-    DragonBytes* b = dragon_bytes_new((const uint8_t*)(enc ? enc : s), blen);
-    if (enc) free(enc);
-    return b;
+    return dragon_bytes_of_utf8_str(s);
 }
 
 DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
-    int64_t blen = 0;
-    char* enc = s ? dragon_str_to_utf8_alloc(s, &blen) : nullptr;
-    const uint8_t* src = (const uint8_t*)(enc ? enc : (s ? s : ""));
-    DragonBytes* b = dragon_bytes_alloc(blen);
-    if (blen > 0) memcpy(b->data, src, (size_t)blen);
-    if (enc) free(enc);
-    return b;
+    return dragon_bytes_of_utf8_str(s);
 }
 
 
@@ -1737,7 +1761,9 @@ DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
 
 void dragon_bytes_destroy(DragonBytes* b) {
     if (!b) return;
-    if (!dragon_bytes_buffer_is_inline(b)) free(b->data);
+    DragonString* owner = dragon_bytes_borrowed_owner(b);
+    if (owner) dragon_decref_str(owner->data);
+    else if (!dragon_bytes_buffer_is_inline(b)) free(b->data);
     free(b);
 }
 
