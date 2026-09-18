@@ -66,6 +66,13 @@ void CodeGen::visit(NameExpr& node) {
         return;
     }
 
+    if (impl_->lookupCharValueVar(node.name)) {
+        impl_->addError("internal error: character loop variable '" + node.name +
+                            "' read outside its value-only uses",
+                        node.location());
+        impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
+        return;
+    }
     if (node.name == "True") {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
         return;
@@ -221,6 +228,8 @@ void CodeGen::visit(BinaryExpr& node) {
             wrapValue(node.right);
         }
     }
+
+    if (impl_->tryEmitCharCompare(*this, node)) return;
 
     std::string lhsClassName = impl_->resolveExprClassName(node.left.get());
 

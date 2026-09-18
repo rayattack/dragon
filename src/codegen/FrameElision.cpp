@@ -33,6 +33,11 @@ const llvm::StringSet<>& runtimeNoRaiseSymbols() {
         "dragon_tuple_len",
         "dragon_bytes_len",
         "dragon_str_len",
+        "dragon_str_kind",
+        "dragon_cp_isdigit",
+        "dragon_cp_isalpha",
+        "dragon_cp_isalnum",
+        "dragon_cp_isspace",
     };
     return symbols;
 }

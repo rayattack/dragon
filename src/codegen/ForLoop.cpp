@@ -804,6 +804,13 @@ void CodeGen::visit(ForStmt& node) {
     BytesInlineFields bytesFields{nullptr, nullptr};
     if (isBytesIterable)
         bytesFields = emitBytesFieldsOrEmpty(*impl_, iterableVal, true);
+    auto* charTargetName = dynamic_cast<NameExpr*>(node.target.get());
+    bool charLoop = isStrIterable && charTargetName &&
+                    impl_->charLoopTargetStaysValue(node, charTargetName->name);
+    llvm::Value* strKindVal = charLoop
+        ? impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_str_kind"],
+                                     {iterableVal}, "str.kind")
+        : nullptr;
 
     auto* condBB = llvm::BasicBlock::Create(*impl_->context, "forcond", func);
     auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "forbody", func);
@@ -1036,6 +1043,11 @@ void CodeGen::visit(ForStmt& node) {
         auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->i64Type);
         impl_->builder->CreateStore(elem, targetAlloca);
         impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Int);
+    } else if (charLoop) {
+        llvm::Value* cp = impl_->emitCodePointLoadInBounds(iterLoaded, strKindVal, currentIdx);
+        auto* cpAlloca = impl_->createEntryAlloca(func, targetName->name + ".cp", impl_->i64Type);
+        impl_->builder->CreateStore(cp, cpAlloca);
+        impl_->scopes.back().charValueVars[targetName->name] = cpAlloca;
     } else if (isStrIterable) {
         llvm::Value* elem = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_index"], {iterLoaded, currentIdx}, "ch");

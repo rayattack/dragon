@@ -903,6 +903,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
+    if (impl_->tryEmitCharPredicate(*this, node, attr)) return true;
+
     if (isStr) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;

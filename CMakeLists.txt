@@ -71,6 +71,7 @@ set(DRAGON_SOURCES
     src/codegen/ForLoop.cpp
     src/codegen/Exceptions.cpp
     src/codegen/FrameElision.cpp
+    src/codegen/CharValue.cpp
     src/codegen/Classes.cpp
     src/codegen/ClassSynthesis.cpp
     src/codegen/Module.cpp

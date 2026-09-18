@@ -86,6 +86,7 @@ struct CodeGen::Impl {
         std::unordered_set<std::string> lockDestroyOnExit;
         std::unordered_map<std::string, llvm::AllocaInst*> cleanupSlots;
         std::unordered_map<std::string, llvm::Value*> narrowShadowOrigin;
+        std::unordered_map<std::string, llvm::AllocaInst*> charValueVars;
         llvm::AllocaInst* cleanupBaseAlloca = nullptr;
         struct DeferEntry {
             llvm::Function* thunk = nullptr;
@@ -820,6 +821,21 @@ struct CodeGen::Impl {
                                 const std::vector<EnvCaptureDesc>& caps);
 
     bool isOwnedStrResult(llvm::Value* v);
+
+    std::optional<std::vector<uint32_t>> literalCodePoints(Expr* e);
+    std::optional<uint32_t> singleCodePointLiteral(Expr* e);
+    SubscriptExpr* asStrSubscript(Expr* e);
+    bool isCharValueSource(Expr* e);
+    llvm::Value* emitCodePointLoad(llvm::Value* str, llvm::Value* len,
+                                   llvm::Value* kind, llvm::Value* index);
+    llvm::Value* emitCodePointLoadInBounds(llvm::Value* str, llvm::Value* kind,
+                                           llvm::Value* index);
+    llvm::AllocaInst* lookupCharValueVar(const std::string& name);
+    bool charLoopTargetStaysValue(ForStmt& node, const std::string& name);
+    bool calleeNameIsUserBound(const std::string& name);
+    llvm::Value* emitCharValue(CodeGen& cg, Expr* e);
+    bool tryEmitCharCompare(CodeGen& cg, BinaryExpr& node);
+    bool tryEmitCharPredicate(CodeGen& cg, CallExpr& node, AttributeExpr& attr);
 
     bool isBorrowedStrReturnerName(const std::string& name);
 

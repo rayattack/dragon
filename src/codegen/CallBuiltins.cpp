@@ -1257,6 +1257,12 @@ bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
         return true;
     }
 
+    if (name == "ord" && node.args.size() == 1 &&
+        impl_->isCharValueSource(node.args[0].get())) {
+        impl_->lastValue = impl_->emitCharValue(*this, node.args[0].get());
+        return true;
+    }
+
     if (name == "ord" && node.args.size() == 1) {
         node.args[0]->accept(*this);
         llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);

@@ -1698,6 +1698,534 @@ class ByteArrayTests(TestCase) {
 }
 
 
+const TWO_HITS: int = 2
+const ONE_HIT: int = 1
+const NO_HITS: int = 0
+const ORD_H: int = 104
+const ORD_E_ACUTE: int = 233
+const ORD_L: int = 108
+const ORD_O: int = 111
+const HELLO_VOWELS: int = 2
+const SKIP_TAG: int = 2
+const STEP: int = 1
+const SECOND_LAST: int = -2
+const E_ACUTE_AT: int = 3
+const S_AT: int = 4
+
+class Holder {
+    kept: str
+
+    def () {
+        self.kept = ""
+    }
+
+    @property
+    def slot() -> str {
+        return self.kept
+    }
+
+    @slot.setter
+    def slot(v: str) -> None {
+        self.kept = self.kept + v
+    }
+}
+
+def tag(c: str, suffix: str = "!") -> str {
+    return c + suffix
+}
+
+def first_non_space(text: str) -> str {
+    for c in text {
+        if c != " " {
+            return c
+        }
+    }
+    return ""
+}
+
+class Move0EscapeProbe(TestCase) {
+    def test_reassigning_the_iterated_string_inside_the_body() {
+        text: str = "abé"
+        seen: list[str] = []
+        for c in text {
+            seen.append(c)
+            text = "zz"
+        }
+        self.assertEqual(seen, ["a", "b", "é"])
+        self.assertEqual(text, "zz")
+    }
+
+    def test_character_captured_by_a_closure_outlives_the_iteration() {
+        fns: list[Callable[[], str]] = []
+        for c in "xéy" {
+            fns.append(lambda () -> str { return c + c })
+        }
+        self.assertEqual(fns[0](), "xx")
+        self.assertEqual(fns[1](), "éé")
+        self.assertEqual(fns[2](), "yy")
+    }
+
+    def test_character_passed_through_a_defaulted_function() {
+        out: list[str] = []
+        for c in "aé" {
+            out.append(tag(c))
+            out.append(tag(c, "?"))
+        }
+        self.assertEqual(out, ["a!", "a?", "é!", "é?"])
+    }
+
+    def test_character_used_in_an_f_string() {
+        parts: list[str] = []
+        for c in "qé" {
+            parts.append(f"<{c}>")
+        }
+        self.assertEqual("".join(parts), "<q><é>")
+    }
+
+    def test_character_stored_through_a_property_setter() {
+        h: Holder = Holder()
+        for c in "mén" {
+            h.slot = c
+        }
+        self.assertEqual(h.slot, "mén")
+    }
+
+    def test_nested_loops_over_the_same_target_name() {
+        pairs: list[str] = []
+        for c in "aé" {
+            for c in "xy" {
+                pairs.append(c)
+            }
+            pairs.append(c)
+        }
+        self.assertEqual(pairs, ["x", "y", "a", "x", "y", "é"])
+    }
+
+    def test_character_compared_against_a_non_literal_and_a_long_literal() {
+        needle: str = "é"
+        hits: int = 0
+        longs: int = 0
+        for c in "aébé" {
+            if c == needle { hits = hits + ONE_HIT }
+            if c == "ab" { longs = longs + ONE_HIT }
+        }
+        self.assertEqual(hits, TWO_HITS)
+        self.assertEqual(longs, NO_HITS)
+    }
+
+    def test_character_returned_from_the_loop_body() {
+        self.assertEqual(first_non_space("  éx"), "é")
+        self.assertEqual(first_non_space("   "), "")
+    }
+
+    def test_character_as_a_dict_key_against_an_allocated_equal_string() {
+        counts: dict[str, int] = {}
+        for c in "aabéé" {
+            counts[c] = counts.get(c, NO_HITS) + ONE_HIT
+        }
+        built: str = "".join(["é"])
+        self.assertEqual(counts[built], TWO_HITS)
+        self.assertEqual(counts["a"], TWO_HITS)
+        self.assertEqual(counts["b"], ONE_HIT)
+    }
+
+    def test_character_survives_a_break_and_is_read_after_the_loop() {
+        found: str = ""
+        for c in "xy<z" {
+            found = c
+            if c == "<" { break }
+        }
+        self.assertEqual(found, "<")
+    }
+
+    def test_character_reassigned_inside_the_body() {
+        out: list[str] = []
+        for c in "ab" {
+            if c == "a" { c = "é" }
+            out.append(c)
+        }
+        self.assertEqual(out, ["é", "b"])
+    }
+
+    def test_ord_and_membership_on_ascii_and_wide_characters() {
+        total: int = 0
+        vowels: int = 0
+        for c in "héllo" {
+            total = total + ord(c)
+            if c in "aeioué" { vowels = vowels + ONE_HIT }
+        }
+        self.assertEqual(total, ORD_H + ORD_E_ACUTE + ORD_L + ORD_L + ORD_O)
+        self.assertEqual(vowels, HELLO_VOWELS)
+    }
+
+    def test_index_loop_with_the_index_modified_inside_the_body() {
+        text: str = "a<b<<c"
+        i: int = 0
+        tags: int = 0
+        while i < len(text) {
+            if text[i] == "<" {
+                tags = tags + ONE_HIT
+                i = i + SKIP_TAG
+            } else {
+                i = i + STEP
+            }
+        }
+        self.assertEqual(tags, TWO_HITS)
+    }
+
+    def test_index_loop_on_a_wide_string_with_negative_index() {
+        text: str = "cafés"
+        self.assertEqual(text[SECOND_LAST], "é")
+        self.assertEqual(text[E_ACUTE_AT] == "é", True)
+        self.assertEqual(text[S_AT] == "s", True)
+    }
+
+    def test_character_used_as_an_exception_message() {
+        caught: str = ""
+        for c in "é" {
+            try {
+                raise ValueError(c)
+            } except ValueError as e {
+                caught = str(e)
+            }
+        }
+        self.assertEqual(caught, "é")
+    }
+
+    def test_character_appended_then_joined_matches_source() {
+        src: str = "cafés 中文 🐉"
+        out: list[str] = []
+        for c in src {
+            out.append(c)
+        }
+        self.assertEqual("".join(out), src)
+        self.assertEqual(len(out), len(src))
+    }
+}
+
+
+
+extern "C" def dragon_str_from_bytes(b: bytes) -> str
+
+const CHAR_ROUNDS: int = 3000
+const VOWELS: str = "aeiouy"
+const TAG_OPEN: int = 60
+const PAST_END: int = 99
+
+
+def ascii_text() -> str {
+    return "".join(["scan", "<tag>", " 42 ", "done"])
+}
+
+
+def wide_text() -> str {
+    return "".join(["caf", "é", "s <", "中", "> 7 ", "🐉"])
+}
+
+
+def byte_transparent_text() -> str {
+    return dragon_str_from_bytes(b"a\xe9<7 ")
+}
+
+
+def _index_past_end_materialised() {
+    s: str = wide_text()
+    ch: str = s[PAST_END]
+}
+
+
+def _index_past_end_compared() {
+    s: str = wide_text()
+    if s[PAST_END] == "a" {
+        return
+    }
+}
+
+
+def _index_before_start_compared() {
+    s: str = ascii_text()
+    if s[-(len(s) + 1)] == "a" {
+        return
+    }
+}
+
+
+def _empty_index_compared() {
+    s: str = "".join([])
+    if s[0] == "a" {
+        return
+    }
+}
+
+
+def count_tags_by_index(s: str) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(s) {
+        if s[i] == "<" {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+def count_tags_by_iteration(s: str) -> int {
+    n: int = 0
+    for c in s {
+        if c == "<" {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+
+def count_vowels_by_iteration(s: str) -> int {
+    n: int = 0
+    for c in s {
+        if c in VOWELS {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+
+def count_non_vowels_by_index(s: str) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(s) {
+        if s[i] not in VOWELS {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+def ord_sum_by_iteration(s: str) -> int {
+    total: int = 0
+    for c in s {
+        total = total + ord(c)
+    }
+    return total
+}
+
+
+def ord_sum_by_index(s: str) -> int {
+    total: int = 0
+    i: int = 0
+    while i < len(s) {
+        total = total + ord(s[i])
+        i = i + 1
+    }
+    return total
+}
+
+
+def ord_sum_materialised(s: str) -> int {
+    total: int = 0
+    i: int = 0
+    while i < len(s) {
+        ch: str = s[i]
+        total = total + ord(ch)
+        i = i + 1
+    }
+    return total
+}
+
+
+def digit_count_by_iteration(s: str) -> int {
+    n: int = 0
+    for c in s {
+        if c.isdigit() {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+
+def predicate_signature(s: str) -> list[bool] {
+    out: list[bool] = []
+    i: int = 0
+    while i < len(s) {
+        out.append(s[i].isdigit())
+        out.append(s[i].isalpha())
+        out.append(s[i].isalnum())
+        out.append(s[i].isspace())
+        i = i + 1
+    }
+    return out
+}
+
+
+def predicate_signature_materialised(s: str) -> list[bool] {
+    out: list[bool] = []
+    i: int = 0
+    while i < len(s) {
+        ch: str = s[i]
+        out.append(ch.isdigit())
+        out.append(ch.isalpha())
+        out.append(ch.isalnum())
+        out.append(ch.isspace())
+        i = i + 1
+    }
+    return out
+}
+
+
+def wide_hits_by_iteration(s: str) -> int {
+    n: int = 0
+    for c in s {
+        if c == "é" or c == "中" or c == "🐉" {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+
+def wide_hits_by_index(s: str) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(s) {
+        if "é" == s[i] or s[i] != "中" and s[i] == "🐉" {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+def chars_equal_by_index(a: str, b: str) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(a) and i < len(b) {
+        if a[i] == b[i] {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+def _shout(c: str) -> str {
+    return c + c
+}
+
+
+class CharValueProbe(TestCase) {
+    def test_index_compare_matches_iteration_on_every_kind() {
+        r: int = 0
+        while r < CHAR_ROUNDS {
+            for s in [ascii_text(), wide_text(), byte_transparent_text()] {
+                self.assertEqual(count_tags_by_index(s), 1)
+                self.assertEqual(count_tags_by_iteration(s), 1)
+            }
+            r = r + 1
+        }
+    }
+
+    def test_membership_matches_between_forms() {
+        r: int = 0
+        while r < CHAR_ROUNDS {
+            for s in [ascii_text(), wide_text(), byte_transparent_text()] {
+                self.assertEqual(count_vowels_by_iteration(s) + count_non_vowels_by_index(s), len(s))
+            }
+            r = r + 1
+        }
+        self.assertEqual(count_vowels_by_iteration(ascii_text()), 4)
+        self.assertEqual(count_vowels_by_iteration(wide_text()), 1)
+        self.assertEqual(count_vowels_by_iteration(byte_transparent_text()), 1)
+    }
+
+    def test_ord_matches_between_forms() {
+        r: int = 0
+        while r < CHAR_ROUNDS {
+            for s in [ascii_text(), wide_text(), byte_transparent_text()] {
+                const expect: int = ord_sum_materialised(s)
+                self.assertEqual(ord_sum_by_iteration(s), expect)
+                self.assertEqual(ord_sum_by_index(s), expect)
+            }
+            r = r + 1
+        }
+        self.assertEqual(ord_sum_by_index(byte_transparent_text()), 97 + 233 + TAG_OPEN + 55 + 32)
+    }
+
+    def test_predicates_match_the_materialised_path() {
+        r: int = 0
+        while r < CHAR_ROUNDS {
+            for s in [ascii_text(), wide_text(), byte_transparent_text()] {
+                self.assertEqual(predicate_signature(s), predicate_signature_materialised(s))
+            }
+            r = r + 1
+        }
+        self.assertEqual(digit_count_by_iteration(ascii_text()), 2)
+        self.assertEqual(digit_count_by_iteration(wide_text()), 1)
+    }
+
+    def test_wide_literal_compares_on_every_kind() {
+        r: int = 0
+        while r < CHAR_ROUNDS {
+            self.assertEqual(wide_hits_by_iteration(wide_text()), 3)
+            self.assertEqual(wide_hits_by_index(wide_text()), 2)
+            self.assertEqual(wide_hits_by_iteration(ascii_text()), 0)
+            self.assertEqual(wide_hits_by_iteration(byte_transparent_text()), 1)
+            self.assertEqual(wide_hits_by_index(byte_transparent_text()), 1)
+            r = r + 1
+        }
+    }
+
+    def test_two_subscripts_compare_as_characters() {
+        r: int = 0
+        while r < CHAR_ROUNDS {
+            self.assertEqual(chars_equal_by_index(wide_text(), wide_text()), len(wide_text()))
+            self.assertEqual(chars_equal_by_index(ascii_text(), wide_text()), 2)
+            self.assertEqual(chars_equal_by_index(byte_transparent_text(), wide_text()), 0)
+            r = r + 1
+        }
+    }
+
+    def test_negative_index_compares() {
+        const s: str = wide_text()
+        self.assertEqual(s[-1] == "🐉", True)
+        self.assertEqual(s[-2] == " ", True)
+        self.assertEqual(s[-len(s)] == "c", True)
+        self.assertEqual(ord(s[-1]), 128009)
+    }
+
+    def test_out_of_range_raises_in_every_form() {
+        self.assertRaises(IndexError, _index_past_end_materialised)
+        self.assertRaises(IndexError, _index_past_end_compared)
+        self.assertRaises(IndexError, _index_before_start_compared)
+        self.assertRaises(IndexError, _empty_index_compared)
+    }
+
+    def test_empty_string_loops_do_nothing() {
+        const s: str = "".join([])
+        self.assertEqual(count_tags_by_iteration(s), 0)
+        self.assertEqual(count_tags_by_index(s), 0)
+        self.assertEqual(ord_sum_by_iteration(s), 0)
+    }
+
+    def test_character_escaping_to_a_fired_task() {
+        out: list[str] = []
+        for c in wide_text() {
+            t: Task[str] = fire _shout(c)
+            const doubled: str = await t
+            out.append(doubled)
+        }
+        self.assertEqual("".join(out), "ccaaffééss  <<中中>>  77  🐉🐉")
+    }
+}
+
+
 def escaped_wide_word() -> str {
     return "".join(["caf", "\u00e9", "s"])
 }
@@ -1771,4 +2299,4 @@ main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
       BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests(),
       BytesLiteralImmortalTests(), ByteArrayTests(),
-      EscapeSequenceTests()])
+      Move0EscapeProbe(), CharValueProbe(), EscapeSequenceTests()])

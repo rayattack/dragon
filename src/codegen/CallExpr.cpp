@@ -159,26 +159,7 @@ void CodeGen::visit(CallExpr& node) {
             return;
         }
 
-        bool nameIsUserBound = false;
-        {
-            std::string aliasSym = impl_->lookupImportedAlias(name);
-            if (!aliasSym.empty() && impl_->module &&
-                impl_->module->getFunction(aliasSym)) {
-                nameIsUserBound = true;
-            }
-            if (!nameIsUserBound && impl_->lookupVar(name))
-                nameIsUserBound = true;
-            if (!nameIsUserBound && impl_->lookupModuleGlobal(name))
-                nameIsUserBound = true;
-            if (!nameIsUserBound && impl_->module) {
-                std::string mangled =
-                    Impl::mangleFunc(impl_->currentModuleName, name);
-                if (impl_->module->getFunction(mangled) &&
-                    !impl_->externFuncNames.count(mangled)) {
-                    nameIsUserBound = true;
-                }
-            }
-        }
+        bool nameIsUserBound = impl_->calleeNameIsUserBound(name);
 
         if (!nameIsUserBound && emitBuiltinCall(node, name)) return;
 

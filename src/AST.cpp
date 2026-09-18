@@ -161,9 +161,20 @@ void DefaultASTVisitor::visit(ContractSetTypeExpr&) {}
 
 void DefaultASTVisitor::visit(IntegerLiteral&) {}
 void DefaultASTVisitor::visit(FloatLiteral&) {}
-void DefaultASTVisitor::visit(StringLiteral&) {}
-void DefaultASTVisitor::visit(TemplateExpr&) {}
-void DefaultASTVisitor::visit(TemplateFileExpr&) {}
+void DefaultASTVisitor::visit(StringLiteral& node) {
+    for (auto& part : node.fstringParts)
+        if (part.expr) part.expr->accept(*this);
+}
+void DefaultASTVisitor::visit(TemplateExpr& node) {
+    for (auto& part : node.templateParts) {
+        if (part.expr) part.expr->accept(*this);
+        if (part.separatorExpr) part.separatorExpr->accept(*this);
+        for (auto& s : part.blockStmts) s->accept(*this);
+    }
+}
+void DefaultASTVisitor::visit(TemplateFileExpr& node) {
+    if (node.expansion) node.expansion->accept(*this);
+}
 void DefaultASTVisitor::visit(BooleanLiteral&) {}
 void DefaultASTVisitor::visit(NoneLiteral&) {}
 void DefaultASTVisitor::visit(NameExpr&) {}

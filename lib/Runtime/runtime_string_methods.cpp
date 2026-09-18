@@ -743,6 +743,31 @@ static inline int64_t dragon_pred_len(const char* s, DragonString** out_ds) {
     return (int64_t)strlen(s);
 }
 
+int64_t dragon_str_kind(const char* s) {
+    if (!s || !dragon_is_heap_string(s)) return 1;
+    return dragon_string_from_data(s)->kind;
+}
+
+void dragon_str_index_error(void) {
+    dragon_raise_exc_cstr(41, "IndexError: string index out of range");
+}
+
+int64_t dragon_cp_isdigit(int64_t cp) {
+    return dragon_cp_is_digit((uint32_t)cp) ? 1 : 0;
+}
+
+int64_t dragon_cp_isalpha(int64_t cp) {
+    return dragon_cp_is_alpha((uint32_t)cp) ? 1 : 0;
+}
+
+int64_t dragon_cp_isalnum(int64_t cp) {
+    return (dragon_cp_is_alpha((uint32_t)cp) || dragon_cp_is_digit((uint32_t)cp)) ? 1 : 0;
+}
+
+int64_t dragon_cp_isspace(int64_t cp) {
+    return dragon_cp_is_space((uint32_t)cp) ? 1 : 0;
+}
+
 int64_t dragon_str_isdigit(const char* s) {
     DragonString* ds;
     int64_t n = dragon_pred_len(s, &ds);
