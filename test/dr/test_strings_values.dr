@@ -1207,6 +1207,60 @@ class BytesDecodeTests(TestCase) {
         self.assertEqual(len(truncated.decode("utf-8", "replace")), 2)
     }
 
+    def test_a_high_byte_at_every_position_of_a_block() {
+        i: int = 0
+        while i < 72 {
+            vals: list[int] = [65] * 128
+            vals[i] = 0xC3
+            vals[i + 1] = 0xA9
+            const decoded: str = bytes(vals).decode("utf-8")
+            self.assertEqual(len(decoded), 127)
+            self.assertEqual(ord(decoded[i]), 233)
+            i = i + 1
+        }
+    }
+
+    def test_overlong_sequence_replaces_every_byte() {
+        overlong: bytes = bytes([0xE0, 0x80, 0x80])
+        const text: str = overlong.decode("utf-8", "replace")
+        self.assertEqual(len(text), 3)
+        self.assertEqual(ord(text[0]), 65533)
+        self.assertEqual(ord(text[2]), 65533)
+    }
+
+    def test_long_malformed_payload_replaces_and_releases() {
+        vals: list[int] = []
+        i: int = 0
+        while i < 300 {
+            vals.append(0xE0)
+            vals.append(0x80)
+            vals.append(0x80)
+            i = i + 1
+        }
+        const wire: bytes = bytes(vals)
+        r: int = 0
+        while r < 2000 {
+            const text: str = wire.decode("utf-8", "replace")
+            self.assertEqual(len(text), 900)
+            r = r + 1
+        }
+    }
+
+    def test_repeated_strict_failures_release_their_buffer() {
+        const bad: bytes = bytes([0x41] * 200 + [0xFF, 0x41])
+        caught: int = 0
+        i: int = 0
+        while i < 2000 {
+            try {
+                const text: str = bad.decode("utf-8")
+            } except UnicodeDecodeError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 2000)
+    }
+
     def test_ascii_encoding_rejects_high_bytes() {
         high: bytes = bytes([0x41, 0x80])
         caught: str = ""

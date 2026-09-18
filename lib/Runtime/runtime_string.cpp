@@ -34,17 +34,47 @@ static int dragon_utf8_decode_one(const unsigned char* p, int64_t remaining,
     return 0;
 }
 
+static const uint64_t DRAGON_HIGH_BITS = 0x8080808080808080ULL;
+static const int64_t DRAGON_SCAN_BLOCK = 64;
+
 static inline int64_t dragon_ascii_prefix(const unsigned char* p, int64_t n) {
     int64_t i = 0;
+    for (; i + DRAGON_SCAN_BLOCK <= n; i += DRAGON_SCAN_BLOCK) {
+        uint64_t acc = 0;
+        for (int64_t j = 0; j < DRAGON_SCAN_BLOCK; j += 8) {
+            uint64_t word;
+            memcpy(&word, p + i + j, sizeof(word));
+            acc |= word;
+        }
+        if (acc & DRAGON_HIGH_BITS) break;
+    }
     for (; i + 8 <= n; i += 8) {
         uint64_t word;
         memcpy(&word, p + i, sizeof(word));
-        if (word & 0x8080808080808080ULL) break;
+        if (word & DRAGON_HIGH_BITS) break;
     }
     for (; i < n; ++i) {
         if (p[i] >= 0x80) break;
     }
     return i;
+}
+
+static inline int64_t dragon_utf8_lead_count(const unsigned char* p, int64_t n) {
+    int64_t leads = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        leads += ((p[i] & 0xC0) != 0x80) ? 1 : 0;
+    }
+    return leads;
+}
+
+static inline const char* dragon_ucs4_finish(DragonString* s, int64_t out,
+                                             int64_t allocated) {
+    if (out != allocated) {
+        s->len = out;
+        s->cap = dragon_cap_clamp(out * 4);
+        s->data[out * 4] = '\0';
+    }
+    return s->data;
 }
 
 const char* dragon_string_alloc(const char* src, int64_t byte_len) {
@@ -58,6 +88,26 @@ const char* dragon_string_alloc(const char* src, int64_t byte_len) {
         memcpy(s->data, src, (size_t)byte_len);
         return s->data;
     }
+    const int64_t lead_count = dragon_utf8_lead_count(p, byte_len);
+    DragonString* fast = dragon_string_alloc_ucs4(lead_count);
+    uint32_t* fdst = (uint32_t*)fast->data;
+    int64_t fout = 0;
+    int64_t fi = 0;
+    while (fi < byte_len && fout < lead_count) {
+        uint32_t cp;
+        int n = dragon_utf8_decode_one(p + fi, byte_len - fi, &cp);
+        if (n <= 0) {
+            cp = (uint32_t)p[fi];
+            n = 1;
+        }
+        fdst[fout++] = cp;
+        fi += n;
+    }
+    if (fi == byte_len) {
+        return dragon_ucs4_finish(fast, fout, lead_count);
+    }
+    free(fast);
+
     int64_t cp_count = 0;
     for (int64_t i = 0; i < byte_len; ) {
         uint32_t cp;
@@ -126,13 +176,8 @@ static int dragon_encoding_kind(const char* encoding) {
     return DRAGON_ENCODING_UNKNOWN;
 }
 
-static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
-                                         int ascii_only, int pol) {
-    if (dragon_ascii_prefix(p, n) == n) {
-        DragonString* s = dragon_string_alloc_ascii(n);
-        memcpy(s->data, p, (size_t)n);
-        return s->data;
-    }
+static const char* dragon_decode_checked_exact(const unsigned char* p, int64_t n,
+                                              int ascii_only, int pol) {
     int64_t cp_count = 0;
     int has_high = 0;
     for (int64_t i = 0; i < n; ) {
@@ -182,6 +227,58 @@ static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
         i += adv;
     }
     return s->data;
+}
+
+static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
+                                         int ascii_only, int pol) {
+    if (dragon_ascii_prefix(p, n) == n) {
+        DragonString* s = dragon_string_alloc_ascii(n);
+        memcpy(s->data, p, (size_t)n);
+        return s->data;
+    }
+    const int64_t lead_count = ascii_only ? n : dragon_utf8_lead_count(p, n);
+    DragonString* s = dragon_string_alloc_ucs4(lead_count);
+    uint32_t* dst = (uint32_t*)s->data;
+    int64_t out = 0;
+    int has_high = 0;
+    int64_t i = 0;
+    while (i < n && out < lead_count) {
+        uint32_t cp;
+        int adv;
+        if (ascii_only) {
+            if (p[i] < 0x80) { cp = p[i]; adv = 1; }
+            else if (pol == 1) { cp = 0xFFFD; adv = 1; }
+            else {
+                free(s);
+                dragon_raise_exc_cstr(92, "'ascii' codec can't decode byte");
+                return dragon_string_alloc("", 0);
+            }
+        } else {
+            adv = dragon_utf8_decode_one(p + i, n - i, &cp);
+            if (adv <= 0) {
+                if (pol == 1) { cp = 0xFFFD; adv = 1; }
+                else {
+                    free(s);
+                    dragon_raise_exc_cstr(92, "'utf-8' codec can't decode byte");
+                    return dragon_string_alloc("", 0);
+                }
+            }
+        }
+        if (cp >= 0x80) has_high = 1;
+        dst[out++] = cp;
+        i += adv;
+    }
+    if (i < n) {
+        free(s);
+        return dragon_decode_checked_exact(p, n, ascii_only, pol);
+    }
+    if (!has_high) {
+        DragonString* narrow = dragon_string_alloc_ascii(out);
+        for (int64_t k = 0; k < out; ++k) narrow->data[k] = (char)dst[k];
+        free(s);
+        return narrow->data;
+    }
+    return dragon_ucs4_finish(s, out, lead_count);
 }
 
 const char* dragon_bytes_decode_ex(DragonBytes* b, const char* encoding,
