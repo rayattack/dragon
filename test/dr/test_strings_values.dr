@@ -2538,6 +2538,33 @@ class IndexOracleTests(TestCase) {
         self.assertEqual(len(raw.encode("utf-8")), 6)
         self.assertEqual(raw == dragon_str_from_bytes(b"ab\xe9\xffcd"), True)
     }
+    def test_chr_of_a_lone_surrogate_counts_its_bytes_and_its_neighbours_count_one() {
+        for cp in [0xD800, 0xDBFF, 0xDC00, 0xDFFF] {
+            const s: str = chr(cp)
+            const walk: list[str] = walk_of(s)
+            self.assertEqual(len(s), 3)
+            self.assertEqual(len(walk), 3)
+            self.assertEqual(len(s.encode("utf-8")), 3)
+            self.assertEqual(ord(s[0]), 0xE0 | (cp >> 12))
+            self.assertEqual(ord(s[1]), 0x80 | ((cp >> 6) & 0x3F))
+            self.assertEqual(ord(s[2]), 0x80 | (cp & 0x3F))
+            k: int = 0
+            while k < 3 {
+                self.assertEqual(s[k], walk[k])
+                self.assertEqual(s[-1 - k], walk[2 - k])
+                k = k + 1
+            }
+            const padded: str = "x" * 63 + s + "y" * 63
+            self.assertEqual(len(padded), 129)
+            self.check_boundary_indices(padded)
+        }
+        for cp in [0xD7FF, 0xE000, 0xFFFD, 0x10FFFF] {
+            const s: str = chr(cp)
+            self.assertEqual(len(s), 1)
+            self.assertEqual(ord(s), cp)
+            self.check_every_index("x" * 63 + s + "y" * 63)
+        }
+    }
 }
 
 
