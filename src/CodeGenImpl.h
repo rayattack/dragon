@@ -838,9 +838,11 @@ struct CodeGen::Impl {
     void collectAssignedNames(const std::vector<std::unique_ptr<Stmt>>& body,
                               std::unordered_set<std::string>& out);
     llvm::Instruction* sequentialCacheResetFor(Expr* strExpr);
-    llvm::Value* emitCodePointStep(llvm::Value* str, llvm::AllocaInst* cursor);
+    llvm::Value* emitStrUtf8FlagAt(llvm::Instruction* before, llvm::Value* str);
+    llvm::Value* emitCodePointStep(llvm::Value* str, llvm::AllocaInst* cursor,
+                                   llvm::Value* utf8);
     llvm::Value* emitCodePointAtOffset(llvm::Value* str, llvm::Value* offset,
-                                       llvm::Value** advanceOut);
+                                       llvm::Value** advanceOut, llvm::Value* utf8);
     llvm::AllocaInst* lookupCharValueVar(const std::string& name);
     bool charLoopTargetStaysValue(ForStmt& node, const std::string& name);
     bool calleeNameIsUserBound(const std::string& name);

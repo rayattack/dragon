@@ -734,8 +734,8 @@ static DragonList* dragon_str_split_ws(DragonStrView* v, int64_t maxsplit) {
 DragonList* dragon_str_split_max(const char* s, const char* sep, int64_t maxsplit) {
     if (!s) return dragon_list_new_tagged(8, TAG_STR);
     DragonStrView v = dragon_str_view(s);
-    if (!sep || !*sep) return dragon_str_split_ws(&v, maxsplit);
     DragonStrView p = dragon_str_view(sep);
+    if (!sep || p.nbytes == 0) return dragon_str_split_ws(&v, maxsplit);
     DragonList* l = dragon_list_new_tagged(8, TAG_STR);
     int64_t pos = 0;
     int64_t nsplits = 0;

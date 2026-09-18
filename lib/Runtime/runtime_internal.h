@@ -65,6 +65,7 @@ typedef struct {
 #define GC_FLAG_IN_TO_FREE 0x08
 #define GC_FLAG_BORROWED_BUFFER 0x10
 #define GC_FLAG_STR_ASCII 0x20
+#define GC_FLAG_STR_UTF8 0x40
 #define GC_FLAG_HEAP_OBJ  0x80
 
 #define DRAGON_IMMORTAL_REFCOUNT ((int64_t)0x4000000000000000LL)
@@ -154,10 +155,11 @@ typedef struct {
     char    data[];
 } DragonString;
 
-static_assert((GC_FLAG_STR_ASCII & (GC_FLAG_TRACKED | GC_FLAG_REACHABLE | GC_FLAG_SHARED |
-                                    GC_FLAG_IN_TO_FREE | GC_FLAG_BORROWED_BUFFER |
-                                    GC_FLAG_HEAP_OBJ)) == 0,
-              "the ascii flag must not share a bit with any other header flag");
+static_assert(((GC_FLAG_STR_ASCII | GC_FLAG_STR_UTF8) &
+               (GC_FLAG_TRACKED | GC_FLAG_REACHABLE | GC_FLAG_SHARED | GC_FLAG_IN_TO_FREE |
+                GC_FLAG_BORROWED_BUFFER | GC_FLAG_HEAP_OBJ)) == 0 &&
+                  (GC_FLAG_STR_ASCII & GC_FLAG_STR_UTF8) == 0,
+              "the string flags must not share a bit with any other header flag");
 
 static inline int64_t dragon_str_byte_len(const DragonString* s) {
     return s->nbytes;
@@ -1071,6 +1073,7 @@ DragonString* dragon_string_alloc_raw(int64_t len);
 void dragon_string_raw_finish(DragonString* s, int64_t nbytes);
 char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 int64_t dragon_str_is_ascii(const char* s);
+int64_t dragon_str_is_utf8(const char* s);
 int64_t dragon_str_cp_at_index(const char* s, int64_t index);
 int64_t dragon_str_next_cp(const char* s, int64_t* byte_cursor);
 int64_t dragon_str_decode_at(const char* s, int64_t byte_off);

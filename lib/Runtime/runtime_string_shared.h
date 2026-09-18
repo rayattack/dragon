@@ -130,7 +130,7 @@ static inline DragonString* dragon_string_alloc_ascii(int64_t n) {
     dragon_str_check_bytes(n);
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + (size_t)n + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
-    s->header.gc_flags |= GC_FLAG_STR_ASCII;
+    s->header.gc_flags |= GC_FLAG_STR_ASCII | GC_FLAG_STR_UTF8;
     s->len = n;
     s->nbytes = (int32_t)n;
     s->cap = (int32_t)n;
@@ -156,14 +156,15 @@ static inline void dragon_string_finish_utf8(DragonString* s, int64_t nbytes) {
     s->data[nbytes] = '\0';
     const unsigned char* p = (const unsigned char*)s->data;
     if (dragon_ascii_prefix(p, nbytes) == nbytes) {
-        s->header.gc_flags |= GC_FLAG_STR_ASCII;
+        s->header.gc_flags |= GC_FLAG_STR_ASCII | GC_FLAG_STR_UTF8;
         s->len = nbytes;
         return;
     }
-    s->header.gc_flags &= (uint8_t)~GC_FLAG_STR_ASCII;
+    s->header.gc_flags &= (uint8_t)~(GC_FLAG_STR_ASCII | GC_FLAG_STR_UTF8);
     DragonStrTableFill fill = {dragon_str_table(s), 0};
     const unsigned char* end = p + nbytes;
     const unsigned char* q = p;
+    bool stray = false;
     while (q < end) {
         int64_t run = dragon_ascii_word_run(q, end, fill.count);
         if (run) {
@@ -173,10 +174,13 @@ static inline void dragon_string_finish_utf8(DragonString* s, int64_t nbytes) {
             continue;
         }
         uint32_t cp;
-        q += dragon_utf8_next(q, end, &cp);
+        int adv = dragon_utf8_next(q, end, &cp);
+        stray |= (adv == 1);
+        q += adv;
         fill.count++;
         dragon_str_table_note(&fill, p, q);
     }
+    if (!stray) s->header.gc_flags |= GC_FLAG_STR_UTF8;
     s->len = fill.count;
 }
 

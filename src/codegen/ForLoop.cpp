@@ -808,9 +808,15 @@ void CodeGen::visit(ForStmt& node) {
     bool charLoop = isStrIterable && charTargetName &&
                     impl_->charLoopTargetStaysValue(node, charTargetName->name);
     llvm::AllocaInst* strCursor = nullptr;
+    llvm::Value* strUtf8 = nullptr;
     if (charLoop) {
         strCursor = impl_->createEntryAlloca(func, "__str.cursor", impl_->i64Type);
         impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), strCursor);
+        auto* iterForFlag = impl_->builder->CreateLoad(impl_->i8PtrType, iterAlloca, "__iter.flag");
+        auto* utf8Flag = impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_str_is_utf8"],
+                                                    {iterForFlag}, "str.utf8");
+        strUtf8 = impl_->builder->CreateICmpNE(utf8Flag, llvm::ConstantInt::get(impl_->i64Type, 0),
+                                               "str.utf8.b");
     }
 
     auto* condBB = llvm::BasicBlock::Create(*impl_->context, "forcond", func);
@@ -1048,7 +1054,7 @@ void CodeGen::visit(ForStmt& node) {
         impl_->builder->CreateStore(elem, targetAlloca);
         impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Int);
     } else if (charLoop) {
-        llvm::Value* cp = impl_->emitCodePointStep(iterLoaded, strCursor);
+        llvm::Value* cp = impl_->emitCodePointStep(iterLoaded, strCursor, strUtf8);
         auto* cpAlloca = impl_->createEntryAlloca(func, targetName->name + ".cp", impl_->i64Type);
         impl_->builder->CreateStore(cp, cpAlloca);
         impl_->scopes.back().charValueVars[targetName->name] = cpAlloca;

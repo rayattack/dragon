@@ -114,6 +114,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_str_is_ascii",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_str_is_utf8",
+        llvm::FunctionType::get(i64Type, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_str_cp_at_index",
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_str_next_cp",
@@ -1065,6 +1067,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     markPureGetter(runtimeFuncs["dragon_str_len"],
                    llvm::MemoryEffects::readOnly());
     markPureGetter(runtimeFuncs["dragon_str_is_ascii"],
+                   llvm::MemoryEffects::readOnly());
+    markPureGetter(runtimeFuncs["dragon_str_is_utf8"],
                    llvm::MemoryEffects::readOnly());
     markPureGetter(runtimeFuncs["dragon_str_cp_at_index"],
                    llvm::MemoryEffects::readOnly());

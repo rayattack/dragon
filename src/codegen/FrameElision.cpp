@@ -34,6 +34,7 @@ const llvm::StringSet<>& runtimeNoRaiseSymbols() {
         "dragon_bytes_len",
         "dragon_str_len",
         "dragon_str_is_ascii",
+        "dragon_str_is_utf8",
         "dragon_str_cp_at_index",
         "dragon_str_next_cp",
         "dragon_str_decode_at",

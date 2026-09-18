@@ -242,7 +242,6 @@ llvm::Instruction* CodeGen::Impl::sequentialCacheResetFor(Expr* strExpr) {
     if (loopStack.empty() || !loopStack.top().preheaderBr) return nullptr;
     auto* name = dynamic_cast<NameExpr*>(strExpr);
     if (!name || !lookupVar(name->name) || isCellBacked(name->name)) return nullptr;
-    if (lookupModuleGlobal(name->name)) return nullptr;
     if (loopStack.top().assignedNames.count(name->name)) return nullptr;
     return loopStack.top().preheaderBr;
 }
@@ -290,39 +289,191 @@ llvm::Value* CodeGen::Impl::emitCodePointLoad(llvm::Value* str, llvm::Value* len
     return emitCodePointLoadInBounds(str, kind, finalIdx, cacheReset);
 }
 
+llvm::Value* CodeGen::Impl::emitStrUtf8FlagAt(llvm::Instruction* before, llvm::Value* str) {
+    auto* strLoad = llvm::dyn_cast<llvm::LoadInst>(str);
+    if (!strLoad) return nullptr;
+    llvm::IRBuilder<> pre(before);
+    auto* strAtEntry = pre.CreateLoad(i8PtrType, strLoad->getPointerOperand(), "ch.str.pre");
+    auto* flag = pre.CreateCall(runtimeFuncs["dragon_str_is_utf8"], {strAtEntry}, "ch.utf8");
+    return pre.CreateICmpNE(flag, llvm::ConstantInt::get(i64Type, 0), "ch.utf8.b");
+}
+
 llvm::Value* CodeGen::Impl::emitCodePointAtOffset(llvm::Value* str, llvm::Value* offset,
-                                                  llvm::Value** advanceOut) {
+                                                  llvm::Value** advanceOut, llvm::Value* utf8) {
     auto* func = currentFunction;
     auto* i8Ty = llvm::Type::getInt8Ty(*context);
-    auto* asciiBB = llvm::BasicBlock::Create(*context, "cp.ascii", func);
-    auto* multiBB = llvm::BasicBlock::Create(*context, "cp.multi", func);
-    auto* joinBB = llvm::BasicBlock::Create(*context, "cp.join", func);
-    auto* gep = builder->CreateGEP(i8Ty, str, offset, "cp.byte.gep");
-    auto* byte = builder->CreateZExt(builder->CreateLoad(i8Ty, gep, "cp.byte"), i64Type,
-                                     "cp.byte.i64");
-    builder->CreateCondBr(
-        builder->CreateICmpULT(byte, llvm::ConstantInt::get(i64Type, 0x80), "cp.is.ascii"),
-        asciiBB, multiBB);
+    auto c = [&](int64_t v) { return llvm::ConstantInt::get(i64Type, v); };
+    auto* base = builder->CreateGEP(i8Ty, str, offset, "cp.base");
+    auto byteAt = [&](int64_t at, const char* name) {
+        auto* gep = at == 0 ? base : builder->CreateGEP(i8Ty, base, c(at), llvm::Twine(name) + ".gep");
+        return builder->CreateZExt(builder->CreateLoad(i8Ty, gep, name), i64Type,
+                                   llvm::Twine(name) + ".i64");
+    };
+    auto isCont = [&](llvm::Value* b, const char* name) {
+        return builder->CreateICmpEQ(builder->CreateAnd(b, c(0xC0)), c(0x80), name);
+    };
+    auto block = [&](const char* name) { return llvm::BasicBlock::Create(*context, name, func); };
+
+    auto* asciiBB = block("cp.ascii");
+    auto* multiBB = block("cp.multi");
+    auto* checkedBB = block("cp.checked");
+    auto* validTwoBB = block("cp.valid.two");
+    auto* validTwoOkBB = block("cp.valid.two.ok");
+    auto* validMoreBB = block("cp.valid.more");
+    auto* validThreeBB = block("cp.valid.three");
+    auto* validFourBB = block("cp.valid.four");
+    auto* twoBB = block("cp.two");
+    auto* twoOkBB = block("cp.two.ok");
+    auto* moreBB = block("cp.more");
+    auto* threeBB = block("cp.three");
+    auto* threeT2BB = block("cp.three.t2");
+    auto* threeOkBB = block("cp.three.ok");
+    auto* fourBB = block("cp.four");
+    auto* fourT2BB = block("cp.four.t2");
+    auto* fourT3BB = block("cp.four.t3");
+    auto* fourOkBB = block("cp.four.ok");
+    auto* slowBB = block("cp.slow");
+    auto* joinBB = block("cp.join");
+
+    llvm::Value* validCps[3] = {nullptr, nullptr, nullptr};
+    auto* b0 = byteAt(0, "cp.b0");
+    builder->CreateCondBr(builder->CreateICmpULT(b0, c(0x80), "cp.is.ascii"), asciiBB, multiBB);
 
     builder->SetInsertPoint(asciiBB);
     builder->CreateBr(joinBB);
 
     builder->SetInsertPoint(multiBB);
+    if (utf8) {
+        auto* isTwoValid = builder->CreateAnd(utf8, builder->CreateICmpULT(b0, c(0xE0)), "cp.valid.istwo");
+        builder->CreateCondBr(isTwoValid, validTwoOkBB, validTwoBB);
+        builder->SetInsertPoint(validTwoOkBB);
+        auto* v1 = byteAt(1, "cp.v1");
+        auto* validTwoCp = builder->CreateOr(
+            builder->CreateShl(builder->CreateAnd(b0, c(0x1F)), c(6)),
+            builder->CreateAnd(v1, c(0x3F)), "cp.valid.two.cp");
+        builder->CreateBr(joinBB);
+        builder->SetInsertPoint(validTwoBB);
+        auto* isThreeValid = builder->CreateAnd(utf8, builder->CreateICmpULT(b0, c(0xF0)), "cp.valid.isthree");
+        builder->CreateCondBr(isThreeValid, validThreeBB, validMoreBB);
+        builder->SetInsertPoint(validThreeBB);
+        auto* w1 = byteAt(1, "cp.w1");
+        auto* w2 = byteAt(2, "cp.w2");
+        auto* validThreeCp = builder->CreateOr(
+            builder->CreateOr(builder->CreateShl(builder->CreateAnd(b0, c(0x0F)), c(12)),
+                              builder->CreateShl(builder->CreateAnd(w1, c(0x3F)), c(6))),
+            builder->CreateAnd(w2, c(0x3F)), "cp.valid.three.cp");
+        builder->CreateBr(joinBB);
+        builder->SetInsertPoint(validMoreBB);
+        builder->CreateCondBr(utf8, validFourBB, checkedBB);
+        builder->SetInsertPoint(validFourBB);
+        auto* x1 = byteAt(1, "cp.x1");
+        auto* x2 = byteAt(2, "cp.x2");
+        auto* x3 = byteAt(3, "cp.x3");
+        auto* validFourCp = builder->CreateOr(
+            builder->CreateOr(builder->CreateShl(builder->CreateAnd(b0, c(0x07)), c(18)),
+                              builder->CreateShl(builder->CreateAnd(x1, c(0x3F)), c(12))),
+            builder->CreateOr(builder->CreateShl(builder->CreateAnd(x2, c(0x3F)), c(6)),
+                              builder->CreateAnd(x3, c(0x3F))),
+            "cp.valid.four.cp");
+        builder->CreateBr(joinBB);
+        builder->SetInsertPoint(checkedBB);
+        validCps[0] = validTwoCp;
+        validCps[1] = validThreeCp;
+        validCps[2] = validFourCp;
+    }
+    auto* leadOk = builder->CreateICmpUGE(b0, c(0xC2), "cp.lead.ok");
+    auto* isTwo = builder->CreateICmpULT(b0, c(0xE0), "cp.lead.two");
+    builder->CreateCondBr(builder->CreateAnd(leadOk, isTwo), twoBB, moreBB);
+
+    builder->SetInsertPoint(twoBB);
+    auto* b1 = byteAt(1, "cp.b1");
+    auto* twoCp = builder->CreateOr(
+        builder->CreateShl(builder->CreateAnd(b0, c(0x1F)), c(6)),
+        builder->CreateAnd(b1, c(0x3F)), "cp.two.cp");
+    builder->CreateCondBr(isCont(b1, "cp.b1.cont"), twoOkBB, slowBB);
+    builder->SetInsertPoint(twoOkBB);
+    builder->CreateBr(joinBB);
+
+    builder->SetInsertPoint(moreBB);
+    auto* isThree = builder->CreateICmpULT(b0, c(0xF0), "cp.lead.three");
+    builder->CreateCondBr(builder->CreateAnd(leadOk, isThree), threeBB, fourBB);
+
+    builder->SetInsertPoint(threeBB);
+    auto* t1 = byteAt(1, "cp.t1");
+    auto* threeHigh = builder->CreateOr(
+        builder->CreateShl(builder->CreateAnd(b0, c(0x0F)), c(12)),
+        builder->CreateShl(builder->CreateAnd(t1, c(0x3F)), c(6)), "cp.three.high");
+    auto* threeNotOverlong = builder->CreateICmpUGE(threeHigh, c(0x800), "cp.three.notoverlong");
+    auto* threeNotSurrogate = builder->CreateOr(builder->CreateICmpULT(threeHigh, c(0xD800)),
+                                                builder->CreateICmpUGE(threeHigh, c(0xE000)),
+                                                "cp.three.notsurrogate");
+    auto* threeT1Ok = builder->CreateAnd(
+        isCont(t1, "cp.t1.cont"), builder->CreateAnd(threeNotOverlong, threeNotSurrogate),
+        "cp.three.t1.ok");
+    builder->CreateCondBr(threeT1Ok, threeT2BB, slowBB);
+    builder->SetInsertPoint(threeT2BB);
+    auto* t2 = byteAt(2, "cp.t2");
+    auto* threeCp = builder->CreateOr(threeHigh, builder->CreateAnd(t2, c(0x3F)), "cp.three.cp");
+    builder->CreateCondBr(isCont(t2, "cp.t2.cont"), threeOkBB, slowBB);
+    builder->SetInsertPoint(threeOkBB);
+    builder->CreateBr(joinBB);
+
+    builder->SetInsertPoint(fourBB);
+    auto* isFour = builder->CreateICmpULT(b0, c(0xF5), "cp.lead.four");
+    auto* fourT1BB = block("cp.four.t1");
+    builder->CreateCondBr(isFour, fourT1BB, slowBB);
+    builder->SetInsertPoint(fourT1BB);
+    auto* f1 = byteAt(1, "cp.f1");
+    auto* fourHigh = builder->CreateOr(
+        builder->CreateShl(builder->CreateAnd(b0, c(0x07)), c(18)),
+        builder->CreateShl(builder->CreateAnd(f1, c(0x3F)), c(12)), "cp.four.high");
+    auto* fourInRange = builder->CreateAnd(builder->CreateICmpUGE(fourHigh, c(0x10000)),
+                                           builder->CreateICmpULT(fourHigh, c(0x110000)),
+                                           "cp.four.inrange");
+    builder->CreateCondBr(builder->CreateAnd(isCont(f1, "cp.f1.cont"), fourInRange), fourT2BB, slowBB);
+    builder->SetInsertPoint(fourT2BB);
+    auto* f2 = byteAt(2, "cp.f2");
+    builder->CreateCondBr(isCont(f2, "cp.f2.cont"), fourT3BB, slowBB);
+    builder->SetInsertPoint(fourT3BB);
+    auto* f3 = byteAt(3, "cp.f3");
+    auto* fourCp = builder->CreateOr(
+        builder->CreateOr(fourHigh, builder->CreateShl(builder->CreateAnd(f2, c(0x3F)), c(6))),
+        builder->CreateAnd(f3, c(0x3F)), "cp.four.cp");
+    builder->CreateCondBr(isCont(f3, "cp.f3.cont"), fourOkBB, slowBB);
+    builder->SetInsertPoint(fourOkBB);
+    builder->CreateBr(joinBB);
+
+    builder->SetInsertPoint(slowBB);
     auto* packed = builder->CreateCall(runtimeFuncs["dragon_str_decode_at"], {str, offset},
                                        "cp.packed");
-    auto* multiCp = builder->CreateAnd(packed, llvm::ConstantInt::get(i64Type, 0x1FFFFF),
-                                       "cp.multi.cp");
-    auto* multiAdv = builder->CreateLShr(packed, llvm::ConstantInt::get(i64Type, 32),
-                                         "cp.multi.adv");
+    auto* slowCp = builder->CreateAnd(packed, c(0x1FFFFF), "cp.slow.cp");
+    auto* slowAdv = builder->CreateLShr(packed, c(32), "cp.slow.adv");
     builder->CreateBr(joinBB);
 
     builder->SetInsertPoint(joinBB);
-    auto* cp = builder->CreatePHI(i64Type, 2, "cp.value");
-    cp->addIncoming(byte, asciiBB);
-    cp->addIncoming(multiCp, multiBB);
-    auto* adv = builder->CreatePHI(i64Type, 2, "cp.advance");
-    adv->addIncoming(llvm::ConstantInt::get(i64Type, 1), asciiBB);
-    adv->addIncoming(multiAdv, multiBB);
+    auto* cp = builder->CreatePHI(i64Type, 8, "cp.value");
+    cp->addIncoming(b0, asciiBB);
+    cp->addIncoming(twoCp, twoOkBB);
+    cp->addIncoming(threeCp, threeOkBB);
+    cp->addIncoming(fourCp, fourOkBB);
+    cp->addIncoming(slowCp, slowBB);
+    auto* adv = builder->CreatePHI(i64Type, 8, "cp.advance");
+    adv->addIncoming(c(1), asciiBB);
+    adv->addIncoming(c(2), twoOkBB);
+    adv->addIncoming(c(3), threeOkBB);
+    adv->addIncoming(c(4), fourOkBB);
+    adv->addIncoming(slowAdv, slowBB);
+    if (utf8) {
+        cp->addIncoming(validCps[0], validTwoOkBB);
+        cp->addIncoming(validCps[1], validThreeBB);
+        cp->addIncoming(validCps[2], validFourBB);
+        adv->addIncoming(c(2), validTwoOkBB);
+        adv->addIncoming(c(3), validThreeBB);
+        adv->addIncoming(c(4), validFourBB);
+    } else {
+        for (auto* unused : {checkedBB, validTwoBB, validTwoOkBB, validMoreBB, validThreeBB, validFourBB})
+            unused->eraseFromParent();
+    }
     if (advanceOut) *advanceOut = adv;
     return cp;
 }
@@ -360,6 +511,7 @@ llvm::Value* CodeGen::Impl::emitCodePointLoadInBounds(llvm::Value* str, llvm::Va
                                                 llvm::ConstantInt::get(i64Type, 0));
         llvm::IRBuilder<> reset(cacheReset);
         reset.CreateStore(llvm::ConstantInt::get(i64Type, -2), cacheIdx);
+        llvm::Value* utf8 = emitStrUtf8FlagAt(cacheReset, str);
         auto* nextIdx = builder->CreateAdd(builder->CreateLoad(i64Type, cacheIdx, "ch.cache.idx.v"),
                                            llvm::ConstantInt::get(i64Type, 1), "ch.cache.idx.next");
         auto* hit = builder->CreateICmpEQ(finalIdx, nextIdx, "ch.cache.hit");
@@ -382,7 +534,7 @@ llvm::Value* CodeGen::Impl::emitCodePointLoadInBounds(llvm::Value* str, llvm::Va
         off->addIncoming(hitOff, hitBB);
         off->addIncoming(missOff, missBB);
         llvm::Value* adv = nullptr;
-        wide = emitCodePointAtOffset(str, off, &adv);
+        wide = emitCodePointAtOffset(str, off, &adv, utf8);
         builder->CreateStore(finalIdx, cacheIdx);
         builder->CreateStore(builder->CreateAdd(off, adv, "ch.cache.next.new"), cacheNext);
         wideEndBB = builder->GetInsertBlock();
@@ -396,10 +548,11 @@ llvm::Value* CodeGen::Impl::emitCodePointLoadInBounds(llvm::Value* str, llvm::Va
     return cp;
 }
 
-llvm::Value* CodeGen::Impl::emitCodePointStep(llvm::Value* str, llvm::AllocaInst* cursor) {
+llvm::Value* CodeGen::Impl::emitCodePointStep(llvm::Value* str, llvm::AllocaInst* cursor,
+                                              llvm::Value* utf8) {
     auto* off = builder->CreateLoad(i64Type, cursor, "ch.step.off");
     llvm::Value* adv = nullptr;
-    llvm::Value* cp = emitCodePointAtOffset(str, off, &adv);
+    llvm::Value* cp = emitCodePointAtOffset(str, off, &adv, utf8);
     builder->CreateStore(builder->CreateAdd(off, adv, "ch.step.next"), cursor);
     return cp;
 }

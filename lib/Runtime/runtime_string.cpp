@@ -103,6 +103,7 @@ static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
     s->nbytes = (int32_t)(w - s->data);
     s->data[s->nbytes] = '\0';
     s->len = fill.count;
+    s->header.gc_flags |= GC_FLAG_STR_UTF8;
     return s->data;
 }
 
@@ -143,7 +144,7 @@ static const char* dragon_bytes_adopt_as_str(DragonBytes* b) {
     DragonString* s = (DragonString*)b;
     int64_t n = b->len;
     s->header.type_tag = DRAGON_TAG_STR;
-    s->header.gc_flags |= GC_FLAG_STR_ASCII;
+    s->header.gc_flags |= GC_FLAG_STR_ASCII | GC_FLAG_STR_UTF8;
     s->nbytes = (int32_t)n;
     s->cap = (int32_t)n;
     return s->data;
@@ -252,6 +253,11 @@ int64_t dragon_str_is_ascii(const char* s) {
     if (dragon_is_heap_string(s)) return dragon_str_ascii_flag(dragon_string_from_data(s));
     int64_t n = (int64_t)strlen(s);
     return dragon_ascii_prefix((const unsigned char*)s, n) == n ? 1 : 0;
+}
+
+int64_t dragon_str_is_utf8(const char* s) {
+    if (!s || !dragon_is_heap_string(s)) return 0;
+    return (dragon_string_from_data(s)->header.gc_flags & GC_FLAG_STR_UTF8) ? 1 : 0;
 }
 
 int64_t dragon_str_cp_at_index(const char* s, int64_t index) {
@@ -869,7 +875,7 @@ static void dragon_ascii_chars_init(void) {
         DragonCharSingleton& s = dragon_ascii_chars[c];
         s.header.refcount = DRAGON_IMMORTAL_REFCOUNT;
         s.header.type_tag = DRAGON_TAG_STR;
-        s.header.gc_flags = GC_FLAG_HEAP_OBJ | GC_FLAG_STR_ASCII;
+        s.header.gc_flags = GC_FLAG_HEAP_OBJ | GC_FLAG_STR_ASCII | GC_FLAG_STR_UTF8;
         s.header.class_id = 0;
         s.header.gc_track_idx = -1;
         s.len = 1;
@@ -897,11 +903,7 @@ const char* dragon_str_from_cp(uint32_t cp) {
         s->data[0] = buf[0];
         return s->data;
     }
-    DragonString* s = dragon_string_alloc_utf8_raw(n);
-    memcpy(s->data, buf, (size_t)n);
-    s->len = 1;
-    s->data[n] = '\0';
-    return s->data;
+    return dragon_string_from_utf8(buf, n);
 }
 
 const char* dragon_str_index(const char* s, int64_t index) {
