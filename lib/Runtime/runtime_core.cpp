@@ -1160,6 +1160,7 @@ void dragon_mark_shared(void* obj) {
     if (!obj) return;
     DragonObjectHeader* h = (DragonObjectHeader*)obj;
     if (!(h->gc_flags & GC_FLAG_HEAP_OBJ)) return;
+    if (dragon_is_immortal(obj)) return;
     if (h->gc_flags & GC_FLAG_SHARED) return;
     __atomic_fetch_or(&h->gc_flags, GC_FLAG_SHARED, __ATOMIC_RELAXED);
 }
@@ -1179,6 +1180,7 @@ void dragon_mark_shared_worklist_push(void* worklist, void* obj) {
     auto* w = (DragonSharedWorklist*)worklist;
     DragonObjectHeader* h = (DragonObjectHeader*)obj;
     if (!(h->gc_flags & GC_FLAG_HEAP_OBJ)) return;
+    if (dragon_is_immortal(obj)) return;
     if (h->gc_flags & GC_FLAG_SHARED) return;
     __atomic_fetch_or(&h->gc_flags, GC_FLAG_SHARED, __ATOMIC_RELAXED);
     shared_worklist_push_internal(w, obj);
