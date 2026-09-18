@@ -236,6 +236,9 @@ void CodeGen::visit(FireExpr& node) {
         auto threadAdoptsTemp = [&](size_t i) {
             for (auto& [dv, dk] : defaultTemps)
                 if (dv == userArgs[i]) return true;
+            if (argExprs[i] && dynamic_cast<LambdaExpr*>(argExprs[i]) &&
+                argKinds[i] == Impl::VarKind::Closure)
+                return true;
             return argExprs[i] != nullptr &&
                    impl_->renderedSourceDrainKind(argExprs[i], userArgs[i]) !=
                        Impl::VarKind::Other;
