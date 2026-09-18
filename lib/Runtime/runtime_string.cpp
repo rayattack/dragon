@@ -1094,6 +1094,46 @@ double dragon_str_to_float(const char* s) {
 }
 
 
+struct DragonCharSingleton {
+    DragonObjectHeader header;
+    int64_t len;
+    uint8_t kind;
+    uint8_t _pad[3];
+    int32_t cap;
+    char    data[8];
+};
+static_assert(offsetof(DragonCharSingleton, data) == offsetof(DragonString, data),
+              "a one-character singleton must present the string layout");
+static_assert(offsetof(DragonCharSingleton, kind) == offsetof(DragonString, kind),
+              "a one-character singleton must present the string layout");
+
+static DragonCharSingleton dragon_ascii_chars[128];
+
+__attribute__((constructor))
+static void dragon_ascii_chars_init(void) {
+    for (int c = 1; c < 128; ++c) {
+        DragonCharSingleton& s = dragon_ascii_chars[c];
+        s.header.refcount = DRAGON_IMMORTAL_REFCOUNT;
+        s.header.type_tag = DRAGON_TAG_STR;
+        s.header.gc_flags = GC_FLAG_HEAP_OBJ;
+        s.header.class_id = 0;
+        s.header.gc_track_idx = -1;
+        s.len = 1;
+        s.kind = 1;
+        s.cap = 1;
+        s.data[0] = (char)c;
+        s.data[1] = '\0';
+    }
+}
+
+const char* dragon_str_ascii_char(uint32_t cp) {
+    return dragon_ascii_chars[cp].data;
+}
+
+static inline bool dragon_cp_has_singleton(uint32_t cp) {
+    return cp != 0 && cp < 0x80;
+}
+
 const char* dragon_str_index(const char* s, int64_t index) {
     if (!s) {
         dragon_raise_exc_cstr(41, "IndexError: string index out of range");
@@ -1105,10 +1145,12 @@ const char* dragon_str_index(const char* s, int64_t index) {
         dragon_raise_exc_cstr(41, "IndexError: string index out of range");
     }
     if (!ds || ds->kind == 1) {
-        char ch = s[index];
-        return dragon_string_alloc(&ch, 1);
+        unsigned char ch = (unsigned char)s[index];
+        if (dragon_cp_has_singleton(ch)) return dragon_str_ascii_char(ch);
+        return dragon_string_alloc((const char*)&ch, 1);
     }
     uint32_t cp = ((const uint32_t*)ds->data)[index];
+    if (dragon_cp_has_singleton(cp)) return dragon_str_ascii_char(cp);
     if (cp < 0x80) {
         char ch = (char)cp;
         return dragon_string_alloc(&ch, 1);

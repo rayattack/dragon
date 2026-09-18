@@ -386,6 +386,7 @@ const char* dragon_chr(int64_t code) {
     unsigned char buf[4];
     int n;
     uint32_t c = (uint32_t)code;
+    if (c != 0 && c < 0x80) return dragon_str_ascii_char(c);
     if (c < 0x80) {
         buf[0] = (unsigned char)c;
         n = 1;

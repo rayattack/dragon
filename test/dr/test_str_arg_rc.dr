@@ -2,6 +2,7 @@ from unittest import TestCase, main
 import os
 
 extern "C" def dragon_str_concat(a: str, b: str) -> str
+extern "C" def dragon_str_from_bytes(b: bytes) -> str
 
 const HEX: str = "0123456789abcdef"
 
@@ -728,4 +729,159 @@ class ForIterTempStrRC(TestCase) {
 }
 
 
-main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC(), ForIterTempStrRC()])
+def _echo_char(c: str) -> str {
+    return c
+}
+
+
+def first_char_of(n: int) -> str {
+    const s: str = heap_ascii(n)
+    const c: str = s[0]
+    return c
+}
+
+
+def chars_of(s: str) {
+    i: int = 0
+    while i < len(s) {
+        yield s[i]
+        i = i + 1
+    }
+}
+
+
+class CharSingletonRC(TestCase) {
+    def test_character_held_across_a_scope_end() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(first_char_of(i), "p")
+            i = i + 1
+        }
+    }
+
+    def test_character_held_across_a_fire_boundary() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = heap_ascii(i)
+            t: Task[str] = fire _echo_char(s[8])
+            const back: str = await t
+            self.assertEqual(back, HEX[i & 15])
+            i = i + 1
+        }
+    }
+
+    def test_characters_held_across_generator_suspension() {
+        i: int = 0
+        while i < 2000 {
+            const s: str = heap_wide(i)
+            parts: list[str] = []
+            for c in chars_of(s) {
+                parts.append(c)
+            }
+            self.assertEqual("".join(parts), s)
+            i = i + 1
+        }
+    }
+
+    def test_character_hashes_and_keys_like_an_allocated_equal_string() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = heap_ascii(i)
+            counts: dict[str, int] = {}
+            counts[s[0]] = 1
+            counts[s[1]] = 2
+            const built_p: str = "".join(["p"])
+            const built_a: str = "".join(["a"])
+            self.assertEqual(counts[built_p], 1)
+            self.assertEqual(counts[built_a], 2)
+            self.assertEqual(hash(s[0]), hash(built_p))
+            self.assertEqual(s[0] == built_p, True)
+            i = i + 1
+        }
+    }
+
+    def test_characters_sort_and_deduplicate_in_a_list() {
+        i: int = 0
+        while i < 2000 {
+            const s: str = heap_ascii(i)
+            xs: list[str] = []
+            slices: list[str] = []
+            j: int = 0
+            while j < len(s) {
+                xs.append(s[j])
+                slices.append(s[j:j + 1])
+                j = j + 1
+            }
+            const ordered: list[str] = sorted(xs)
+            self.assertEqual(ordered, sorted(slices))
+            self.assertEqual(ordered[0], "-")
+            self.assertEqual(ordered[len(ordered) - 1], "y")
+            self.assertEqual(len(set(xs)), len(set(slices)))
+            self.assertEqual(len(set(xs)) >= 10, True)
+            i = i + 1
+        }
+    }
+
+    def test_character_encodes_through_the_borrowed_bytes_path() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = heap_ascii(i)
+            const b: bytes = s[0].encode("utf-8")
+            self.assertEqual(b, b"p")
+            self.assertEqual(len(s[8].encode("utf-8")), 1)
+            i = i + 1
+        }
+    }
+
+    def test_ascii_and_wide_neighbours_in_a_wide_string() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = heap_wide(i)
+            self.assertEqual(s[0], "c")
+            self.assertEqual(s[3], "é")
+            self.assertEqual(s[4], "-")
+            self.assertEqual(ord(s[3]), 233)
+            i = i + 1
+        }
+    }
+
+    def test_chr_matches_index_for_every_ascii_code_point() {
+        const s: str = heap_ascii(0)
+        self.assertEqual(chr(112), s[0])
+        self.assertEqual(chr(65), "A")
+        self.assertEqual(chr(233), "é")
+        self.assertEqual(len(chr(0)), 1)
+        self.assertEqual(ord(chr(127)), 127)
+        i: int = 1
+        while i < 128 {
+            self.assertEqual(ord(chr(i)), i)
+            i = i + 1
+        }
+    }
+
+    def test_appending_to_a_character_copies_it() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = heap_ascii(i)
+            c: str = s[0]
+            c = c + "x"
+            self.assertEqual(c, "px")
+            self.assertEqual(s[0], "p")
+            i = i + 1
+        }
+    }
+
+    def test_high_byte_character_still_has_its_own_value() {
+        i: int = 0
+        while i < 3000 {
+            const raw: str = dragon_str_from_bytes(b"a\xe9b")
+            self.assertEqual(ord(raw[1]), 233)
+            self.assertEqual(raw[0], "a")
+            self.assertEqual(raw[2], "b")
+            i = i + 1
+        }
+    }
+}
+
+
+main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC(), ForIterTempStrRC(), CharSingletonRC()])
