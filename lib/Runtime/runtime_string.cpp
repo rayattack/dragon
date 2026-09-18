@@ -297,6 +297,44 @@ const char* dragon_bytes_decode_ex(DragonBytes* b, const char* encoding,
     return dragon_decode_checked(b->data, b->len, kind == DRAGON_ENCODING_ASCII ? 1 : 0, pol);
 }
 
+static_assert(sizeof(DragonBytes) == sizeof(DragonString),
+              "a bytes object must be relabelable as a string in place");
+static_assert(offsetof(DragonBytes, len) == offsetof(DragonString, len),
+              "a bytes object must be relabelable as a string in place");
+static_assert(sizeof(DragonBytes) == offsetof(DragonString, data),
+              "an inline bytes buffer must start where string characters start");
+
+static bool dragon_bytes_adoptable_as_str(DragonBytes* b) {
+    if (!b || b->len <= 0) return false;
+    if (b->header.type_tag != DRAGON_TAG_BYTES) return false;
+    if (dragon_refcount_load(&b->header) != 1) return false;
+    if (dragon_gc_flags_load(&b->header) &
+        (GC_FLAG_SHARED | GC_FLAG_BORROWED_BUFFER | GC_FLAG_TRACKED)) return false;
+    if (b->data != (uint8_t*)(b + 1)) return false;
+    return dragon_ascii_prefix(b->data, b->len) == b->len;
+}
+
+static const char* dragon_bytes_adopt_as_str(DragonBytes* b) {
+    DragonString* s = (DragonString*)b;
+    int64_t n = b->len;
+    s->header.type_tag = DRAGON_TAG_STR;
+    s->kind = 1;
+    s->_pad[0] = s->_pad[1] = s->_pad[2] = 0;
+    s->cap = dragon_cap_clamp(n);
+    return s->data;
+}
+
+const char* dragon_bytes_decode_owned_ex(DragonBytes* b, const char* encoding,
+                                         const char* errors) {
+    if (dragon_errors_policy(errors) >= 0 &&
+        dragon_encoding_kind(encoding) != DRAGON_ENCODING_UNKNOWN &&
+        dragon_bytes_adoptable_as_str(b))
+        return dragon_bytes_adopt_as_str(b);
+    const char* out = dragon_bytes_decode_ex(b, encoding, errors);
+    dragon_decref(b);
+    return out;
+}
+
 DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
                                   const char* errors) {
     int pol = dragon_errors_policy(errors);

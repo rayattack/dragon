@@ -1136,28 +1136,16 @@ DragonBytes* dragon_bytes_empty() {
     return &dragon_empty_bytes.bytes;
 }
 
-static const size_t DRAGON_BYTES_SMALL_ALLOC = 1024;
-
 static inline bool dragon_bytes_buffer_is_inline(const DragonBytes* b) {
     return b->data == (const uint8_t*)(b + 1);
 }
 
 static inline DragonBytes* dragon_bytes_alloc(int64_t len) {
     if (len <= 0) return &dragon_empty_bytes.bytes;
-    if ((size_t)len + sizeof(DragonBytes) + 1 <= DRAGON_BYTES_SMALL_ALLOC) {
-        auto* b = (DragonBytes*)dragon_xmalloc((size_t)len + sizeof(DragonBytes) + 1);
-        dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
-        b->len = len;
-        b->data = (uint8_t*)(b + 1);
-        b->data[len] = 0;
-        return b;
-    }
-    auto* buf = (uint8_t*)dragon_xmalloc_ex(len, 1, 1);
-    auto* b = (DragonBytes*)dragon_malloc_nullable(sizeof(DragonBytes));
-    if (!b) { free(buf); dragon_raise_oom(); }
+    auto* b = (DragonBytes*)dragon_xmalloc_ex(len, 1, sizeof(DragonBytes) + 1);
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = len;
-    b->data = buf;
+    b->data = (uint8_t*)(b + 1);
     b->data[len] = 0;
     return b;
 }

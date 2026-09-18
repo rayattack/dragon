@@ -1139,6 +1139,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (ownedBytesRecv)
             argTempBases.push_back(
                 impl_->emitCleanupPushTemp(obj, Impl::DCLEAN_OBJ));
+        bool recvAdopted = false;
         bool bytesHandled = [&]() -> bool {
 
         if (method == "upper" || method == "lower" || method == "strip" ||
@@ -1162,7 +1163,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             llvm::Value* err = impl_->builder->CreateGlobalString("strict");
             if (node.args.size() >= 1) { node.args[0]->accept(*this); enc = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases); }
             if (node.args.size() >= 2) { node.args[1]->accept(*this); err = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, argTemps, argTempBases); }
-            auto* fn = impl_->getOrDeclareRuntime("dragon_bytes_decode_ex",
+            recvAdopted = ownedBytesRecv;
+            auto* fn = impl_->getOrDeclareRuntime(
+                recvAdopted ? "dragon_bytes_decode_owned_ex" : "dragon_bytes_decode_ex",
                 llvm::FunctionType::get(impl_->i8PtrType,
                     {impl_->i8PtrType, impl_->i8PtrType, impl_->i8PtrType}, false));
             impl_->lastValue = impl_->builder->CreateCall(fn, {obj, enc, err}, "decode");
@@ -1236,7 +1239,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (bytesHandled) {
             impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
-            if (ownedBytesRecv)
+            if (ownedBytesRecv && !recvAdopted)
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_decref"], {obj});
             return true;

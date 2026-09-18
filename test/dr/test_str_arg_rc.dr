@@ -884,4 +884,190 @@ class CharSingletonRC(TestCase) {
 }
 
 
-main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC(), ForIterTempStrRC(), CharSingletonRC()])
+def fresh_bytes(n: int) -> bytes {
+    return heap_ascii(n).encode("utf-8")[0:35]
+}
+
+
+def fresh_wide_bytes(n: int) -> bytes {
+    const w: bytes = heap_wide(n).encode("utf-8")
+    return w[0:len(w)]
+}
+
+
+def fresh_bad_bytes(n: int) -> bytes {
+    return bytes([97 + (n & 7), 255, 98])
+}
+
+
+def fresh_sized_bytes(size: int) -> bytes {
+    const unit: bytes = b"abcdefgh"
+    out: bytes = unit * (size // 8)
+    return out + b"x" * (size - len(out))
+}
+
+
+def _echo_bytes(b: bytes) -> int {
+    return len(b)
+}
+
+
+def _decode_worker(b: bytes) -> str {
+    return b.decode("utf-8")
+}
+
+
+def decoded_lines(n: int) {
+    i: int = 0
+    while i < 4 {
+        yield fresh_bytes(n + i).decode("utf-8")
+        i = i + 1
+    }
+}
+
+
+def _decode_bad_temporary(n: int) {
+    const s: str = fresh_bad_bytes(n).decode("utf-8")
+}
+
+
+class DecodeAdoptRC(TestCase) {
+    def test_decoding_a_fresh_temporary_matches_the_source() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(fresh_bytes(i).decode("utf-8"), heap_ascii(i))
+            self.assertEqual(fresh_bytes(i).decode("ascii"), heap_ascii(i))
+            self.assertEqual(len(fresh_bytes(i).decode("utf-8")), 35)
+            i = i + 1
+        }
+    }
+
+    def test_decoding_a_borrowed_view_leaves_its_source_intact() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = heap_ascii(i)
+            const back: str = s.encode("utf-8").decode("utf-8")
+            self.assertEqual(back, s)
+            self.assertEqual(s[0], "p")
+            i = i + 1
+        }
+    }
+
+    def test_decoding_a_held_bytes_leaves_it_usable() {
+        i: int = 0
+        while i < 3000 {
+            const b: bytes = fresh_bytes(i)
+            const s: str = b.decode("utf-8")
+            self.assertEqual(s, heap_ascii(i))
+            self.assertEqual(b[0], 112)
+            self.assertEqual(len(b), 35)
+            self.assertEqual(b.decode("utf-8"), s)
+            i = i + 1
+        }
+    }
+
+    def test_decoding_a_bytes_shared_across_a_fire() {
+        i: int = 0
+        while i < 2000 {
+            const b: bytes = fresh_bytes(i)
+            t: Task[int] = fire _echo_bytes(b)
+            const n: int = await t
+            self.assertEqual(n, 35)
+            self.assertEqual(b.decode("utf-8"), heap_ascii(i))
+            self.assertEqual(b[8], ord(HEX[i & 15]))
+            i = i + 1
+        }
+    }
+
+    def test_decoding_a_frozen_bytearray() {
+        i: int = 0
+        while i < 2000 {
+            ba: bytearray = bytearray(4)
+            ba[0] = 112
+            ba[1] = 97
+            ba[2] = 121
+            ba[3] = 48 + (i & 7)
+            const frozen: bytes = own ba
+            self.assertEqual(frozen.decode("utf-8"), "pay" + str(i & 7))
+            i = i + 1
+        }
+    }
+
+    def test_decoding_the_empty_bytes_and_an_image_literal() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(fresh_bytes(i)[0:0].decode("utf-8"), "")
+            self.assertEqual(b"payload".decode("utf-8"), "payload")
+            self.assertEqual(b"".decode("utf-8"), "")
+            i = i + 1
+        }
+    }
+
+    def test_strict_failure_on_a_temporary_is_catchable_and_clean() {
+        i: int = 0
+        while i < 3000 {
+            self.assertRaises(UnicodeDecodeError, lambda () -> None { _decode_bad_temporary(i) })
+            i = i + 1
+        }
+    }
+
+    def test_decoded_string_can_own_a_borrowed_bytes_view() {
+        i: int = 0
+        while i < 3000 {
+            const s: str = fresh_bytes(i).decode("utf-8")
+            const again: bytes = s.encode("utf-8")
+            self.assertEqual(again, fresh_bytes(i))
+            self.assertEqual(s, heap_ascii(i))
+            self.assertEqual(s[8], HEX[i & 15])
+            i = i + 1
+        }
+    }
+
+    def test_adoption_across_a_generator_suspension() {
+        i: int = 0
+        while i < 1000 {
+            parts: list[str] = []
+            for line in decoded_lines(i) {
+                parts.append(line)
+            }
+            self.assertEqual(len(parts), 4)
+            self.assertEqual(parts[3], heap_ascii(i + 3))
+            i = i + 1
+        }
+    }
+
+    def test_adoption_inside_a_fired_task() {
+        i: int = 0
+        while i < 2000 {
+            t: Task[str] = fire _decode_worker(fresh_bytes(i))
+            const s: str = await t
+            self.assertEqual(s, heap_ascii(i))
+            i = i + 1
+        }
+    }
+
+    def test_adoption_at_the_inline_allocation_boundary() {
+        for size in [990, 991, 992, 993, 1024, 4096] {
+            i: int = 0
+            while i < 300 {
+                const s: str = fresh_sized_bytes(size).decode("utf-8")
+                self.assertEqual(len(s), size)
+                self.assertEqual(s[0], "a")
+                self.assertEqual(s[size - 1] == "h" or s[size - 1] == "x", True)
+                i = i + 1
+            }
+        }
+    }
+
+    def test_non_ascii_temporary_takes_the_decoding_path() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(fresh_wide_bytes(i).decode("utf-8"), heap_wide(i))
+            self.assertEqual(len(fresh_wide_bytes(i).decode("utf-8")), len(WIDE) + 6)
+            i = i + 1
+        }
+    }
+}
+
+
+main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC(), ForIterTempStrRC(), CharSingletonRC(), DecodeAdoptRC()])
