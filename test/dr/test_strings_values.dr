@@ -2347,9 +2347,198 @@ class EscapeSequenceTests(TestCase) {
 }
 
 
+const RUN_LENGTHS: list[int] = [1, 2, 63, 64, 65, 127, 128, 129, 191, 192, 193]
+const LONG_LENGTHS: list[int] = [4095, 4096, 4097]
+const WIDE_SLOTS: list[int] = [0, 1, 62, 63, 64, 65, 127, 128, 129]
+
+
+def repeat_unit(n: int) -> str {
+    parts: list[str] = []
+    i: int = 0
+    while i < n {
+        parts.append("abcdefghijklmnop"[i & 15])
+        i = i + 1
+    }
+    return "".join(parts)
+}
+
+
+def with_wide_at(n: int, slot: int, wide: str) -> str {
+    parts: list[str] = []
+    i: int = 0
+    while i < n {
+        if i == slot {
+            parts.append(wide)
+        } else {
+            parts.append("abcdefghijklmnop"[i & 15])
+        }
+        i = i + 1
+    }
+    return "".join(parts)
+}
+
+
+def walk_of(s: str) -> list[str] {
+    out: list[str] = []
+    for c in s {
+        out.append(c)
+    }
+    return out
+}
+
+
+class IndexOracleTests(TestCase) {
+    def check_every_index(s: str) {
+        const walk: list[str] = walk_of(s)
+        self.assertEqual(len(walk), len(s))
+        n: int = len(s)
+        i: int = 0
+        while i < n {
+            self.assertEqual(s[i], walk[i])
+            self.assertEqual(ord(s[i]), ord(walk[i]))
+            self.assertEqual(s[-1 - i], walk[n - 1 - i])
+            i = i + 1
+        }
+        self.assertEqual("".join(walk), s)
+        self.assertEqual(hash("".join(walk)), hash(s))
+        self.assertEqual(s.encode("utf-8").decode("utf-8"), s)
+        self.assertEqual(len(s.encode("utf-8")) >= n, True)
+    }
+
+    def check_boundary_indices(s: str) {
+        const walk: list[str] = walk_of(s)
+        const n: int = len(s)
+        self.assertEqual(len(walk), n)
+        for base in [0, 63, 64, 65, 127, 128, 129, 4031, 4032, 4033, 4095, 4096] {
+            for delta in [-1, 0, 1] {
+                const i: int = base + delta
+                if i >= 0 and i < n {
+                    self.assertEqual(s[i], walk[i])
+                    self.assertEqual(s[-1 - i], walk[n - 1 - i])
+                }
+            }
+        }
+        step: int = 97
+        i: int = 0
+        while i < n {
+            self.assertEqual(s[i], walk[i])
+            i = i + step
+        }
+    }
+
+    def check_slices(s: str) {
+        const walk: list[str] = walk_of(s)
+        const n: int = len(s)
+        for a in [0, 1, 62, 63, 64, 65, 127, 128, 129] {
+            for b in [1, 63, 64, 65, 66, 128, 129, 130, n] {
+                if a <= b and b <= n {
+                    self.assertEqual(s[a:b], "".join(walk[a:b]))
+                }
+            }
+        }
+        self.assertEqual(s[::2], "".join(walk[::2]))
+        self.assertEqual(s[::-1], "".join(walk[::-1]))
+        self.assertEqual(s[1:], "".join(walk[1:]))
+        self.assertEqual(s[:-1], "".join(walk[:-1]))
+    }
+
+    def test_ascii_runs_at_every_boundary() {
+        for n in RUN_LENGTHS {
+            const s: str = repeat_unit(n)
+            self.check_every_index(s)
+            self.check_slices(s)
+        }
+        for n in LONG_LENGTHS {
+            const s: str = repeat_unit(n)
+            self.check_boundary_indices(s)
+        }
+    }
+
+    def test_one_wide_character_at_every_boundary_slot() {
+        for wide in ["é", "中", "🐉"] {
+            for n in RUN_LENGTHS {
+                for slot in WIDE_SLOTS {
+                    if slot < n {
+                        const s: str = with_wide_at(n, slot, wide)
+                        self.check_every_index(s)
+                        self.check_slices(s)
+                        self.assertEqual(s[slot], wide)
+                    }
+                }
+            }
+            for n in LONG_LENGTHS {
+                for slot in [0, 63, 64, 65, 4031, 4032, 4033, n - 1] {
+                    const s: str = with_wide_at(n, slot, wide)
+                    self.check_boundary_indices(s)
+                    self.assertEqual(s[slot], wide)
+                }
+            }
+        }
+    }
+
+    def test_every_constructor_agrees_with_the_walk() {
+        const base: str = with_wide_at(129, 64, "é")
+        self.check_every_index(base + base)
+        self.check_every_index(base * 3)
+        self.check_every_index("|".join([base, repeat_unit(63), "🐉"]))
+        self.check_every_index(base.replace("é", "中中"))
+        self.check_every_index(base.replace("é", "e"))
+        self.check_every_index(base.upper())
+        self.check_every_index(base.lower())
+        self.check_every_index(("İ" + base).lower())
+        self.check_every_index(("ß" + base + "ß").upper())
+        self.check_every_index(base[3:100])
+        self.check_every_index(("  " + base + "  ").strip())
+        self.check_every_index(f"<{base}>{len(base)}")
+        self.check_every_index(str(1234567890123) + base)
+        self.check_every_index(chr(233) + chr(20013) + chr(128009) + repeat_unit(64))
+        self.check_every_index(base.encode("utf-8").decode("utf-8"))
+        for piece in (base + "|" + base + "|" + repeat_unit(64)).split("|") {
+            self.check_every_index(piece)
+        }
+    }
+
+    def test_flag_transitions_both_ways() {
+        i: int = 0
+        while i < 300 {
+            grew: str = repeat_unit(64)
+            grew = grew + "é"
+            self.assertEqual(len(grew), 65)
+            self.assertEqual(len(grew.encode("utf-8")), 66)
+            self.assertEqual(grew[64], "é")
+            self.assertEqual(grew[63], "p")
+            shrank: str = grew.replace("é", "e")
+            self.assertEqual(len(shrank), 65)
+            self.assertEqual(len(shrank.encode("utf-8")), 65)
+            self.assertEqual(shrank[64], "e")
+            self.assertEqual(shrank == repeat_unit(64) + "e", True)
+            i = i + 1
+        }
+    }
+
+    def test_byte_transparent_strings_index_by_byte() {
+        const raw: str = dragon_str_from_bytes(b"ab\xe9\xffcd")
+        const walk: list[str] = walk_of(raw)
+        self.assertEqual(len(raw), 6)
+        self.assertEqual(len(walk), 6)
+        i: int = 0
+        while i < 6 {
+            self.assertEqual(raw[i], walk[i])
+            self.assertEqual(raw[-1 - i], walk[5 - i])
+            i = i + 1
+        }
+        self.assertEqual(ord(raw[2]), 233)
+        self.assertEqual(ord(raw[3]), 255)
+        self.assertEqual(raw[4], "c")
+        self.assertEqual(raw[1:4], "".join(walk[1:4]))
+        self.assertEqual("".join(walk) == raw, True)
+    }
+}
+
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
       BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests(),
       BytesLiteralImmortalTests(), ByteArrayTests(),
-      Move0EscapeProbe(), CharValueProbe(), EscapeSequenceTests()])
+      Move0EscapeProbe(), CharValueProbe(), EscapeSequenceTests(), IndexOracleTests()])
