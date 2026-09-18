@@ -941,6 +941,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_decref_callable",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_share_callable",
+        llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_string_dup",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_str_retain",

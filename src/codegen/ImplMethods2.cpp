@@ -1543,9 +1543,9 @@ llvm::Function* CodeGen::Impl::buildFireTrampoline(
             llvm::Value* p = v->getType()->isPointerTy()
                 ? v
                 : builder->CreateIntToPtr(v, i8PtrType);
-            const char* fn = (k == VarKind::Str)
-                ? "dragon_decref_str_atomic"
-                : "dragon_decref_atomic";
+            const char* fn = (k == VarKind::Str)       ? "dragon_decref_str_atomic"
+                             : (k == VarKind::Closure) ? "dragon_decref_callable"
+                                                       : "dragon_decref_atomic";
             builder->CreateCall(runtimeFuncs[fn], {p});
         }
 

@@ -731,6 +731,7 @@ void dragon_incref_atomic(void* obj);
 void dragon_decref_atomic(void* obj);
 void dragon_incref_callable(void* p);
 void dragon_decref_callable(void* p);
+void dragon_share_callable(void* p);
 void dragon_make_immortal(void* obj);
 int64_t dragon_is_immortal_obj(void* obj);
 void dragon_gc_track(void* obj);

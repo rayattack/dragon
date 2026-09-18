@@ -11,6 +11,26 @@ void CodeGen::visit(FireExpr& node) {
     std::vector<Impl::VarKind> argKinds;
     std::string siteName;
 
+    auto retainForTask = [&](llvm::Value* v, Impl::VarKind kind, bool adopted) {
+        if (kind == Impl::VarKind::Closure) {
+            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_share_callable"], {v});
+            if (!adopted)
+                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_incref_callable"], {v});
+        } else if (adopted) {
+            impl_->emitMarkShared(v, kind);
+        } else {
+            impl_->emitAtomicIncref(v, kind);
+        }
+    };
+
+    auto* fireCall = dynamic_cast<CallExpr*>(node.operand.get());
+    auto* fireCallee =
+        fireCall ? dynamic_cast<NameExpr*>(fireCall->callee.get()) : nullptr;
+    const bool calleeIsCallableVariable =
+        node.bodyStmts.empty() && fireCallee &&
+        impl_->callableTypes.count(fireCallee->name) &&
+        impl_->lookupVar(fireCallee->name) != nullptr;
+
     if (!node.bodyStmts.empty()) {
 
         if (!node.mutatedCapturedVars.empty()) {
@@ -86,7 +106,149 @@ void CodeGen::visit(FireExpr& node) {
 
         for (auto& c : caps) { userArgs.push_back(c.val); argKinds.push_back(c.kind); }
         for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++)
-            impl_->emitAtomicIncref(userArgs[i], argKinds[i]);
+            retainForTask(userArgs[i], argKinds[i], false);
+    } else if (calleeIsCallableVariable) {
+        const std::string& name = fireCallee->name;
+        llvm::FunctionType* userFnType = impl_->callableTypes[name];
+        auto nsIt = impl_->callableNestedSymbol.find(name);
+        const std::string* nestedSym =
+            nsIt != impl_->callableNestedSymbol.end() ? &nsIt->second : nullptr;
+        auto* calleeAlloca = impl_->lookupVar(name);
+        llvm::Value* calleeVal = impl_->builder->CreateLoad(
+            calleeAlloca->getAllocatedType(), calleeAlloca, name + ".fire.callee");
+        const Impl::VarKind calleeKind = impl_->lookupVarKind(name);
+        auto failFire = [&](const std::string& what) {
+            impl_->addError("fire: '" + name + "' " + what, node.location());
+            impl_->lastValue = llvm::ConstantPointerNull::get(
+                llvm::PointerType::getUnqual(*impl_->context));
+        };
+
+        const size_t numParams = userFnType->getNumParams();
+        std::vector<llvm::Value*> callArgs;
+        std::vector<Expr*> argExprs;
+        for (auto& arg : fireCall->args) {
+            arg->accept(*this);
+            llvm::Value* v = impl_->lastValue;
+            if (callArgs.size() < numParams)
+                v = impl_->coerceArg(v, userFnType->getParamType(callArgs.size()));
+            callArgs.push_back(v);
+            argExprs.push_back(arg.get());
+        }
+        std::vector<std::pair<llvm::Value*, Impl::VarKind>> defaultTemps;
+        const bool hasKeywords = !fireCall->kwArgs.empty();
+        if (hasKeywords && !nestedSym) {
+            failFire("cannot take keyword arguments here");
+            return;
+        }
+        if (hasKeywords &&
+            !impl_->placeKeywordArgs(*nestedSym, name, userFnType, *fireCall,
+                                     callArgs, *this, defaultTemps)) {
+            impl_->lastValue = llvm::ConstantPointerNull::get(
+                llvm::PointerType::getUnqual(*impl_->context));
+            return;
+        }
+        argExprs.resize(numParams, nullptr);
+        auto pnIt = nestedSym ? impl_->funcParamNames.find(*nestedSym)
+                              : impl_->funcParamNames.end();
+        for (auto& [kwName, kwVal] : fireCall->kwArgs) {
+            if (pnIt == impl_->funcParamNames.end()) break;
+            auto pos = std::find(pnIt->second.begin(), pnIt->second.end(), kwName);
+            if (pos == pnIt->second.end()) continue;
+            argExprs[(size_t)std::distance(pnIt->second.begin(), pos)] = kwVal.get();
+        }
+        const bool argsIncomplete =
+            callArgs.size() < numParams ||
+            std::find(callArgs.begin(), callArgs.end(), nullptr) != callArgs.end();
+        if (nestedSym && argsIncomplete)
+            impl_->fillDefaultArgs(*nestedSym, userFnType, callArgs, *this,
+                                   &defaultTemps);
+        if (callArgs.size() != numParams) {
+            failFire("takes " + std::to_string(numParams) + " argument(s) but " +
+                     std::to_string(callArgs.size()) + " were given");
+            return;
+        }
+        argExprs.resize(numParams, nullptr);
+        for (size_t i = 0; i < callArgs.size(); i++) {
+            if (callArgs[i]) continue;
+            failFire("is missing an argument for parameter " + std::to_string(i + 1));
+            return;
+        }
+
+        std::vector<Impl::VarKind> paramKinds(numParams, Impl::VarKind::Other);
+        auto kindsIt = nestedSym ? impl_->funcParamKinds.find(*nestedSym)
+                                 : impl_->funcParamKinds.end();
+        if (kindsIt != impl_->funcParamKinds.end()) {
+            for (size_t i = 0; i < numParams && i < kindsIt->second.size(); i++)
+                paramKinds[i] = kindsIt->second[i];
+        } else if (auto* calleeType =
+                       dynamic_cast<FunctionType*>(fireCallee->type.get())) {
+            for (size_t i = 0; i < numParams && i < calleeType->paramTypes.size(); i++)
+                if (calleeType->paramTypes[i])
+                    paramKinds[i] = Impl::typeKindToVarKind(
+                        calleeType->paramTypes[i]->kind());
+        }
+        if (nestedSym)
+            for (size_t i = 0; i < numParams; i++)
+                if (impl_->paramIsOwn(*nestedSym, (unsigned)i))
+                    paramKinds[i] = Impl::VarKind::Other;
+
+        std::string fireFnName =
+            "__dragon_fire_callable_" + std::to_string(impl_->lambdaCounter++);
+        std::vector<llvm::Type*> wrapParamTypes{impl_->i8PtrType};
+        for (unsigned i = 0; i < numParams; i++)
+            wrapParamTypes.push_back(userFnType->getParamType(i));
+        auto* wrapType = llvm::FunctionType::get(
+            userFnType->getReturnType(), wrapParamTypes, false);
+        auto* fireFn = llvm::Function::Create(
+            wrapType, llvm::Function::InternalLinkage, fireFnName,
+            impl_->module.get());
+
+        auto* prevFunc = impl_->currentFunction;
+        auto* prevBlock = impl_->builder->GetInsertBlock();
+        auto savedScopes = std::move(impl_->scopes);
+        impl_->scopes.clear();
+        impl_->currentFunction = fireFn;
+        auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", fireFn);
+        impl_->builder->SetInsertPoint(entry);
+        impl_->pushScope();
+        std::vector<llvm::Value*> innerArgs;
+        llvm::Value* calleeArg = nullptr;
+        for (auto& arg : fireFn->args()) {
+            if (!calleeArg) { calleeArg = &arg; continue; }
+            innerArgs.push_back(&arg);
+        }
+        emitCallableValueCall(calleeArg, userFnType, innerArgs, false, name);
+        if (userFnType->getReturnType() == impl_->voidType) {
+            impl_->builder->CreateRetVoid();
+        } else {
+            impl_->builder->CreateRet(
+                impl_->coerceArg(impl_->lastValue, userFnType->getReturnType()));
+        }
+        impl_->popScope();
+        impl_->scopes = std::move(savedScopes);
+        impl_->currentFunction = prevFunc;
+        if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
+
+        targetFn = fireFn;
+        userArgs.push_back(calleeVal);
+        argKinds.push_back(calleeKind);
+        retainForTask(calleeVal, calleeKind, false);
+        auto threadAdoptsTemp = [&](size_t i) {
+            for (auto& [dv, dk] : defaultTemps)
+                if (dv == callArgs[i]) return true;
+            if (argExprs[i] && dynamic_cast<LambdaExpr*>(argExprs[i]) &&
+                paramKinds[i] == Impl::VarKind::Closure)
+                return true;
+            return argExprs[i] != nullptr &&
+                   impl_->renderedSourceDrainKind(argExprs[i], callArgs[i]) !=
+                       Impl::VarKind::Other;
+        };
+        for (size_t i = 0; i < callArgs.size(); i++) {
+            userArgs.push_back(callArgs[i]);
+            argKinds.push_back(paramKinds[i]);
+            retainForTask(callArgs[i], paramKinds[i], threadAdoptsTemp(i));
+        }
+        siteName = name + "_" + std::to_string(impl_->lambdaCounter++);
     } else {
         auto* callExpr = dynamic_cast<CallExpr*>(node.operand.get());
         if (!callExpr) {
@@ -243,13 +405,8 @@ void CodeGen::visit(FireExpr& node) {
                    impl_->renderedSourceDrainKind(argExprs[i], userArgs[i]) !=
                        Impl::VarKind::Other;
         };
-        for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++) {
-            if (threadAdoptsTemp(i)) {
-                impl_->emitMarkShared(userArgs[i], argKinds[i]);
-                continue;
-            }
-            impl_->emitAtomicIncref(userArgs[i], argKinds[i]);
-        }
+        for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++)
+            retainForTask(userArgs[i], argKinds[i], threadAdoptsTemp(i));
 
         siteName = calleeName + "_" + std::to_string(impl_->lambdaCounter++);
     }

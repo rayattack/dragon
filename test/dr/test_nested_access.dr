@@ -493,5 +493,198 @@ class NestedDefaultArgTests(TestCase) {
 }
 
 
+
+const FIRE_ROUNDS: int = 3000
+const FIRE_FEW: int = 300
+
+class FireBox {
+    n: int
+
+    def (n: int) {
+        self.n = n
+    }
+}
+
+def fired_nested_plain() -> int {
+    def g(x: int) -> int {
+        return x * 10
+    }
+    t: Task[int] = fire g(2)
+    return t.join()
+}
+
+def fired_nested_with_default() -> int {
+    def g(x: int, y: int = 10) -> int {
+        return x * y
+    }
+    t: Task[int] = fire g(2)
+    u: Task[int] = fire g(2, 2)
+    return t.join() + u.join()
+}
+
+def fired_nested_with_keyword() -> str {
+    def h(a: int, b: str = "b", c: str = "c") -> str {
+        return str(a) + b + c
+    }
+    t: Task[str] = fire h(1, c="z")
+    u: Task[str] = fire h(1, b="y")
+    return t.join() + u.join()
+}
+
+def fired_nested_capturing(base: int) -> int {
+    def g(x: int) -> int {
+        return x + base
+    }
+    t: Task[int] = fire g(1)
+    return t.join()
+}
+
+def fired_nested_capturing_heap(prefix: str) -> str {
+    def g(x: str) -> str {
+        return prefix + x
+    }
+    t: Task[str] = fire g("!")
+    return t.join()
+}
+
+def fired_lambda_variable() -> int {
+    f: Callable[[int], int] = lambda (x: int) -> int { return x * 10 }
+    t: Task[int] = fire f(2)
+    return t.join()
+}
+
+def fired_module_function_variable() -> int {
+    f: Callable[[int], int] = nested_fire_helper
+    t: Task[int] = fire f(2)
+    return t.join()
+}
+
+def nested_fire_helper(x: int) -> int {
+    return x * 10
+}
+
+def fired_then_rebound() -> int {
+    def g(x: int) -> int {
+        return x * 10
+    }
+    t: Task[int] = fire g(1)
+    g = lambda (x: int) -> int { return x * 100 }
+    u: Task[int] = fire g(1)
+    return t.join() + u.join()
+}
+
+def fired_nested_in_loop(n: int) -> int {
+    def g(x: int) -> int {
+        return x + 1
+    }
+    total: int = 0
+    i: int = 0
+    while i < n {
+        t: Task[int] = fire g(i)
+        total = total + t.join()
+        i = i + 1
+    }
+    return total
+}
+
+def fired_nested_with_temporaries() -> int {
+    def g(s: str, xs: list[int]) -> int {
+        return len(s) + len(xs)
+    }
+    t: Task[int] = fire g("ab" + "c", [i for i in range(10)])
+    return t.join()
+}
+
+def fired_nested_returning_none() -> int {
+    log: list[int] = []
+    def g(x: int) -> None {
+        log.append(x)
+    }
+    t: Task[None] = fire g(1)
+    t.join()
+    return len(log)
+}
+
+def fired_nested_with_instance(n: int) -> int {
+    def g(box: FireBox) -> int {
+        return box.n
+    }
+    t: Task[int] = fire g(FireBox(n))
+    return t.join()
+}
+
+def run_callable(f: Callable[[], int]) -> int {
+    return f()
+}
+
+def fired_module_function_with_bare_lambda_argument() -> int {
+    t: Task[int] = fire run_callable(lambda () -> int { return 5 })
+    return t.join()
+}
+
+def apply_twice(f: Callable[[int], int], x: int) -> int {
+    return f(f(x))
+}
+
+def module_double(x: int) -> int {
+    return x * 2
+}
+
+def fired_module_function_with_bare_function_argument() -> int {
+    t: Task[int] = fire apply_twice(module_double, 3)
+    return t.join()
+}
+
+def nested_task_source() -> Task[int] {
+    def g(x: int) -> int {
+        return x * 10
+    }
+    return fire g(3)
+}
+
+class NestedDefFireTests(TestCase) {
+    def test_fire_of_a_nested_def() {
+        self.assertEqual(fired_nested_plain(), 20)
+    }
+
+    def test_fire_of_a_nested_def_with_defaults_and_keywords() {
+        self.assertEqual(fired_nested_with_default(), 24)
+        self.assertEqual(fired_nested_with_keyword(), "1bz1yc")
+    }
+
+    def test_fire_of_a_capturing_nested_def() {
+        self.assertEqual(fired_nested_capturing(10), 11)
+        self.assertEqual(fired_nested_capturing_heap("hi"), "hi!")
+    }
+
+    def test_fire_of_callables_held_in_variables() {
+        self.assertEqual(fired_lambda_variable(), 20)
+        self.assertEqual(fired_module_function_variable(), 20)
+        self.assertEqual(fired_then_rebound(), 110)
+        self.assertEqual(fired_module_function_with_bare_lambda_argument(), 5)
+        self.assertEqual(fired_module_function_with_bare_function_argument(), 12)
+    }
+
+    def test_fire_of_a_nested_def_many_rounds() {
+        self.assertEqual(fired_nested_in_loop(FIRE_ROUNDS), FIRE_ROUNDS * (FIRE_ROUNDS - 1) // 2 + FIRE_ROUNDS)
+        i: int = 0
+        while i < FIRE_FEW {
+            self.assertEqual(fired_nested_capturing_heap("p" + str(i)), "p" + str(i) + "!")
+            self.assertEqual(fired_nested_with_temporaries(), 13)
+            self.assertEqual(fired_nested_with_keyword(), "1bz1yc")
+            i = i + 1
+        }
+    }
+
+    def test_fire_with_none_return_instance_argument_and_escaping_task() {
+        self.assertEqual(fired_nested_returning_none(), 1)
+        self.assertEqual(fired_nested_with_instance(10), 10)
+        t: Task[int] = nested_task_source()
+        self.assertEqual(t.join(), 30)
+    }
+}
+
+
 main([NestedAttrIterationTests(), NestedAttrStoreTest(), NestedSubscriptStore(),
-      CycleTests(), NonAsciiContainerTests(), GetattrTests(), NestedDefaultArgTests()])
+      CycleTests(), NonAsciiContainerTests(), GetattrTests(), NestedDefaultArgTests(),
+      NestedDefFireTests()])

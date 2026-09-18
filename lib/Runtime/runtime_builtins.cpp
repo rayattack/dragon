@@ -1177,4 +1177,11 @@ void dragon_decref_callable(void* p) {
     dragon_decref(p);
 }
 
+void dragon_share_callable(void* p) {
+    if (!p) return;
+    DragonObjectHeader* h = (DragonObjectHeader*)p;
+    if (h->type_tag != DRAGON_TAG_CLOSURE) return;
+    dragon_mark_shared_deep(p);
+}
+
 }
