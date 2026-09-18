@@ -360,7 +360,142 @@ def shout(words: list[str]) -> list[str] {
     return [w + "!" for w in words]
 }
 
+
+const COMP_SMALL: int = 30
+const COMP_MID: int = 300
+const COMP_LARGE: int = 3000
+const COMP_BOOM: int = 7
+const COMP_DIGITS_3000: int = 10890
+
+def comp_digits(n: int) -> int {
+    return sum([len(str(i)) for i in range(n)])
+}
+
+def comp_explode(i: int) -> int {
+    if i == COMP_BOOM { raise ValueError("boom") }
+    return i
+}
+
+def comp_pick_boxed(flag: bool) -> int | list[int] {
+    if flag { return [i for i in range(COMP_MID)] }
+    return 1
+}
+
+class CompEqBox {
+    n: int
+
+    def (n: int) {
+        self.n = n
+    }
+
+    def __eq__(other: list[int]) -> bool {
+        return len(other) == self.n
+    }
+}
+
+def comp_list_of(n: int) -> list[int] {
+    return [i for i in range(n)]
+}
+
+def comp_dunder_rounds() -> int {
+    hits: int = 0
+    i: int = 0
+    while i < COMP_MID {
+        if CompEqBox(COMP_SMALL) == [x for x in range(COMP_SMALL)] { hits = hits + 1 }
+        if CompEqBox(COMP_SMALL) == comp_list_of(COMP_SMALL) { hits = hits + 1 }
+        if CompEqBox(COMP_SMALL) != comp_list_of(2) { hits = hits + 1 }
+        i = i + 1
+    }
+    return hits
+}
+
+def comp_pairs_equal() -> bool {
+    return [i for i in range(5)] == [i for i in range(5)]
+}
+
+def comp_items_sum() -> int {
+    n: int = 0
+    for k, v in {i: i for i in range(COMP_SMALL)}.items() {
+        n = n + k - v
+    }
+    return n
+}
+
 class ComprehensionOwnership(TestCase) {
+    def test_comprehension_consumed_by_every_builtin() {
+        for n in [COMP_SMALL, COMP_MID, COMP_LARGE] {
+            self.assertEqual(sum([i for i in range(n)]), n * (n - 1) // 2)
+            self.assertEqual(len([i for i in range(n)]), n)
+            self.assertEqual(max([i for i in range(n)]), n - 1)
+            self.assertEqual(min([i for i in range(n)]), 0)
+            self.assertEqual(any([i == n - 1 for i in range(n)]), True)
+            self.assertEqual(all([i < n for i in range(n)]), True)
+            self.assertEqual(len(sorted([n - i for i in range(n)])), n)
+            self.assertEqual(len("".join([str(i) for i in range(n)])) > 0, True)
+            self.assertEqual(len({i: i for i in range(n)}), n)
+            self.assertEqual(len({i % COMP_SMALL for i in range(n)}), COMP_SMALL)
+        }
+        self.assertEqual(comp_digits(COMP_LARGE), COMP_DIGITS_3000)
+    }
+
+    def test_comprehension_as_receiver_subscript_membership_and_fstring() {
+        self.assertEqual([i for i in range(COMP_MID)][COMP_MID - 1], COMP_MID - 1)
+        self.assertEqual([i for i in range(COMP_MID)].count(2), 1)
+        self.assertEqual((COMP_MID - 1) in [i for i in range(COMP_MID)], True)
+        self.assertEqual(len(f"{[i for i in range(COMP_SMALL)]}") > COMP_SMALL, True)
+        self.assertEqual(str([i for i in range(2)]), "[0, 1]")
+    }
+
+    def test_comprehension_in_operators_ternary_and_boxed_return() {
+        xs: list[int] = [1]
+        xs += [i for i in range(COMP_MID)]
+        self.assertEqual(len(xs), COMP_MID + 1)
+        self.assertEqual(len([i for i in range(COMP_MID)] + [i for i in range(COMP_SMALL)]), COMP_MID + COMP_SMALL)
+        self.assertEqual(len(xs + [i for i in range(COMP_SMALL)]), COMP_MID + 1 + COMP_SMALL)
+        self.assertEqual(comp_pairs_equal(), True)
+        self.assertEqual([i for i in range(COMP_SMALL)] != [i for i in range(2)], True)
+        picked: list[int] = [i for i in range(COMP_MID)] if len(xs) > 0 else xs
+        self.assertEqual(len(picked), COMP_MID)
+        other: list[int] = xs if len(xs) == 0 else [i for i in range(COMP_SMALL)]
+        self.assertEqual(len(other), COMP_SMALL)
+        boxed: int | list[int] = comp_pick_boxed(True)
+        self.assertEqual(str(boxed) != "", True)
+    }
+
+    def test_comprehension_whose_element_raises_midway() {
+        caught: int = 0
+        i: int = 0
+        while i < COMP_MID {
+            try {
+                n: int = sum([comp_explode(j) for j in range(COMP_SMALL)])
+            } except ValueError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, COMP_MID)
+    }
+
+    def test_comprehension_and_call_results_consumed_by_a_user_eq() {
+        self.assertEqual(comp_dunder_rounds(), COMP_MID * 3)
+    }
+
+    def test_dict_comprehension_consumed_through_items() {
+        i: int = 0
+        while i < COMP_MID {
+            self.assertEqual(comp_items_sum(), 0)
+            i = i + 1
+        }
+    }
+
+    def test_loop_over_a_comprehension() {
+        n: int = 0
+        for x in [i for i in range(COMP_LARGE)] {
+            n = n + x
+        }
+        self.assertEqual(n, COMP_LARGE * (COMP_LARGE - 1) // 2)
+    }
+
     def test_genexpr_over_heap_strings() {
         names: list[str] = []
         i: int = 0

@@ -350,6 +350,7 @@ void CodeGen::visit(ListCompExpr& node) {
     auto* listAlloca = impl_->createEntryAlloca(func, "__complist", impl_->i8PtrType);
     impl_->builder->CreateStore(list, listAlloca);
 
+    auto* compCleanupBase = impl_->emitCleanupPushTemp(list, Impl::DCLEAN_OBJ);
     emitCompLoopNest(
         node.iterable.get(), {node.varName}, node.extraClauses, "comp",
         "__compidx",
@@ -361,7 +362,8 @@ void CodeGen::visit(ListCompExpr& node) {
             bindCompElemVar(node.iterable.get(), node.varName, collVal, curIdx);
         });
 
-    impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
+    impl_->emitCleanupPopTemp(compCleanupBase);
+    impl_->lastValue = list;
 }
 
 void CodeGen::visit(DictCompExpr& node) {
@@ -450,6 +452,7 @@ void CodeGen::visit(DictCompExpr& node) {
         }
     };
 
+    auto* compCleanupBase = impl_->emitCleanupPushTemp(dict, Impl::DCLEAN_OBJ);
     emitCompLoopNest(
         node.iterable.get(), node.varNames, node.extraClauses, "dcomp",
         "__dcompidx", emitInnermostBody,
@@ -503,7 +506,8 @@ void CodeGen::visit(DictCompExpr& node) {
             }
         });
 
-    impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, dictAlloca);
+    impl_->emitCleanupPopTemp(compCleanupBase);
+    impl_->lastValue = dict;
 }
 
 void CodeGen::visit(SetCompExpr& node) {
@@ -571,6 +575,7 @@ void CodeGen::visit(SetCompExpr& node) {
         }
     };
 
+    auto* compCleanupBase = impl_->emitCleanupPushTemp(set, Impl::DCLEAN_OBJ);
     emitCompLoopNest(
         node.iterable.get(), {node.varName}, node.extraClauses, "scomp",
         "__scompidx", emitInnermostBody,
@@ -578,7 +583,8 @@ void CodeGen::visit(SetCompExpr& node) {
             bindCompElemVar(node.iterable.get(), node.varName, collVal, curIdx);
         });
 
-    impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, setAlloca);
+    impl_->emitCleanupPopTemp(compCleanupBase);
+    impl_->lastValue = set;
 }
 
 void CodeGen::visit(GeneratorExpr& node) {
@@ -602,6 +608,7 @@ void CodeGen::visit(GeneratorExpr& node) {
     auto* listAlloca = impl_->createEntryAlloca(func, "__genlist", impl_->i8PtrType);
     impl_->builder->CreateStore(list, listAlloca);
 
+    auto* compCleanupBase = impl_->emitCleanupPushTemp(list, Impl::DCLEAN_OBJ);
     emitCompLoopNest(
         node.iterable.get(), {node.varName}, node.extraClauses, "gen",
         "__genidx",
@@ -613,6 +620,7 @@ void CodeGen::visit(GeneratorExpr& node) {
             bindCompElemVar(node.iterable.get(), node.varName, collVal, curIdx);
         });
 
-    impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
+    impl_->emitCleanupPopTemp(compCleanupBase);
+    impl_->lastValue = list;
 }
 }

@@ -313,6 +313,7 @@ void CodeGen::visit(BinaryExpr& node) {
         if (!dunder.empty()) {
             if (impl_->hasDunder(lhsClassName, dunder)) {
                 auto* result = impl_->callDunder(lhsClassName, dunder, lhs, {rhs});
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 if (isComparison && result->getType() == impl_->i64Type)
                     result = impl_->builder->CreateICmpNE(result, llvm::ConstantInt::get(impl_->i64Type, 0));
                 impl_->lastValue = result;
@@ -320,6 +321,7 @@ void CodeGen::visit(BinaryExpr& node) {
             }
             if (dunder == "__ne__" && impl_->hasDunder(lhsClassName, "__eq__")) {
                 auto* eqResult = impl_->callDunder(lhsClassName, "__eq__", lhs, {rhs});
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 if (eqResult->getType() == impl_->i64Type)
                     eqResult = impl_->builder->CreateICmpNE(eqResult, llvm::ConstantInt::get(impl_->i64Type, 0));
                 impl_->lastValue = impl_->builder->CreateNot(eqResult, "ne");
@@ -327,6 +329,7 @@ void CodeGen::visit(BinaryExpr& node) {
             }
             if (dunder == "__gt__" && impl_->hasDunder(lhsClassName, "__lt__")) {
                 auto* result = impl_->callDunder(lhsClassName, "__lt__", rhs, {lhs});
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 if (result->getType() == impl_->i64Type)
                     result = impl_->builder->CreateICmpNE(result, llvm::ConstantInt::get(impl_->i64Type, 0));
                 impl_->lastValue = result;
@@ -334,6 +337,7 @@ void CodeGen::visit(BinaryExpr& node) {
             }
             if (dunder == "__ge__" && impl_->hasDunder(lhsClassName, "__lt__")) {
                 auto* ltResult = impl_->callDunder(lhsClassName, "__lt__", lhs, {rhs});
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 if (ltResult->getType() == impl_->i64Type)
                     ltResult = impl_->builder->CreateICmpNE(ltResult, llvm::ConstantInt::get(impl_->i64Type, 0));
                 impl_->lastValue = impl_->builder->CreateNot(ltResult, "ge");
@@ -344,6 +348,7 @@ void CodeGen::visit(BinaryExpr& node) {
                 if (ltResult->getType() == impl_->i64Type)
                     ltResult = impl_->builder->CreateICmpNE(ltResult, llvm::ConstantInt::get(impl_->i64Type, 0));
                 auto* eqResult = impl_->callDunder(lhsClassName, "__eq__", lhs, {rhs});
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 if (eqResult->getType() == impl_->i64Type)
                     eqResult = impl_->builder->CreateICmpNE(eqResult, llvm::ConstantInt::get(impl_->i64Type, 0));
                 impl_->lastValue = impl_->builder->CreateOr(ltResult, eqResult, "le");
@@ -351,10 +356,12 @@ void CodeGen::visit(BinaryExpr& node) {
             }
             if (dunder == "__eq__") {
                 impl_->lastValue = impl_->builder->CreateICmpEQ(lhs, rhs, "ptreq");
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 return;
             }
             if (dunder == "__ne__") {
                 impl_->lastValue = impl_->builder->CreateICmpNE(lhs, rhs, "ptrne");
+                releaseOwnedComparisonOperands(node, lhs, rhs);
                 return;
             }
         }
@@ -759,6 +766,7 @@ void CodeGen::visit(BinaryExpr& node) {
             }
             auto* eqI64 = impl_->builder->CreateCall(
                 impl_->runtimeFuncs[fnName], {lhs, rhs}, "container.eq");
+            releaseOwnedComparisonOperands(node, lhs, rhs);
             auto* eqBool = impl_->builder->CreateICmpNE(
                 eqI64, llvm::ConstantInt::get(impl_->i64Type, 0), "container.eq.bool");
             impl_->lastValue = (op == TokenType::EQUAL_EQUAL)

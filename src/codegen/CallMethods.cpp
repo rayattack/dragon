@@ -1662,7 +1662,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                              !Impl::isBorrowedHeapExpr(attr.object.get()) &&
                              impl_->isOwnedPtrResult(obj);
         static const std::set<std::string> kDictRecvDrainOk = {
-            "pop", "popitem", "clear", "update"};
+            "pop", "popitem", "clear", "update", "items", "keys", "values"};
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         std::vector<llvm::Value*> argTempBases;
         if (ownedDictRecv && kDictRecvDrainOk.count(method))
