@@ -649,4 +649,83 @@ class ByteArraySliceAssignRC(TestCase) {
 }
 
 
-main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC()])
+def first_tag_index(n: int) -> int {
+    i: int = 0
+    for c in heap_ascii(n) {
+        if c == "-" {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+
+def count_until_tail(n: int) -> int {
+    seen: int = 0
+    for c in heap_wide(n) {
+        if c == "t" {
+            break
+        }
+        seen = seen + 1
+    }
+    return seen
+}
+
+
+class ForIterTempStrRC(TestCase) {
+    def test_loop_over_a_returned_ascii_string_is_released() {
+        i: int = 0
+        while i < 3000 {
+            n: int = 0
+            for c in heap_ascii(i) {
+                n = n + 1
+            }
+            self.assertEqual(n, 35)
+            i = i + 1
+        }
+    }
+
+    def test_loop_over_a_returned_wide_string_is_released() {
+        i: int = 0
+        while i < 3000 {
+            n: int = 0
+            for c in heap_wide(i) {
+                n = n + 1
+            }
+            self.assertEqual(n, len(WIDE) + 6)
+            i = i + 1
+        }
+    }
+
+    def test_return_from_inside_the_loop_releases_the_iterable() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(first_tag_index(i), 7)
+            i = i + 1
+        }
+    }
+
+    def test_break_from_inside_the_loop_releases_the_iterable() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(count_until_tail(i), len(WIDE) + 2)
+            i = i + 1
+        }
+    }
+
+    def test_loop_over_a_concatenation_is_released() {
+        i: int = 0
+        while i < 3000 {
+            n: int = 0
+            for c in heap_ascii(i) + heap_wide(i) {
+                n = n + 1
+            }
+            self.assertEqual(n, 35 + len(WIDE) + 6)
+            i = i + 1
+        }
+    }
+}
+
+
+main([StrIndexArgRcTests(), SliceReturnRcTests(), StrReturnOwnershipTest(), BytesAugAssignRC(), InOperatorProbe(), TernaryMixedArmsRC(), FwdRefArgDrainRC(), BorrowArgRcTests(), StaticArgRcTests(), CrossModuleArgRcTests(), EncodeBorrowRC(), ByteArraySliceAssignRC(), ForIterTempStrRC()])

@@ -784,10 +784,18 @@ void CodeGen::visit(ForStmt& node) {
          node.iterable->type &&
          (node.iterable->type->kind() == Type::Kind::List ||
           node.iterable->type->kind() == Type::Kind::Bytes));
+    bool ownedStrIter =
+        isStrIterable && node.iterable &&
+        !Impl::isBorrowedHeapExpr(node.iterable.get()) &&
+        impl_->isOwnedStrResult(iterableVal);
     if (isDictKeysIterable || isDictItemsIterable || ownedContainerIter) {
         impl_->setVar(iterName, iterAlloca, Impl::VarKind::List);
         impl_->emitCleanupPush(iterName, iterableVal,
                                impl_->cleanupKindFor(Impl::VarKind::List));
+    } else if (ownedStrIter) {
+        impl_->setVar(iterName, iterAlloca, Impl::VarKind::Str);
+        impl_->emitCleanupPush(iterName, iterableVal,
+                               impl_->cleanupKindFor(Impl::VarKind::Str));
     }
 
     auto* idxVar = impl_->createEntryAlloca(func, "__i", impl_->i64Type);
