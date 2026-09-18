@@ -213,6 +213,7 @@ public:
     std::unique_ptr<Expr> object;
     std::string attribute;
     bool isDubMarked = false;
+    bool isPropertyAccess = false;
     void accept(ASTVisitor& visitor) override;
 };
 

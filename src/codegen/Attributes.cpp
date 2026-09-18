@@ -488,6 +488,7 @@ void CodeGen::visit(AttributeExpr& node) {
                         obj = impl_->builder->CreateIntToPtr(obj, impl_->i8PtrType);
                     impl_->lastValue = impl_->normalizeIntC(
                         impl_->builder->CreateCall(getterFn, {obj}, "propget"));
+                    node.isPropertyAccess = true;
                     return;
                 }
             }
@@ -548,6 +549,7 @@ void CodeGen::visit(AttributeExpr& node) {
                         obj = impl_->builder->CreateIntToPtr(obj, impl_->i8PtrType);
                     impl_->lastValue = impl_->normalizeIntC(
                         impl_->builder->CreateCall(getterFn, {obj}, "propget"));
+                    node.isPropertyAccess = true;
                     Impl::VarKind rd =
                         impl_->ownedTempDrainKind(node.object.get(), obj);
                     if (rd != Impl::VarKind::Other)

@@ -1333,6 +1333,7 @@ struct CodeGen::Impl {
             return !nm->isMoveMarked;
         }
         if (auto* at = dynamic_cast<AttributeExpr*>(expr)) {
+            if (at->isPropertyAccess) return false;
             return !dynamic_cast<CallExpr*>(at->object.get());
         }
         return false;
