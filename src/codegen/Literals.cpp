@@ -17,7 +17,8 @@ void CodeGen::visit(StringLiteral& node) {
         for (auto& part : node.fstringParts) {
             lastPartBorrowedStr = false;
             if (part.kind == FStringPart::Kind::Literal) {
-                std::string processed = impl_->processEscapes(part.literal, node.isRaw);
+                std::string processed = impl_->processEscapes(
+                    part.literal, node.isRaw, false, node.location());
                 parts.push_back(impl_->emitStringLiteralBytes(processed));
                 continue;
             }
@@ -162,10 +163,11 @@ void CodeGen::visit(StringLiteral& node) {
     }
     if (node.isBytes) {
         impl_->lastValue = impl_->emitBytesLiteral(
-            impl_->processEscapes(node.value, node.isRaw));
+            impl_->processEscapes(node.value, node.isRaw, true, node.location()));
         return;
     }
-    std::string processed = impl_->processEscapes(node.value, node.isRaw);
+    std::string processed =
+        impl_->processEscapes(node.value, node.isRaw, false, node.location());
     impl_->lastValue = impl_->emitStringLiteralBytes(processed);
 }
 

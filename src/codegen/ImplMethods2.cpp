@@ -1966,50 +1966,126 @@ llvm::Value* CodeGen::Impl::emitHashOfValue(Expr* argExpr, llvm::Value* arg,
         return builder->CreateCall(runtimeFuncs["dragon_hash_int"], {arg}, "hash");
     }
 
-std::string CodeGen::Impl::processEscapes(const std::string& raw, bool isRaw) {
+static int escapeHexValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool readEscapeHex(const std::string& raw, size_t at, size_t digits,
+                          uint32_t& value) {
+    if (at + digits > raw.size()) return false;
+    value = 0;
+    for (size_t k = 0; k < digits; ++k) {
+        int v = escapeHexValue(raw[at + k]);
+        if (v < 0) return false;
+        value = (value << 4) | (uint32_t)v;
+    }
+    return true;
+}
+
+static void appendUtf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += (char)cp;
+    } else if (cp < 0x800) {
+        out += (char)(0xC0 | (cp >> 6));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += (char)(0xE0 | (cp >> 12));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else {
+        out += (char)(0xF0 | (cp >> 18));
+        out += (char)(0x80 | ((cp >> 12) & 0x3F));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+std::string CodeGen::Impl::processEscapes(const std::string& raw, bool isRaw,
+                                          bool isBytes, SourceLocation loc) {
         if (isRaw) return raw;
         std::string result;
         result.reserve(raw.size());
+        auto emitCodePoint = [&](uint32_t cp) {
+            if (isBytes) result += (char)cp;
+            else appendUtf8(result, cp);
+        };
         for (size_t i = 0; i < raw.size(); i++) {
-            if (raw[i] == '\\' && i + 1 < raw.size()) {
-                char next = raw[i + 1];
-                switch (next) {
-                    case 'n': result += '\n'; i++; break;
-                    case 't': result += '\t'; i++; break;
-                    case 'r': result += '\r'; i++; break;
-                    case '\\': result += '\\'; i++; break;
-                    case '\'': result += '\''; i++; break;
-                    case '"': result += '"'; i++; break;
-                    case '0': result += '\0'; i++; break;
-                    case 'a': result += '\a'; i++; break;
-                    case 'b': result += '\b'; i++; break;
-                    case 'f': result += '\f'; i++; break;
-                    case 'v': result += '\v'; i++; break;
-                    case 'x': {
-                        if (i + 3 < raw.size()) {
-                            char h1 = raw[i + 2], h2 = raw[i + 3];
-                            auto hexval = [](char c) -> int {
-                                if (c >= '0' && c <= '9') return c - '0';
-                                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-                                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-                                return -1;
-                            };
-                            int v1 = hexval(h1), v2 = hexval(h2);
-                            if (v1 >= 0 && v2 >= 0) {
-                                result += (char)((v1 << 4) | v2);
-                                i += 3;
-                            } else {
-                                result += raw[i];
-                            }
-                        } else {
-                            result += raw[i];
+            if (raw[i] != '\\' || i + 1 >= raw.size()) {
+                result += raw[i];
+                continue;
+            }
+            char next = raw[i + 1];
+            switch (next) {
+                case 'n': result += '\n'; i++; break;
+                case 't': result += '\t'; i++; break;
+                case 'r': result += '\r'; i++; break;
+                case '\\': result += '\\'; i++; break;
+                case '\'': result += '\''; i++; break;
+                case '"': result += '"'; i++; break;
+                case 'a': result += '\a'; i++; break;
+                case 'b': result += '\b'; i++; break;
+                case 'f': result += '\f'; i++; break;
+                case 'v': result += '\v'; i++; break;
+                case 'x': {
+                    uint32_t cp = 0;
+                    if (!readEscapeHex(raw, i + 2, 2, cp)) {
+                        addError("truncated \\xXX escape in literal", loc);
+                        return result;
+                    }
+                    emitCodePoint(cp);
+                    i += 3;
+                    break;
+                }
+                case 'u':
+                case 'U': {
+                    if (isBytes) { result += raw[i]; result += next; i++; break; }
+                    size_t digits = next == 'u' ? 4 : 8;
+                    uint32_t cp = 0;
+                    if (!readEscapeHex(raw, i + 2, digits, cp)) {
+                        addError(std::string("truncated \\") + next +
+                                     std::string(digits, 'X') + " escape in literal", loc);
+                        return result;
+                    }
+                    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+                        addError("escape names a code point that is not a Unicode "
+                                 "scalar value", loc);
+                        return result;
+                    }
+                    appendUtf8(result, cp);
+                    i += 1 + digits;
+                    break;
+                }
+                case 'N': {
+                    if (isBytes) { result += raw[i]; result += next; i++; break; }
+                    addError("\\N{name} escapes are not supported; write the character "
+                             "or its \\uXXXX escape", loc);
+                    return result;
+                }
+                default: {
+                    if (next >= '0' && next <= '7') {
+                        uint32_t cp = 0;
+                        size_t k = 0;
+                        while (k < 3 && i + 1 + k < raw.size() &&
+                               raw[i + 1 + k] >= '0' && raw[i + 1 + k] <= '7') {
+                            cp = (cp << 3) | (uint32_t)(raw[i + 1 + k] - '0');
+                            ++k;
                         }
+                        if (isBytes && cp > 0xFF) {
+                            addError("octal escape does not fit in a byte", loc);
+                            return result;
+                        }
+                        emitCodePoint(cp);
+                        i += k;
                         break;
                     }
-                    default: result += raw[i]; result += next; i++; break;
+                    result += raw[i];
+                    result += next;
+                    i++;
+                    break;
                 }
-            } else {
-                result += raw[i];
             }
         }
         return result;

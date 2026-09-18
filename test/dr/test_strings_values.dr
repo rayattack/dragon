@@ -1698,8 +1698,77 @@ class ByteArrayTests(TestCase) {
 }
 
 
+def escaped_wide_word() -> str {
+    return "".join(["caf", "\u00e9", "s"])
+}
+
+
+class EscapeSequenceTests(TestCase) {
+    def test_u_escape_is_one_character() {
+        self.assertEqual(len("\u00e9"), 1)
+        self.assertEqual("\u00e9", "é")
+        self.assertEqual(ord("\u4e2d"), 20013)
+        self.assertEqual("caf\u00e9s"[3], "é")
+        self.assertEqual(len("caf\u00e9s"), 5)
+    }
+
+    def test_big_u_escape_is_one_character() {
+        self.assertEqual(len("\U0001F409"), 1)
+        self.assertEqual("\U0001F409", "🐉")
+        self.assertEqual(ord("\U0001F409"), 128009)
+        self.assertEqual("\U00000041", "A")
+    }
+
+    def test_x_escape_is_a_code_point_in_a_str() {
+        self.assertEqual("\x41", "A")
+        self.assertEqual("\xe9", "é")
+        self.assertEqual(len("\xe9"), 1)
+        self.assertEqual("\xe9".encode("utf-8"), b"\xc3\xa9")
+    }
+
+    def test_x_escape_is_a_byte_in_bytes() {
+        self.assertEqual(len(b"\xe9"), 1)
+        self.assertEqual(b"\xe9"[0], 233)
+        self.assertEqual(b"\x00\xff"[1], 255)
+    }
+
+    def test_u_escape_is_verbatim_in_bytes() {
+        self.assertEqual(len(b"\u00e9"), 6)
+        self.assertEqual(b"\u00e9", b"\\u00e9")
+        self.assertEqual(len(b"\U0001F409"), 10)
+    }
+
+    def test_raw_strings_keep_escapes() {
+        self.assertEqual(len(r"\u00e9"), 6)
+        self.assertEqual(len(r"\x41"), 4)
+        self.assertEqual(r"\n", "\\n")
+    }
+
+    def test_octal_escapes() {
+        self.assertEqual("\101", "A")
+        self.assertEqual("\012", "\n")
+        self.assertEqual("\7a", "\x07a")
+        self.assertEqual(b"\101"[0], 65)
+    }
+
+    def test_escapes_inside_f_strings_and_repeats() {
+        n: int = 2
+        self.assertEqual(f"{n}\u00e9", "2é")
+        self.assertEqual("\u00e9" * 3, "ééé")
+        self.assertEqual(len("\U0001F409" * 2), 2)
+    }
+
+    def test_escaped_and_typed_characters_are_the_same_string() {
+        self.assertEqual(escaped_wide_word(), "cafés")
+        self.assertEqual(escaped_wide_word().encode("utf-8"), "cafés".encode("utf-8"))
+        self.assertEqual(hash("\u00e9"), hash("é"))
+    }
+}
+
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
       BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests(),
-      BytesLiteralImmortalTests(), ByteArrayTests()])
+      BytesLiteralImmortalTests(), ByteArrayTests(),
+      EscapeSequenceTests()])

@@ -840,3 +840,46 @@ print(str(len(set())))
 print(str(len(deque(xs))))
 print(str(len(dict.fromkeys(ss, 0))))
 ```
+
+
+#### :truncated_u_escape_is_rejected
+
+A `\u` escape needs exactly four hex digits; three must not silently become text.
+
+```dr
+print("caf\u00es")
+```
+
+#### :out_of_range_big_u_escape_is_rejected
+
+`\U00110000` is past the last Unicode scalar value.
+
+```dr
+print("\U00110000")
+```
+
+#### :surrogate_escape_is_rejected
+
+A lone surrogate is not a scalar value and cannot be encoded as UTF-8.
+
+```dr
+print("\ud800")
+```
+
+#### :truncated_x_escape_is_rejected
+
+```dr
+print("\x4")
+```
+
+#### :named_escape_is_rejected
+
+```dr
+print("\N{DRAGON}")
+```
+
+#### :truncated_x_escape_in_bytes_is_rejected
+
+```dr
+print(len(b"\xf"))
+```

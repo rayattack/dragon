@@ -654,7 +654,8 @@ void CodeGen::visit(BinaryExpr& node) {
                 auto* countConst = llvm::dyn_cast<llvm::ConstantInt>(countVal);
                 if (countConst && !strLit->isFString && !strLit->isBytes) {
                     int64_t c = countConst->getSExtValue();
-                    std::string unit = impl_->processEscapes(strLit->value, strLit->isRaw);
+                    std::string unit = impl_->processEscapes(
+                        strLit->value, strLit->isRaw, false, strLit->location());
                     constexpr uint64_t kMaxFoldBytes = 64 * 1024;
                     bool overLimit = c > 0 && !unit.empty() &&
                         (uint64_t)c > kMaxFoldBytes / unit.size();

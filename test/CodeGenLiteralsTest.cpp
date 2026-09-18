@@ -616,3 +616,33 @@ TEST(CodeGenE2E, StaticBuiltinResultsAreTyped) {
     auto output = compileAndRun(code("static_builtin_results_are_typed"));
     EXPECT_EQ(output, "2\n2\n2\n0\n2\n2\n");
 }
+
+static void expectEscapeRejected(const std::string& block, const std::string& message) {
+    std::string ir = generateIR(code(block));
+    EXPECT_NE(ir.find("<codegen failed"), std::string::npos) << block;
+    EXPECT_NE(ir.find(message), std::string::npos) << ir;
+}
+
+TEST(CodeGenLiteralsTest, TruncatedUnicodeEscapeIsRejected) {
+    expectEscapeRejected("truncated_u_escape_is_rejected", "truncated");
+}
+
+TEST(CodeGenLiteralsTest, OutOfRangeUnicodeEscapeIsRejected) {
+    expectEscapeRejected("out_of_range_big_u_escape_is_rejected", "scalar value");
+}
+
+TEST(CodeGenLiteralsTest, SurrogateEscapeIsRejected) {
+    expectEscapeRejected("surrogate_escape_is_rejected", "scalar value");
+}
+
+TEST(CodeGenLiteralsTest, TruncatedHexEscapeIsRejected) {
+    expectEscapeRejected("truncated_x_escape_is_rejected", "truncated");
+}
+
+TEST(CodeGenLiteralsTest, NamedEscapeIsRejected) {
+    expectEscapeRejected("named_escape_is_rejected", "not supported");
+}
+
+TEST(CodeGenLiteralsTest, TruncatedHexEscapeInBytesIsRejected) {
+    expectEscapeRejected("truncated_x_escape_in_bytes_is_rejected", "truncated");
+}

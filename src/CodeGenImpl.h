@@ -2378,7 +2378,8 @@ struct CodeGen::Impl {
     llvm::Value* emitHashOfValue(Expr* argExpr, llvm::Value* arg,
                                  const std::string& className);
 
-    std::string processEscapes(const std::string& raw, bool isRaw);
+    std::string processEscapes(const std::string& raw, bool isRaw,
+                               bool isBytes = false, SourceLocation loc = {});
 
     llvm::Function* getOrDeclareRuntime(const std::string& name,
                                          llvm::FunctionType* funcType);
