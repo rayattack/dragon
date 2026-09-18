@@ -2120,6 +2120,25 @@ def _shout(c: str) -> str {
 }
 
 
+def _call_bool(f: Callable[[], bool]) -> bool {
+    return f()
+}
+
+
+def count_with_nested_def(text: str) -> int {
+    n: int = 0
+    for c in text {
+        def is_lt() -> bool {
+            return c == "<"
+        }
+        if is_lt() {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+
 class CharValueProbe(TestCase) {
     def test_index_compare_matches_iteration_on_every_kind() {
         r: int = 0
@@ -2212,6 +2231,40 @@ class CharValueProbe(TestCase) {
         self.assertEqual(count_tags_by_iteration(s), 0)
         self.assertEqual(count_tags_by_index(s), 0)
         self.assertEqual(ord_sum_by_iteration(s), 0)
+    }
+
+    def test_character_captured_by_a_comparing_lambda() {
+        fns: list[Callable[[], bool]] = []
+        for c in "".join(["a", "é"]) {
+            fns.append(lambda () -> bool { return c == "é" })
+        }
+        self.assertEqual(fns[0](), False)
+        self.assertEqual(fns[1](), True)
+    }
+
+    def test_character_captured_by_a_nested_def() {
+        self.assertEqual(count_with_nested_def("".join(["a<", "b<"])), 2)
+        self.assertEqual(count_with_nested_def(wide_text()), 1)
+    }
+
+    def test_character_captured_by_a_fired_lambda() {
+        n: int = 0
+        for c in "".join(["a<", "b<"]) {
+            t: Task[bool] = fire _call_bool(lambda () -> bool { return c == "<" })
+            if t.join() {
+                n = n + 1
+            }
+        }
+        self.assertEqual(n, 2)
+    }
+
+    def test_character_captured_by_an_ord_lambda() {
+        fns: list[Callable[[], int]] = []
+        for c in "".join(["a", "b"]) {
+            fns.append(lambda () -> int { return ord(c) })
+        }
+        self.assertEqual(fns[0](), 97)
+        self.assertEqual(fns[1](), 98)
     }
 
     def test_character_escaping_to_a_fired_task() {

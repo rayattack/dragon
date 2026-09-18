@@ -100,6 +100,8 @@ struct CharLoopPredicates {
     std::function<bool(Expr*)> isCharOperand;
     std::function<bool(Expr*)> isStrLiteral;
     std::function<bool()> ordIsBuiltin;
+    std::function<bool(Expr*)> exprMentionsTarget;
+    std::function<bool(Stmt*)> stmtMentionsTarget;
 };
 
 class CharLoopUseScan : public DefaultASTVisitor {
@@ -117,6 +119,13 @@ public:
         if (node.name == name_) escapes = true;
         if (node.value) node.value->accept(*this);
     }
+
+    void visit(LambdaExpr& node) override { escapeIfMentioned(&node); }
+    void visit(FireExpr& node) override { escapeIfMentioned(&node); }
+    void visit(GeneratorExpr& node) override { escapeIfMentioned(&node); }
+    void visit(ThreadStmt& node) override { escapeIfMentioned(&node); }
+    void visit(FunctionDecl& node) override { escapeIfMentioned(&node); }
+    void visit(ClassDecl& node) override { escapeIfMentioned(&node); }
 
     void visit(BinaryExpr& node) override {
         auto op = node.op.type();
@@ -164,6 +173,14 @@ private:
         return n && n->name == name_;
     }
 
+    void escapeIfMentioned(Expr* closure) {
+        if (preds_.exprMentionsTarget(closure)) escapes = true;
+    }
+
+    void escapeIfMentioned(Stmt* closure) {
+        if (preds_.stmtMentionsTarget(closure)) escapes = true;
+    }
+
     const CharLoopPredicates& preds_;
     const std::string& name_;
 };
@@ -175,6 +192,8 @@ bool CodeGen::Impl::charLoopTargetStaysValue(ForStmt& node, const std::string& n
         [this](Expr* e) { return asStrSubscript(e) != nullptr || singleCodePointLiteral(e).has_value(); },
         [this](Expr* e) { return literalCodePoints(e).has_value(); },
         [this]() { return !calleeNameIsUserBound("ord"); },
+        [this, &name](Expr* e) { return nodeMentionsName(e, name); },
+        [this, &name](Stmt* s) { return nodeMentionsName(s, name); },
     };
     CharLoopUseScan scan(preds, name);
     for (auto& stmt : node.body) {
