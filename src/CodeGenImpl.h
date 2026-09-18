@@ -125,6 +125,8 @@ struct CodeGen::Impl {
         size_t scopeDepth;
         size_t tryFrameDepth = 0;
         size_t exitCleanupDepth = 0;
+        std::unordered_set<std::string> assignedNames;
+        llvm::Instruction* preheaderBr = nullptr;
     };
     std::stack<LoopInfo> loopStack;
 
@@ -828,9 +830,17 @@ struct CodeGen::Impl {
     SubscriptExpr* asStrSubscript(Expr* e);
     bool isCharValueSource(Expr* e);
     llvm::Value* emitCodePointLoad(llvm::Value* str, llvm::Value* len,
-                                   llvm::Value* kind, llvm::Value* index);
+                                   llvm::Value* kind, llvm::Value* index,
+                                   llvm::Instruction* cacheReset);
     llvm::Value* emitCodePointLoadInBounds(llvm::Value* str, llvm::Value* kind,
-                                           llvm::Value* index);
+                                           llvm::Value* index,
+                                           llvm::Instruction* cacheReset);
+    void collectAssignedNames(const std::vector<std::unique_ptr<Stmt>>& body,
+                              std::unordered_set<std::string>& out);
+    llvm::Instruction* sequentialCacheResetFor(Expr* strExpr);
+    llvm::Value* emitCodePointStep(llvm::Value* str, llvm::AllocaInst* cursor);
+    llvm::Value* emitCodePointAtOffset(llvm::Value* str, llvm::Value* offset,
+                                       llvm::Value** advanceOut);
     llvm::AllocaInst* lookupCharValueVar(const std::string& name);
     bool charLoopTargetStaysValue(ForStmt& node, const std::string& name);
     bool calleeNameIsUserBound(const std::string& name);
@@ -1066,6 +1076,14 @@ struct CodeGen::Impl {
             af = builder->CreateLoad(i32Ty, getActiveFramesGlobal(), "active.frames");
         }
         return builder->CreateICmpNE(af, llvm::ConstantInt::get(i32Ty, 0), "frame.live");
+    }
+
+    llvm::AllocaInst* createEntryAllocaInit(llvm::Function* func, const std::string& name,
+                                            llvm::Constant* init) {
+        llvm::IRBuilder<> tmp(&func->getEntryBlock(), func->getEntryBlock().begin());
+        auto* a = tmp.CreateAlloca(init->getType(), nullptr, name);
+        tmp.CreateStore(init, a);
+        return a;
     }
 
     llvm::AllocaInst* createEntryAllocaI32(llvm::Function* func,

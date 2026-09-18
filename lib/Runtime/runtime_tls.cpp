@@ -342,14 +342,14 @@ const char* dragon_tls_recv_str(void* handle, int64_t maxlen) {
     unsigned char* buf = (unsigned char*)dragon_malloc_nullable((size_t)maxlen);
     if (!buf) {
         DragonString* ds = dragon_string_alloc_raw(0);
-        ds->data[0] = '\0';
+        dragon_string_raw_finish(ds, 0);
         return ds->data;
     }
     int64_t got = dragon_tls_read(handle, buf, maxlen);
     if (got < 0) got = 0;
     DragonString* ds = dragon_string_alloc_raw(got);
     if (got > 0) memcpy(ds->data, buf, (size_t)got);
-    ds->data[got] = '\0';
+    dragon_string_raw_finish(ds, got);
     free(buf);
     return ds->data;
 }

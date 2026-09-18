@@ -1818,11 +1818,10 @@ llvm::Value* CodeGen::Impl::emitStringLiteralBytes(const std::string& bytes,
             auto* i32Ty = llvm::Type::getInt32Ty(ctx);
             auto* i64Ty = llvm::Type::getInt64Ty(ctx);
             const int64_t n = (int64_t)bytes.size();
-            auto* padTy  = llvm::ArrayType::get(i8Ty, 3);
             auto* dataTy = llvm::ArrayType::get(i8Ty, n + 1);
             auto* strTy = llvm::StructType::get(ctx, {
                 i64Ty, i8Ty, i8Ty, i16Ty, i32Ty,
-                i64Ty, i8Ty, padTy, i32Ty,
+                i64Ty, i32Ty, i32Ty,
                 dataTy
             }, false);
 
@@ -1832,15 +1831,15 @@ llvm::Value* CodeGen::Impl::emitStringLiteralBytes(const std::string& bytes,
                 gv = it->second;
             } else {
                 const int64_t IMMORTAL = (int64_t)0x4000000000000000LL;
+                const uint8_t kHeapAscii = 0x80 | 0x20;
                 auto* init = llvm::ConstantStruct::get(strTy, {
                     llvm::ConstantInt::get(i64Ty, IMMORTAL),
                     llvm::ConstantInt::get(i8Ty, 1),
-                    llvm::ConstantInt::get(i8Ty, 0x80),
+                    llvm::ConstantInt::get(i8Ty, kHeapAscii),
                     llvm::ConstantInt::get(i16Ty, 0),
                     llvm::ConstantInt::get(i32Ty, -1),
                     llvm::ConstantInt::get(i64Ty, n),
-                    llvm::ConstantInt::get(i8Ty, 1),
-                    llvm::ConstantAggregateZero::get(padTy),
+                    llvm::ConstantInt::get(i32Ty, (int32_t)n),
                     llvm::ConstantInt::get(i32Ty, (int32_t)n),
                     llvm::ConstantDataArray::getString(
                         ctx, llvm::StringRef(bytes.data(), bytes.size()), true)
@@ -1854,7 +1853,7 @@ llvm::Value* CodeGen::Impl::emitStringLiteralBytes(const std::string& bytes,
             }
             llvm::Constant* idx[] = {
                 llvm::ConstantInt::get(i32Ty, 0),
-                llvm::ConstantInt::get(i32Ty, 9),
+                llvm::ConstantInt::get(i32Ty, 8),
                 llvm::ConstantInt::get(i64Ty, 0),
             };
             return llvm::ConstantExpr::getInBoundsGetElementPtr(strTy, gv, idx);

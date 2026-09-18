@@ -1163,8 +1163,7 @@ const char* dragon_template_escape_html(const char* s) {
             default:   ds->data[j++] = b[i]; break;
         }
     }
-    ds->data[j] = '\0';
-    ds->len = (int64_t)j;
+    dragon_string_raw_finish(ds, (int64_t)j);
     if (owned) free(owned);
     return ds->data;
 }
@@ -1182,8 +1181,7 @@ const char* dragon_template_escape_sql(const char* s) {
         if (b[i] == '\'') { ds->data[j++] = '\''; ds->data[j++] = '\''; }
         else { ds->data[j++] = b[i]; }
     }
-    ds->data[j] = '\0';
-    ds->len = (int64_t)j;
+    dragon_string_raw_finish(ds, (int64_t)j);
     if (owned) free(owned);
     return ds->data;
 }
@@ -1207,8 +1205,7 @@ const char* dragon_template_escape_url(const char* s) {
             ds->data[j++] = hex[c & 0x0F];
         }
     }
-    ds->data[j] = '\0';
-    ds->len = (int64_t)j;
+    dragon_string_raw_finish(ds, (int64_t)j);
     if (owned) free(owned);
     return ds->data;
 }

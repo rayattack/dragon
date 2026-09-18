@@ -3,9 +3,75 @@
 
 extern "C" {
 
-static int64_t dragon_str_find_cp(const char* haystack, const char* needle, int64_t start);
-
 const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t step);
+const char* dragon_str_from_cp(uint32_t cp);
+
+typedef struct {
+    const char* s;
+    DragonString* ds;
+    int64_t nbytes;
+    int64_t cps;
+} DragonStrView;
+
+static inline DragonStrView dragon_str_view(const char* s) {
+    DragonStrView v;
+    v.s = s ? s : "";
+    v.ds = (s && dragon_is_heap_string(s)) ? dragon_string_from_data(s) : NULL;
+    v.nbytes = v.ds ? v.ds->nbytes : (int64_t)strlen(v.s);
+    v.cps = v.ds ? v.ds->len : -1;
+    return v;
+}
+
+static inline int64_t dragon_view_cps(DragonStrView* v) {
+    if (v->cps < 0) v->cps = dragon_str_cp_count(v->s, v->ds);
+    return v->cps;
+}
+
+static inline int dragon_view_is_ascii(const DragonStrView* v) {
+    if (v->ds) return dragon_str_ascii_flag(v->ds);
+    return dragon_ascii_prefix((const unsigned char*)v->s, v->nbytes) == v->nbytes;
+}
+
+static inline const char* dragon_str_from_range(DragonStrView* v, int64_t byte_start,
+                                                int64_t byte_stop) {
+    if (byte_stop <= byte_start) return dragon_string_alloc_ascii(0)->data;
+    return dragon_string_from_utf8(v->s + byte_start, byte_stop - byte_start);
+}
+
+static inline const char* dragon_str_copy_view(DragonStrView* v) {
+    return dragon_str_from_range(v, 0, v->nbytes);
+}
+
+typedef struct {
+    DragonString* s;
+    char* w;
+} DragonStrOut;
+
+static inline DragonStrOut dragon_str_out_begin(int64_t max_nbytes) {
+    DragonStrOut o;
+    o.s = dragon_string_alloc_utf8_raw(max_nbytes);
+    o.w = o.s->data;
+    return o;
+}
+
+static inline void dragon_str_out_cp(DragonStrOut* o, uint32_t cp) {
+    o->w += dragon_utf8_encode(cp, o->w);
+}
+
+static inline void dragon_str_out_bytes(DragonStrOut* o, const char* p, int64_t n) {
+    memcpy(o->w, p, (size_t)n);
+    o->w += n;
+}
+
+static inline void dragon_str_out_fill(DragonStrOut* o, char c, int64_t n) {
+    memset(o->w, c, (size_t)n);
+    o->w += n;
+}
+
+static inline const char* dragon_str_out_finish(DragonStrOut* o) {
+    dragon_string_finish_utf8(o->s, o->w - o->s->data);
+    return o->s->data;
+}
 
 static inline uint32_t cp_ascii_upper(uint32_t cp) {
     if (cp < 0x80) return (cp >= 'a' && cp <= 'z') ? cp - 32 : cp;
@@ -25,173 +91,136 @@ static inline int dragon_cp_is_strip_ws(uint32_t cp) {
     return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r';
 }
 
-static const char* dragon_str_strip_ws_impl(const char* s, int do_left, int do_right) {
-    if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    int64_t start = 0, stop = n;
-    if (do_left)  while (start < stop && dragon_cp_is_strip_ws(dragon_str_cp_at(s, ds, start))) start++;
-    if (do_right) while (stop > start && dragon_cp_is_strip_ws(dragon_str_cp_at(s, ds, stop - 1))) stop--;
-    return dragon_str_slice(s, start, stop, 1);
-}
-
-static const char* dragon_str_fold_ascii(const char* s, int64_t n, int upper) {
-    DragonString* out = dragon_string_alloc_raw(n);
-    const unsigned char* src = (const unsigned char*)s;
+static const char* dragon_str_fold_ascii(DragonStrView* v, int upper) {
+    DragonString* out = dragon_string_alloc_ascii(v->nbytes);
+    const unsigned char* src = (const unsigned char*)v->s;
     unsigned char* dst = (unsigned char*)out->data;
-    if (upper) {
-        for (int64_t i = 0; i < n; ++i) {
-            unsigned char c = src[i];
-            dst[i] = (unsigned char)(c - (unsigned char)(32 * (c >= 'a' && c <= 'z')));
-        }
-    } else {
-        for (int64_t i = 0; i < n; ++i) {
-            unsigned char c = src[i];
-            dst[i] = (unsigned char)(c + (unsigned char)(32 * (c >= 'A' && c <= 'Z')));
-        }
+    for (int64_t i = 0; i < v->nbytes; ++i) {
+        unsigned char c = src[i];
+        unsigned char lower = (unsigned char)(c + (unsigned char)(32 * (c >= 'A' && c <= 'Z')));
+        unsigned char upperc = (unsigned char)(c - (unsigned char)(32 * (c >= 'a' && c <= 'z')));
+        dst[i] = upper ? upperc : lower;
     }
-    out->data[n] = '\0';
     return out->data;
 }
 
 static const char* dragon_str_map_cp(const char* s, uint32_t (*xform)(uint32_t)) {
-    if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    if (!ds || ds->kind == 1) {
-        if (xform == cp_ascii_lower) return dragon_str_fold_ascii(s, n, 0);
-        if (xform == cp_ascii_upper) return dragon_str_fold_ascii(s, n, 1);
-        DragonString* out = dragon_string_alloc_raw(n);
-        for (int64_t i = 0; i < n; ++i)
-            out->data[i] = (char)xform((uint32_t)(unsigned char)s[i]);
-        out->data[n] = '\0';
-        return out->data;
+    DragonStrView v = dragon_str_view(s);
+    if (dragon_view_is_ascii(&v)) {
+        if (xform == cp_ascii_lower) return dragon_str_fold_ascii(&v, 0);
+        if (xform == cp_ascii_upper) return dragon_str_fold_ascii(&v, 1);
     }
-    const uint32_t* src = (const uint32_t*)ds->data;
-    uint32_t max_cp = 0;
-    DragonString* out = dragon_string_alloc_ucs4(n);
-    uint32_t* dst = (uint32_t*)out->data;
-    for (int64_t i = 0; i < n; ++i) {
-        uint32_t cp = xform(src[i]);
-        dst[i] = cp;
-        if (cp > max_cp) max_cp = cp;
-    }
-    if (max_cp < 0x80) {
-        DragonString* out1 = dragon_string_alloc_ascii(n);
-        for (int64_t i = 0; i < n; ++i) out1->data[i] = (char)dst[i];
-        free(out);
-        return out1->data;
-    }
-    return out->data;
+    DragonStrOut o = dragon_str_out_begin(v.nbytes * 2);
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
+    while (dragon_str_iter_next(&it, &cp)) dragon_str_out_cp(&o, xform(cp));
+    return dragon_str_out_finish(&o);
 }
 
 const char* dragon_str_upper(const char* s) { return dragon_str_map_cp(s, cp_ascii_upper); }
 const char* dragon_str_lower(const char* s) { return dragon_str_map_cp(s, cp_ascii_lower); }
 
-const char* dragon_str_strip(const char* s)  { return dragon_str_strip_ws_impl(s, 1, 1); }
-const char* dragon_str_lstrip(const char* s) { return dragon_str_strip_ws_impl(s, 1, 0); }
-const char* dragon_str_rstrip(const char* s) { return dragon_str_strip_ws_impl(s, 0, 1); }
-
-static inline int dragon_cp_in_set(uint32_t cp, const char* set, DragonString* set_ds) {
-    int64_t n = set_ds ? set_ds->len : (int64_t)strlen(set);
-    for (int64_t i = 0; i < n; ++i)
-        if (dragon_str_cp_at(set, set_ds, i) == cp) return 1;
-    return 0;
+static int64_t dragon_str_leading_bytes(DragonStrView* v, int (*pred)(uint32_t, void*), void* ctx) {
+    const unsigned char* base = (const unsigned char*)v->s;
+    const unsigned char* end = base + v->nbytes;
+    const unsigned char* q = base;
+    while (q < end) {
+        uint32_t cp;
+        int adv = dragon_utf8_next(q, end, &cp);
+        if (!pred(cp, ctx)) break;
+        q += adv;
+    }
+    return q - base;
 }
 
-static const char* dragon_str_strip_chars_impl(const char* s, const char* chars,
-                                               int do_left, int do_right) {
+static int64_t dragon_str_trailing_start(DragonStrView* v, int64_t from_byte,
+                                         int (*pred)(uint32_t, void*), void* ctx) {
+    const unsigned char* base = (const unsigned char*)v->s;
+    const unsigned char* end = base + v->nbytes;
+    const unsigned char* q = base + from_byte;
+    int64_t keep_end = from_byte;
+    while (q < end) {
+        uint32_t cp;
+        int adv = dragon_utf8_next(q, end, &cp);
+        q += adv;
+        if (!pred(cp, ctx)) keep_end = q - base;
+    }
+    return keep_end;
+}
+
+static int dragon_pred_strip_ws(uint32_t cp, void*) { return dragon_cp_is_strip_ws(cp); }
+
+static const char* dragon_str_strip_impl(const char* s, int do_left, int do_right,
+                                         int (*pred)(uint32_t, void*), void* ctx) {
     if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    DragonString* cds = dragon_is_heap_string(chars) ? dragon_string_from_data(chars) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    int64_t start = 0, stop = n;
-    if (do_left)  while (start < stop && dragon_cp_in_set(dragon_str_cp_at(s, ds, start), chars, cds)) start++;
-    if (do_right) while (stop > start && dragon_cp_in_set(dragon_str_cp_at(s, ds, stop - 1), chars, cds)) stop--;
-    return dragon_str_slice(s, start, stop, 1);
+    DragonStrView v = dragon_str_view(s);
+    int64_t start = do_left ? dragon_str_leading_bytes(&v, pred, ctx) : 0;
+    int64_t stop = do_right ? dragon_str_trailing_start(&v, start, pred, ctx) : v.nbytes;
+    return dragon_str_from_range(&v, start, stop);
+}
+
+const char* dragon_str_strip(const char* s)  { return dragon_str_strip_impl(s, 1, 1, dragon_pred_strip_ws, NULL); }
+const char* dragon_str_lstrip(const char* s) { return dragon_str_strip_impl(s, 1, 0, dragon_pred_strip_ws, NULL); }
+const char* dragon_str_rstrip(const char* s) { return dragon_str_strip_impl(s, 0, 1, dragon_pred_strip_ws, NULL); }
+
+static int dragon_pred_in_set(uint32_t cp, void* ctx) {
+    DragonStrView* set = (DragonStrView*)ctx;
+    DragonStrIter it = dragon_str_iter(set->s, set->ds);
+    uint32_t c;
+    while (dragon_str_iter_next(&it, &c))
+        if (c == cp) return 1;
+    return 0;
 }
 
 const char* dragon_str_strip_chars(const char* s, const char* chars) {
     if (!s) return dragon_string_alloc("", 0);
     if (!chars) return dragon_str_strip(s);
-    return dragon_str_strip_chars_impl(s, chars, 1, 1);
+    DragonStrView set = dragon_str_view(chars);
+    return dragon_str_strip_impl(s, 1, 1, dragon_pred_in_set, &set);
 }
 
 const char* dragon_str_lstrip_chars(const char* s, const char* chars) {
     if (!s) return dragon_string_alloc("", 0);
     if (!chars) return dragon_str_lstrip(s);
-    return dragon_str_strip_chars_impl(s, chars, 1, 0);
+    DragonStrView set = dragon_str_view(chars);
+    return dragon_str_strip_impl(s, 1, 0, dragon_pred_in_set, &set);
 }
 
 const char* dragon_str_rstrip_chars(const char* s, const char* chars) {
     if (!s) return dragon_string_alloc("", 0);
     if (!chars) return dragon_str_rstrip(s);
-    return dragon_str_strip_chars_impl(s, chars, 0, 1);
-}
-
-static const char* dragon_str_finish_cps(DragonString* out, uint32_t* dst,
-                                         int64_t n, uint32_t max_cp) {
-    if (max_cp < 0x80) {
-        DragonString* o1 = dragon_string_alloc_ascii(n);
-        for (int64_t i = 0; i < n; ++i) o1->data[i] = (char)dst[i];
-        free(out);
-        return o1->data;
-    }
-    return out->data;
+    DragonStrView set = dragon_str_view(chars);
+    return dragon_str_strip_impl(s, 0, 1, dragon_pred_in_set, &set);
 }
 
 const char* dragon_str_title(const char* s) {
     if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    if (!ds || ds->kind == 1) {
-        DragonString* out = dragon_string_alloc_raw(n);
-        int cap = 1;
-        for (int64_t i = 0; i < n; i++) {
-            unsigned char c = (unsigned char)s[i];
-            if (c == ' ' || c == '\t' || c == '\n') { out->data[i] = (char)c; cap = 1; }
-            else if (cap) { out->data[i] = (char)((c >= 'a' && c <= 'z') ? c - 32 : c); cap = 0; }
-            else { out->data[i] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c); }
-        }
-        out->data[n] = '\0';
-        return out->data;
-    }
-    const uint32_t* src = (const uint32_t*)ds->data;
-    DragonString* out = dragon_string_alloc_ucs4(n);
-    uint32_t* dst = (uint32_t*)out->data, max_cp = 0;
+    DragonStrView v = dragon_str_view(s);
+    DragonStrOut o = dragon_str_out_begin(v.nbytes * 2);
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
     int cap = 1;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = src[i], o;
-        if (cp == ' ' || cp == '\t' || cp == '\n') { o = cp; cap = 1; }
-        else if (cap) { o = cp_ascii_upper(cp); cap = 0; }
-        else { o = cp_ascii_lower(cp); }
-        dst[i] = o; if (o > max_cp) max_cp = o;
+    while (dragon_str_iter_next(&it, &cp)) {
+        int boundary = cp == ' ' || cp == '\t' || cp == '\n';
+        uint32_t out = boundary ? cp : (cap ? cp_ascii_upper(cp) : cp_ascii_lower(cp));
+        cap = boundary;
+        dragon_str_out_cp(&o, out);
     }
-    return dragon_str_finish_cps(out, dst, n, max_cp);
+    return dragon_str_out_finish(&o);
 }
 
 const char* dragon_str_capitalize(const char* s) {
     if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    if (!ds || ds->kind == 1) {
-        DragonString* out = dragon_string_alloc_raw(n);
-        for (int64_t i = 0; i < n; i++) {
-            unsigned char c = (unsigned char)s[i];
-            out->data[i] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
-        }
-        if (n > 0 && out->data[0] >= 'a' && out->data[0] <= 'z') out->data[0] -= 32;
-        out->data[n] = '\0';
-        return out->data;
+    DragonStrView v = dragon_str_view(s);
+    DragonStrOut o = dragon_str_out_begin(v.nbytes * 2);
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
+    int first = 1;
+    while (dragon_str_iter_next(&it, &cp)) {
+        dragon_str_out_cp(&o, first ? cp_ascii_upper(cp) : cp_ascii_lower(cp));
+        first = 0;
     }
-    const uint32_t* src = (const uint32_t*)ds->data;
-    DragonString* out = dragon_string_alloc_ucs4(n);
-    uint32_t* dst = (uint32_t*)out->data, max_cp = 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t o = (i == 0) ? cp_ascii_upper(src[i]) : cp_ascii_lower(src[i]);
-        dst[i] = o; if (o > max_cp) max_cp = o;
-    }
-    return dragon_str_finish_cps(out, dst, n, max_cp);
+    return dragon_str_out_finish(&o);
 }
 
 const char* dragon_str_swapcase(const char* s) {
@@ -200,350 +229,6 @@ const char* dragon_str_swapcase(const char* s) {
 
 const char* dragon_str_casefold(const char* s) {
     return dragon_str_lower(s);
-}
-
-const char* dragon_str_replace_n(const char* s, const char* old_s, const char* new_s, int64_t max_count) {
-    if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    DragonString* dold = dragon_is_heap_string(old_s) ? dragon_string_from_data(old_s) : NULL;
-    DragonString* dnew = dragon_is_heap_string(new_s) ? dragon_string_from_data(new_s) : NULL;
-    int64_t slen = ds ? ds->len : (int64_t)strlen(s);
-    int64_t olen = dold ? dold->len : (old_s ? (int64_t)strlen(old_s) : 0);
-    int64_t nlen = dnew ? dnew->len : (new_s ? (int64_t)strlen(new_s) : 0);
-    if (!old_s) old_s = "";
-    if (!new_s) new_s = "";
-    if (olen == 0 || max_count == 0) return dragon_str_slice(s, 0, slen, 1);
-
-    bool s_k1 = (!ds || ds->kind == 1);
-    bool o_k1 = (!dold || dold->kind == 1);
-    bool n_k1 = (!dnew || dnew->kind == 1);
-
-    if (s_k1 && o_k1 && n_k1) {
-        int64_t count = 0;
-        int64_t i = 0;
-        while (i + olen <= slen) {
-            const void* hit = memchr(s + i, (unsigned char)old_s[0], (size_t)(slen - i - olen + 1));
-            if (!hit) break;
-            int64_t j = (const char*)hit - s;
-            if (memcmp(s + j, old_s, (size_t)olen) == 0) {
-                count++;
-                i = j + olen;
-                if (max_count >= 0 && count >= max_count) break;
-            } else {
-                i = j + 1;
-            }
-        }
-        if (nlen > olen && count > 0 && count > (INT64_MAX - slen) / (nlen - olen)) {
-            dragon_raise_exc_cstr(43, "MemoryError: string too large");
-        }
-        int64_t rlen = slen + count * (nlen - olen);
-        DragonString* out = dragon_string_alloc_raw(rlen);
-        char* w = out->data;
-        int64_t pos = 0;
-        int64_t done = 0;
-        while (pos <= slen) {
-            int64_t f = -1;
-            if (!(max_count >= 0 && done >= max_count)) {
-                int64_t k = pos;
-                while (k + olen <= slen) {
-                    const void* hit = memchr(s + k, (unsigned char)old_s[0], (size_t)(slen - k - olen + 1));
-                    if (!hit) break;
-                    int64_t j = (const char*)hit - s;
-                    if (memcmp(s + j, old_s, (size_t)olen) == 0) { f = j; break; }
-                    k = j + 1;
-                }
-            }
-            if (f < 0) {
-                memcpy(w, s + pos, (size_t)(slen - pos)); w += slen - pos;
-                break;
-            }
-            memcpy(w, s + pos, (size_t)(f - pos)); w += f - pos;
-            memcpy(w, new_s, (size_t)nlen); w += nlen;
-            pos = f + olen;
-            done++;
-        }
-        *w = '\0';
-        out->len = w - out->data;
-        return out->data;
-    }
-
-    int64_t count = 0;
-    int64_t pos = 0;
-    while (true) {
-        if (max_count >= 0 && count >= max_count) break;
-        int64_t r = dragon_str_find_cp(s, old_s, pos);
-        if (r < 0) break;
-        count++;
-        pos = r + olen;
-    }
-    if (nlen > olen && count > 0 && count > (INT64_MAX - slen) / (nlen - olen)) {
-        dragon_raise_exc_cstr(43, "MemoryError: string too large");
-    }
-    int64_t rlen = slen + count * (nlen - olen);
-    if (rlen < 0) rlen = 0;
-    DragonString* out = dragon_string_alloc_ucs4(rlen);
-    uint32_t* dst = (uint32_t*)out->data;
-    int64_t w = 0;
-    pos = 0;
-    int64_t done = 0;
-    uint32_t max_cp = 0;
-    while (true) {
-        int64_t r = (max_count >= 0 && done >= max_count) ? -1 : dragon_str_find_cp(s, old_s, pos);
-        if (r < 0) {
-            for (int64_t i = pos; i < slen; ++i) {
-                uint32_t cp = dragon_str_cp_at(s, ds, i);
-                dst[w++] = cp;
-                if (cp > max_cp) max_cp = cp;
-            }
-            break;
-        }
-        for (int64_t i = pos; i < r; ++i) {
-            uint32_t cp = dragon_str_cp_at(s, ds, i);
-            dst[w++] = cp;
-            if (cp > max_cp) max_cp = cp;
-        }
-        for (int64_t j = 0; j < nlen; ++j) {
-            uint32_t cp = dragon_str_cp_at(new_s, dnew, j);
-            dst[w++] = cp;
-            if (cp > max_cp) max_cp = cp;
-        }
-        pos = r + olen;
-        done++;
-    }
-    if (max_cp < 0x80) {
-        DragonString* out1 = dragon_string_alloc_ascii(w);
-        for (int64_t i = 0; i < w; ++i) out1->data[i] = (char)dst[i];
-        free(out);
-        return out1->data;
-    }
-    return out->data;
-}
-
-const char* dragon_str_replace(const char* s, const char* old_s, const char* new_s) {
-    return dragon_str_replace_n(s, old_s, new_s, -1);
-}
-
-const char* dragon_str_repeat(const char* s, int64_t n) {
-    if (!s || n <= 0) return dragon_string_alloc("", 0);
-    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    if (!in || in->kind == 1) {
-        int64_t len = in ? in->len : (int64_t)strlen(s);
-        if (len > 0 && (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)len) {
-            dragon_raise_exc_cstr(43, "MemoryError: string repeat too large");
-        }
-        int64_t total = len * n;
-        DragonString* ds = dragon_string_alloc_raw(total);
-        for (int64_t i = 0; i < n; i++) memcpy(ds->data + i * len, s, (size_t)len);
-        ds->data[total] = '\0';
-        ds->len = total;
-        return ds->data;
-    }
-    int64_t len = in->len;
-    if (len > 0 && (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)len) {
-        dragon_raise_exc_cstr(43, "MemoryError: string repeat too large");
-    }
-    int64_t total = len * n;
-    DragonString* ds = dragon_string_alloc_ucs4(total);
-    uint32_t* dst = (uint32_t*)ds->data;
-    const uint32_t* src = (const uint32_t*)in->data;
-    int64_t w = 0;
-    for (int64_t i = 0; i < n; i++)
-        for (int64_t j = 0; j < len; j++) dst[w++] = src[j];
-    return ds->data;
-}
-
-const char* dragon_str_removeprefix(const char* s, const char* prefix) {
-    if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    if (!prefix) return dragon_str_slice(s, 0, n, 1);
-    DragonString* pds = dragon_is_heap_string(prefix) ? dragon_string_from_data(prefix) : NULL;
-    int64_t pn = pds ? pds->len : (int64_t)strlen(prefix);
-    if (pn <= n) {
-        int64_t i = 0;
-        for (; i < pn; i++)
-            if (dragon_str_cp_at(s, ds, i) != dragon_str_cp_at(prefix, pds, i)) break;
-        if (i == pn) return dragon_str_slice(s, pn, n, 1);
-    }
-    return dragon_str_slice(s, 0, n, 1);
-}
-
-const char* dragon_str_removesuffix(const char* s, const char* suffix) {
-    if (!s) return dragon_string_alloc("", 0);
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    if (!suffix) return dragon_str_slice(s, 0, n, 1);
-    DragonString* xds = dragon_is_heap_string(suffix) ? dragon_string_from_data(suffix) : NULL;
-    int64_t xn = xds ? xds->len : (int64_t)strlen(suffix);
-    if (xn <= n) {
-        int64_t i = 0;
-        for (; i < xn; i++)
-            if (dragon_str_cp_at(s, ds, n - xn + i) != dragon_str_cp_at(suffix, xds, i)) break;
-        if (i == xn) return dragon_str_slice(s, 0, n - xn, 1);
-    }
-    return dragon_str_slice(s, 0, n, 1);
-}
-
-static constexpr int64_t DRAGON_STR_MAX_WIDTH = 1LL << 28;
-
-const char* dragon_str_center(const char* s, int64_t w, char fill) {
-    if (!s) return dragon_string_alloc("", 0);
-    if (w > DRAGON_STR_MAX_WIDTH) {
-        dragon_raise_exc_cstr(22, "OverflowError: width too large");
-        return dragon_string_alloc("", 0);
-    }
-    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t len = in ? in->len : (int64_t)strlen(s);
-    if (len >= w) return dragon_str_slice(s, 0, len, 1);
-    int64_t pad = w - len, left = pad / 2, right = pad - left;
-    if (!in || in->kind == 1) {
-        DragonString* ds = dragon_string_alloc_raw(w);
-        memset(ds->data, fill, (size_t)left);
-        memcpy(ds->data + left, s, (size_t)len);
-        memset(ds->data + left + len, fill, (size_t)right);
-        ds->data[w] = '\0';
-        ds->len = w;
-        return ds->data;
-    }
-    DragonString* ds = dragon_string_alloc_ucs4(w);
-    uint32_t* dst = (uint32_t*)ds->data;
-    const uint32_t* src = (const uint32_t*)in->data;
-    uint32_t fcp = (uint32_t)(unsigned char)fill;
-    int64_t k = 0;
-    for (int64_t i = 0; i < left; i++)  dst[k++] = fcp;
-    for (int64_t i = 0; i < len; i++)   dst[k++] = src[i];
-    for (int64_t i = 0; i < right; i++) dst[k++] = fcp;
-    return ds->data;
-}
-
-const char* dragon_str_ljust(const char* s, int64_t w, char fill) {
-    if (!s) return dragon_string_alloc("", 0);
-    if (w > DRAGON_STR_MAX_WIDTH) {
-        dragon_raise_exc_cstr(22, "OverflowError: width too large");
-        return dragon_string_alloc("", 0);
-    }
-    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t len = in ? in->len : (int64_t)strlen(s);
-    if (len >= w) return dragon_str_slice(s, 0, len, 1);
-    if (!in || in->kind == 1) {
-        DragonString* ds = dragon_string_alloc_raw(w);
-        memcpy(ds->data, s, (size_t)len);
-        memset(ds->data + len, fill, (size_t)(w - len));
-        ds->data[w] = '\0';
-        ds->len = w;
-        return ds->data;
-    }
-    DragonString* ds = dragon_string_alloc_ucs4(w);
-    uint32_t* dst = (uint32_t*)ds->data;
-    const uint32_t* src = (const uint32_t*)in->data;
-    uint32_t fcp = (uint32_t)(unsigned char)fill;
-    int64_t k = 0;
-    for (int64_t i = 0; i < len; i++)     dst[k++] = src[i];
-    for (int64_t i = 0; i < w - len; i++) dst[k++] = fcp;
-    return ds->data;
-}
-
-const char* dragon_str_rjust(const char* s, int64_t w, char fill) {
-    if (!s) return dragon_string_alloc("", 0);
-    if (w > DRAGON_STR_MAX_WIDTH) {
-        dragon_raise_exc_cstr(22, "OverflowError: width too large");
-        return dragon_string_alloc("", 0);
-    }
-    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t len = in ? in->len : (int64_t)strlen(s);
-    if (len >= w) return dragon_str_slice(s, 0, len, 1);
-    if (!in || in->kind == 1) {
-        DragonString* ds = dragon_string_alloc_raw(w);
-        memset(ds->data, fill, (size_t)(w - len));
-        memcpy(ds->data + w - len, s, (size_t)len);
-        ds->data[w] = '\0';
-        ds->len = w;
-        return ds->data;
-    }
-    DragonString* ds = dragon_string_alloc_ucs4(w);
-    uint32_t* dst = (uint32_t*)ds->data;
-    const uint32_t* src = (const uint32_t*)in->data;
-    uint32_t fcp = (uint32_t)(unsigned char)fill;
-    int64_t k = 0;
-    for (int64_t i = 0; i < w - len; i++) dst[k++] = fcp;
-    for (int64_t i = 0; i < len; i++)     dst[k++] = src[i];
-    return ds->data;
-}
-
-const char* dragon_str_zfill(const char* s, int64_t w) {
-    if (!s) return dragon_string_alloc("", 0);
-    if (w > DRAGON_STR_MAX_WIDTH) {
-        dragon_raise_exc_cstr(22, "OverflowError: width too large");
-        return dragon_string_alloc("", 0);
-    }
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    if (n >= w) return dragon_str_slice(s, 0, n, 1);
-    if (!ds || ds->kind == 1) {
-        DragonString* out = dragon_string_alloc_raw(w);
-        int64_t off = 0;
-        if (n > 0 && (s[0] == '+' || s[0] == '-')) { out->data[0] = s[0]; off = 1; }
-        memset(out->data + off, '0', (size_t)(w - n));
-        memcpy(out->data + (w - n) + off, s + off, (size_t)(n - off));
-        out->data[w] = '\0';
-        return out->data;
-    }
-    const uint32_t* src = (const uint32_t*)ds->data;
-    DragonString* out = dragon_string_alloc_ucs4(w);
-    uint32_t* dst = (uint32_t*)out->data, max_cp = 0;
-    int64_t off = 0;
-    if (n > 0 && (src[0] == '+' || src[0] == '-')) { dst[0] = src[0]; off = 1; }
-    for (int64_t i = 0; i < w - n; i++) dst[off + i] = '0';
-    for (int64_t i = off; i < n; i++) {
-        uint32_t cp = src[i]; dst[(w - n) + i] = cp; if (cp > max_cp) max_cp = cp;
-    }
-    return dragon_str_finish_cps(out, dst, w, max_cp);
-}
-
-const char* dragon_str_expandtabs(const char* s, int64_t tabsize) {
-    if (!s) return dragon_string_alloc("", 0);
-    if (tabsize <= 0) tabsize = 8;
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);
-    int64_t count = 0;
-    for (int64_t i = 0; i < n; i++) if (dragon_str_cp_at(s, ds, i) == '\t') count++;
-    int64_t budget = DRAGON_STR_MAX_WIDTH - n;
-    if (budget < 0 || (count != 0 && tabsize > budget / count)) {
-        dragon_raise_exc_cstr(22, "OverflowError: expandtabs result too large");
-        return dragon_string_alloc("", 0);
-    }
-    int64_t maxLen = n + count * tabsize;
-    if (!ds || ds->kind == 1) {
-        DragonString* out = dragon_string_alloc_raw(maxLen);
-        int64_t w = 0, col = 0;
-        for (int64_t i = 0; i < n; i++) {
-            unsigned char c = (unsigned char)s[i];
-            if (c == '\t') {
-                int64_t spaces = tabsize - (col % tabsize);
-                if (spaces <= 0) spaces = tabsize;
-                for (int64_t j = 0; j < spaces; j++) { out->data[w++] = ' '; col++; }
-            } else if (c == '\n') { out->data[w++] = '\n'; col = 0; }
-            else { out->data[w++] = (char)c; col++; }
-        }
-        out->data[w] = '\0';
-        out->len = w;
-        return out->data;
-    }
-    const uint32_t* src = (const uint32_t*)ds->data;
-    DragonString* out = dragon_string_alloc_ucs4(maxLen);
-    uint32_t* dst = (uint32_t*)out->data, max_cp = 0;
-    int64_t w = 0, col = 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = src[i];
-        if (cp == '\t') {
-            int64_t spaces = tabsize - (col % tabsize);
-            if (spaces <= 0) spaces = tabsize;
-            for (int64_t j = 0; j < spaces; j++) { dst[w++] = ' '; col++; }
-        } else if (cp == '\n') { dst[w++] = '\n'; col = 0; }
-        else { dst[w++] = cp; if (cp > max_cp) max_cp = cp; col++; }
-    }
-    out->len = w;
-    return dragon_str_finish_cps(out, dst, w, max_cp);
 }
 
 static const char* dragon_memmem(const char* hay, size_t hlen,
@@ -567,86 +252,60 @@ static const char* dragon_memmem(const char* hay, size_t hlen,
 #endif
 }
 
-static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
-                                     int64_t start, int64_t end) {
-    if (!haystack || !needle) return -1;
-    DragonString* dh = dragon_is_heap_string(haystack)
-        ? dragon_string_from_data(haystack) : NULL;
-    DragonString* dn = dragon_is_heap_string(needle)
-        ? dragon_string_from_data(needle) : NULL;
-    int64_t hlen = dh ? dh->len : (int64_t)strlen(haystack);
-    int64_t nlen = dn ? dn->len : (int64_t)strlen(needle);
-    if (start < 0) start = 0;
-    if (end < 0 || end > hlen) end = hlen;
-    if (start > end) return -1;
-    if (nlen == 0) return start <= end ? start : -1;
-    if (end - start < nlen) return -1;
-    bool h_kind1 = (!dh || dh->kind == 1);
-    bool n_kind1 = (!dn || dn->kind == 1);
-    if (h_kind1 && n_kind1) {
-        const char* base = haystack + start;
-        int64_t window = end - start;
-        const char* hit = dragon_memmem(base, (size_t)window, needle,
-                                        (size_t)nlen);
-        return hit ? start + (int64_t)(hit - base) : -1;
-    }
-    for (int64_t i = start; i + nlen <= end; ++i) {
-        bool match = true;
-        for (int64_t j = 0; j < nlen; ++j) {
-            if (dragon_str_cp_at(haystack, dh, i + j) !=
-                dragon_str_cp_at(needle, dn, j)) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return i;
+static int64_t dragon_find_bytes(DragonStrView* h, DragonStrView* n,
+                                 int64_t from_byte, int64_t end_byte) {
+    int64_t pos = from_byte;
+    while (pos + n->nbytes <= end_byte) {
+        const char* hit = dragon_memmem(h->s + pos, (size_t)(end_byte - pos),
+                                        n->s, (size_t)n->nbytes);
+        if (!hit) return -1;
+        int64_t off = hit - h->s;
+        if (dragon_str_offset_is_boundary(h->s, h->ds, off)) return off;
+        pos = off + 1;
     }
     return -1;
 }
 
-static int64_t dragon_str_find_cp(const char* haystack, const char* needle,
-                                  int64_t start) {
-    return dragon_str_find_cp_se(haystack, needle, start, -1);
+static int64_t dragon_str_find_impl(const char* haystack, const char* needle,
+                                    int64_t start, int64_t end, int reverse) {
+    if (!haystack || !needle) return -1;
+    DragonStrView h = dragon_str_view(haystack);
+    DragonStrView n = dragon_str_view(needle);
+    int64_t hlen = dragon_view_cps(&h);
+    if (start < 0) start = 0;
+    if (end < 0 || end > hlen) end = hlen;
+    if (start > end) return -1;
+    int64_t nlen = dragon_view_cps(&n);
+    if (nlen == 0) return reverse ? end : start;
+    if (end - start < nlen) return -1;
+    int64_t from_byte = dragon_str_cp_offset(h.s, h.ds, start);
+    int64_t end_byte = dragon_str_cp_offset(h.s, h.ds, end);
+    int64_t found = -1;
+    int64_t pos = from_byte;
+    for (;;) {
+        int64_t off = dragon_find_bytes(&h, &n, pos, end_byte);
+        if (off < 0) break;
+        found = off;
+        if (!reverse) break;
+        pos = off + 1;
+    }
+    return found < 0 ? -1 : dragon_str_cp_index_of_offset(h.s, h.ds, found);
 }
 
 int64_t dragon_str_find(const char* s, const char* sub) {
-    return dragon_str_find_cp_se(s, sub, 0, -1);
+    return dragon_str_find_impl(s, sub, 0, -1, 0);
 }
 
 int64_t dragon_str_find_se(const char* s, const char* sub, int64_t start, int64_t end) {
-    return dragon_str_find_cp_se(s, sub, start, end);
+    return dragon_str_find_impl(s, sub, start, end, 0);
 }
 
 int64_t dragon_str_rfind(const char* s, const char* sub) {
-    int64_t last = -1;
-    int64_t pos = 0;
-    DragonString* dn = (sub && dragon_is_heap_string(sub))
-        ? dragon_string_from_data(sub) : NULL;
-    int64_t nlen = dn ? dn->len : (sub ? (int64_t)strlen(sub) : 0);
-    int64_t step = nlen > 0 ? nlen : 1;
-    for (;;) {
-        int64_t r = dragon_str_find_cp_se(s, sub, pos, -1);
-        if (r < 0) break;
-        last = r;
-        pos = r + step;
-    }
-    return last;
+    return dragon_str_find_impl(s, sub, 0, -1, 1);
 }
 
 int64_t dragon_str_rfind_se(const char* s, const char* sub, int64_t start, int64_t end) {
-    int64_t last = -1;
-    int64_t pos = start < 0 ? 0 : start;
-    DragonString* dn = (sub && dragon_is_heap_string(sub))
-        ? dragon_string_from_data(sub) : NULL;
-    int64_t nlen = dn ? dn->len : (sub ? (int64_t)strlen(sub) : 0);
-    int64_t step = nlen > 0 ? nlen : 1;
-    for (;;) {
-        int64_t r = dragon_str_find_cp_se(s, sub, pos, end);
-        if (r < 0) break;
-        last = r;
-        pos = r + step;
-    }
-    return last;
+    return dragon_str_find_impl(s, sub, start, end, 1);
 }
 
 int64_t dragon_str_index_of(const char* s, const char* sub) {
@@ -665,87 +324,200 @@ int64_t dragon_str_rindex(const char* s, const char* sub) {
     return r;
 }
 
-int64_t dragon_str_count(const char* s, const char* sub) {
+static int64_t dragon_str_count_impl(const char* s, const char* sub, int64_t start, int64_t end) {
     if (!s || !sub) return 0;
-    DragonString* dn = dragon_is_heap_string(sub) ? dragon_string_from_data(sub) : NULL;
-    int64_t nlen = dn ? dn->len : (int64_t)strlen(sub);
-    if (nlen == 0) return 0;
-    int64_t c = 0, pos = 0;
+    DragonStrView h = dragon_str_view(s);
+    DragonStrView n = dragon_str_view(sub);
+    if (n.nbytes == 0) return 0;
+    int64_t hlen = dragon_view_cps(&h);
+    if (start < 0) start = 0;
+    if (end < 0 || end > hlen) end = hlen;
+    if (start > end) return 0;
+    int64_t pos = dragon_str_cp_offset(h.s, h.ds, start);
+    int64_t end_byte = dragon_str_cp_offset(h.s, h.ds, end);
+    int64_t c = 0;
     for (;;) {
-        int64_t r = dragon_str_find_cp_se(s, sub, pos, -1);
-        if (r < 0) break;
+        int64_t off = dragon_find_bytes(&h, &n, pos, end_byte);
+        if (off < 0) break;
         c++;
-        pos = r + nlen;
+        pos = off + n.nbytes;
     }
     return c;
 }
 
+int64_t dragon_str_count(const char* s, const char* sub) {
+    return dragon_str_count_impl(s, sub, 0, -1);
+}
+
 int64_t dragon_str_count_se(const char* s, const char* sub, int64_t start, int64_t end) {
-    if (!s || !sub) return 0;
-    DragonString* dn = dragon_is_heap_string(sub) ? dragon_string_from_data(sub) : NULL;
-    int64_t nlen = dn ? dn->len : (int64_t)strlen(sub);
-    if (nlen == 0) return 0;
-    int64_t c = 0;
-    int64_t pos = start < 0 ? 0 : start;
-    for (;;) {
-        int64_t r = dragon_str_find_cp_se(s, sub, pos, end);
-        if (r < 0) break;
-        c++;
-        pos = r + nlen;
+    return dragon_str_count_impl(s, sub, start, end);
+}
+
+const char* dragon_str_replace_n(const char* s, const char* old_s, const char* new_s, int64_t max_count) {
+    if (!s) return dragon_string_alloc("", 0);
+    DragonStrView h = dragon_str_view(s);
+    DragonStrView o = dragon_str_view(old_s);
+    DragonStrView n = dragon_str_view(new_s);
+    if (o.nbytes == 0 || max_count == 0) return dragon_str_copy_view(&h);
+    int64_t count = 0;
+    int64_t pos = 0;
+    while (max_count < 0 || count < max_count) {
+        int64_t off = dragon_find_bytes(&h, &o, pos, h.nbytes);
+        if (off < 0) break;
+        count++;
+        pos = off + o.nbytes;
     }
-    return c;
+    if (count == 0) return dragon_str_copy_view(&h);
+    if (n.nbytes > o.nbytes && count > (DRAGON_STR_MAX_BYTES - h.nbytes) / (n.nbytes - o.nbytes)) {
+        dragon_raise_exc_cstr(43, "MemoryError: string too large");
+    }
+    int64_t rlen = h.nbytes + count * (n.nbytes - o.nbytes);
+    DragonStrOut out = dragon_str_out_begin(rlen);
+    pos = 0;
+    int64_t done = 0;
+    while (done < count) {
+        int64_t off = dragon_find_bytes(&h, &o, pos, h.nbytes);
+        dragon_str_out_bytes(&out, h.s + pos, off - pos);
+        dragon_str_out_bytes(&out, n.s, n.nbytes);
+        pos = off + o.nbytes;
+        done++;
+    }
+    dragon_str_out_bytes(&out, h.s + pos, h.nbytes - pos);
+    return dragon_str_out_finish(&out);
+}
+
+const char* dragon_str_replace(const char* s, const char* old_s, const char* new_s) {
+    return dragon_str_replace_n(s, old_s, new_s, -1);
+}
+
+const char* dragon_str_repeat(const char* s, int64_t n) {
+    if (!s || n <= 0) return dragon_string_alloc("", 0);
+    DragonStrView v = dragon_str_view(s);
+    if (v.nbytes > 0 && (uint64_t)n > (uint64_t)DRAGON_STR_MAX_BYTES / (uint64_t)v.nbytes) {
+        dragon_raise_exc_cstr(43, "MemoryError: string repeat too large");
+    }
+    int64_t total = v.nbytes * n;
+    DragonStrOut out = dragon_str_out_begin(total);
+    for (int64_t i = 0; i < n; i++) dragon_str_out_bytes(&out, v.s, v.nbytes);
+    return dragon_str_out_finish(&out);
+}
+
+const char* dragon_str_removeprefix(const char* s, const char* prefix) {
+    if (!s) return dragon_string_alloc("", 0);
+    DragonStrView v = dragon_str_view(s);
+    if (!prefix) return dragon_str_copy_view(&v);
+    DragonStrView p = dragon_str_view(prefix);
+    bool has = p.nbytes <= v.nbytes && memcmp(v.s, p.s, (size_t)p.nbytes) == 0 &&
+               dragon_str_offset_is_boundary(v.s, v.ds, p.nbytes);
+    return dragon_str_from_range(&v, has ? p.nbytes : 0, v.nbytes);
+}
+
+const char* dragon_str_removesuffix(const char* s, const char* suffix) {
+    if (!s) return dragon_string_alloc("", 0);
+    DragonStrView v = dragon_str_view(s);
+    if (!suffix) return dragon_str_copy_view(&v);
+    DragonStrView x = dragon_str_view(suffix);
+    int64_t off = v.nbytes - x.nbytes;
+    bool has = x.nbytes <= v.nbytes && memcmp(v.s + off, x.s, (size_t)x.nbytes) == 0 &&
+               dragon_str_offset_is_boundary(v.s, v.ds, off);
+    return dragon_str_from_range(&v, 0, has ? off : v.nbytes);
+}
+
+static constexpr int64_t DRAGON_STR_MAX_WIDTH = 1LL << 28;
+
+static const char* dragon_str_justify(const char* s, int64_t w, char fill, int mode) {
+    if (!s) return dragon_string_alloc("", 0);
+    if (w > DRAGON_STR_MAX_WIDTH) {
+        dragon_raise_exc_cstr(22, "OverflowError: width too large");
+        return dragon_string_alloc("", 0);
+    }
+    DragonStrView v = dragon_str_view(s);
+    int64_t len = dragon_view_cps(&v);
+    if (len >= w) return dragon_str_copy_view(&v);
+    int64_t pad = w - len;
+    int64_t left = mode == 0 ? pad / 2 : (mode == 1 ? 0 : pad);
+    int64_t right = pad - left;
+    DragonStrOut out = dragon_str_out_begin(v.nbytes + pad);
+    dragon_str_out_fill(&out, fill, left);
+    dragon_str_out_bytes(&out, v.s, v.nbytes);
+    dragon_str_out_fill(&out, fill, right);
+    return dragon_str_out_finish(&out);
+}
+
+const char* dragon_str_center(const char* s, int64_t w, char fill) { return dragon_str_justify(s, w, fill, 0); }
+const char* dragon_str_ljust(const char* s, int64_t w, char fill)  { return dragon_str_justify(s, w, fill, 1); }
+const char* dragon_str_rjust(const char* s, int64_t w, char fill)  { return dragon_str_justify(s, w, fill, 2); }
+
+const char* dragon_str_zfill(const char* s, int64_t w) {
+    if (!s) return dragon_string_alloc("", 0);
+    if (w > DRAGON_STR_MAX_WIDTH) {
+        dragon_raise_exc_cstr(22, "OverflowError: width too large");
+        return dragon_string_alloc("", 0);
+    }
+    DragonStrView v = dragon_str_view(s);
+    int64_t n = dragon_view_cps(&v);
+    if (n >= w) return dragon_str_copy_view(&v);
+    int64_t sign = (v.nbytes > 0 && (v.s[0] == '+' || v.s[0] == '-')) ? 1 : 0;
+    DragonStrOut out = dragon_str_out_begin(v.nbytes + (w - n));
+    dragon_str_out_bytes(&out, v.s, sign);
+    dragon_str_out_fill(&out, '0', w - n);
+    dragon_str_out_bytes(&out, v.s + sign, v.nbytes - sign);
+    return dragon_str_out_finish(&out);
+}
+
+const char* dragon_str_expandtabs(const char* s, int64_t tabsize) {
+    if (!s) return dragon_string_alloc("", 0);
+    if (tabsize <= 0) tabsize = 8;
+    DragonStrView v = dragon_str_view(s);
+    int64_t count = 0;
+    for (int64_t i = 0; i < v.nbytes; i++) count += v.s[i] == '\t';
+    int64_t budget = DRAGON_STR_MAX_WIDTH - v.nbytes;
+    if (budget < 0 || (count != 0 && tabsize > budget / count)) {
+        dragon_raise_exc_cstr(22, "OverflowError: expandtabs result too large");
+        return dragon_string_alloc("", 0);
+    }
+    DragonStrOut out = dragon_str_out_begin(v.nbytes + count * tabsize);
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
+    int64_t col = 0;
+    while (dragon_str_iter_next(&it, &cp)) {
+        if (cp == '\t') {
+            int64_t spaces = tabsize - (col % tabsize);
+            dragon_str_out_fill(&out, ' ', spaces);
+            col += spaces;
+            continue;
+        }
+        dragon_str_out_cp(&out, cp);
+        col = cp == '\n' ? 0 : col + 1;
+    }
+    return dragon_str_out_finish(&out);
 }
 
 int64_t dragon_str_startswith(const char* s, const char* prefix) {
     if (!s || !prefix) return 0;
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    DragonString* dp = dragon_is_heap_string(prefix) ? dragon_string_from_data(prefix) : NULL;
-    int64_t slen = ds ? ds->len : (int64_t)strlen(s);
-    int64_t plen = dp ? dp->len : (int64_t)strlen(prefix);
-    if (plen > slen) return 0;
-    bool s_k1 = (!ds || ds->kind == 1);
-    bool p_k1 = (!dp || dp->kind == 1);
-    if (s_k1 && p_k1) return strncmp(s, prefix, (size_t)plen) == 0 ? 1 : 0;
-    for (int64_t i = 0; i < plen; ++i) {
-        if (dragon_str_cp_at(s, ds, i) != dragon_str_cp_at(prefix, dp, i)) return 0;
-    }
-    return 1;
+    DragonStrView v = dragon_str_view(s);
+    DragonStrView p = dragon_str_view(prefix);
+    if (p.nbytes > v.nbytes) return 0;
+    return memcmp(v.s, p.s, (size_t)p.nbytes) == 0 &&
+           dragon_str_offset_is_boundary(v.s, v.ds, p.nbytes);
 }
 
 int64_t dragon_str_endswith(const char* s, const char* suffix) {
     if (!s || !suffix) return 0;
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    DragonString* du = dragon_is_heap_string(suffix) ? dragon_string_from_data(suffix) : NULL;
-    int64_t slen = ds ? ds->len : (int64_t)strlen(s);
-    int64_t ulen = du ? du->len : (int64_t)strlen(suffix);
-    if (ulen > slen) return 0;
-    bool s_k1 = (!ds || ds->kind == 1);
-    bool u_k1 = (!du || du->kind == 1);
-    if (s_k1 && u_k1) return strcmp(s + slen - ulen, suffix) == 0 ? 1 : 0;
-    int64_t off = slen - ulen;
-    for (int64_t i = 0; i < ulen; ++i) {
-        if (dragon_str_cp_at(s, ds, off + i) != dragon_str_cp_at(suffix, du, i)) return 0;
-    }
-    return 1;
+    DragonStrView v = dragon_str_view(s);
+    DragonStrView x = dragon_str_view(suffix);
+    if (x.nbytes > v.nbytes) return 0;
+    int64_t off = v.nbytes - x.nbytes;
+    return memcmp(v.s + off, x.s, (size_t)x.nbytes) == 0 &&
+           dragon_str_offset_is_boundary(v.s, v.ds, off);
 }
 
 int64_t dragon_str_contains(const char* s, const char* sub) {
-    return dragon_str_find_cp(s, sub, 0) >= 0 ? 1 : 0;
-}
-
-static inline int64_t dragon_pred_len(const char* s, DragonString** out_ds) {
-    *out_ds = NULL;
-    if (!s) return -1;
-    if (dragon_is_heap_string(s)) {
-        *out_ds = dragon_string_from_data(s);
-        return (*out_ds)->len;
-    }
-    return (int64_t)strlen(s);
+    return dragon_str_find(s, sub) >= 0 ? 1 : 0;
 }
 
 int64_t dragon_str_kind(const char* s) {
-    if (!s || !dragon_is_heap_string(s)) return 1;
-    return dragon_string_from_data(s)->kind;
+    return dragon_str_is_ascii(s) ? 1 : 4;
 }
 
 void dragon_str_index_error(void) {
@@ -768,134 +540,90 @@ int64_t dragon_cp_isspace(int64_t cp) {
     return dragon_cp_is_space((uint32_t)cp) ? 1 : 0;
 }
 
-int64_t dragon_str_isdigit(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
-    for (int64_t i = 0; i < n; i++)
-        if (!dragon_cp_is_digit(dragon_str_cp_at(s, ds, i))) return 0;
+static int64_t dragon_str_all_cps(const char* s, int (*pred)(uint32_t)) {
+    if (!s) return 0;
+    DragonStrView v = dragon_str_view(s);
+    if (v.nbytes == 0) return 0;
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
+    while (dragon_str_iter_next(&it, &cp))
+        if (!pred(cp)) return 0;
     return 1;
 }
 
-int64_t dragon_str_isalpha(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
-    for (int64_t i = 0; i < n; i++)
-        if (!dragon_cp_is_alpha(dragon_str_cp_at(s, ds, i))) return 0;
-    return 1;
+static int dragon_cp_is_alnum(uint32_t cp) {
+    return dragon_cp_is_alpha(cp) || dragon_cp_is_digit(cp);
 }
 
-int64_t dragon_str_isalnum(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = dragon_str_cp_at(s, ds, i);
-        if (!dragon_cp_is_alpha(cp) && !dragon_cp_is_digit(cp)) return 0;
-    }
-    return 1;
-}
+int64_t dragon_str_isdigit(const char* s) { return dragon_str_all_cps(s, dragon_cp_is_digit); }
+int64_t dragon_str_isalpha(const char* s) { return dragon_str_all_cps(s, dragon_cp_is_alpha); }
+int64_t dragon_str_isalnum(const char* s) { return dragon_str_all_cps(s, dragon_cp_is_alnum); }
+int64_t dragon_str_isspace(const char* s) { return dragon_str_all_cps(s, dragon_cp_is_space); }
 
-int64_t dragon_str_isspace(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
-    for (int64_t i = 0; i < n; i++)
-        if (!dragon_cp_is_space(dragon_str_cp_at(s, ds, i))) return 0;
-    return 1;
-}
-
-int64_t dragon_str_isupper(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
+static int64_t dragon_str_cased_all(const char* s, int (*is_wanted)(uint32_t),
+                                    int (*is_other)(uint32_t)) {
+    if (!s) return 0;
+    DragonStrView v = dragon_str_view(s);
+    if (v.nbytes == 0) return 0;
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
     int has = 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = dragon_str_cp_at(s, ds, i);
-        if (dragon_cp_is_lower(cp)) return 0;
-        if (dragon_cp_is_upper(cp)) has = 1;
+    while (dragon_str_iter_next(&it, &cp)) {
+        if (is_other(cp)) return 0;
+        if (is_wanted(cp)) has = 1;
     }
     return has;
 }
 
-int64_t dragon_str_islower(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
-    int has = 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = dragon_str_cp_at(s, ds, i);
-        if (dragon_cp_is_upper(cp)) return 0;
-        if (dragon_cp_is_lower(cp)) has = 1;
-    }
-    return has;
-}
+int64_t dragon_str_isupper(const char* s) { return dragon_str_cased_all(s, dragon_cp_is_upper, dragon_cp_is_lower); }
+int64_t dragon_str_islower(const char* s) { return dragon_str_cased_all(s, dragon_cp_is_lower, dragon_cp_is_upper); }
 
 int64_t dragon_str_istitle(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
+    if (!s) return 0;
+    DragonStrView v = dragon_str_view(s);
+    if (v.nbytes == 0) return 0;
+    DragonStrIter it = dragon_str_iter(v.s, v.ds);
+    uint32_t cp;
     int prev_cased = 0, has_cased = 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = dragon_str_cp_at(s, ds, i);
-        if (dragon_cp_is_upper(cp)) {
-            if (prev_cased) return 0;
-            prev_cased = 1;
-            has_cased = 1;
-        } else if (dragon_cp_is_lower(cp)) {
-            if (!prev_cased) return 0;
-            prev_cased = 1;
-            has_cased = 1;
-        } else {
-            prev_cased = 0;
-        }
+    while (dragon_str_iter_next(&it, &cp)) {
+        int upper = dragon_cp_is_upper(cp);
+        int lower = dragon_cp_is_lower(cp);
+        if ((upper && prev_cased) || (lower && !prev_cased)) return 0;
+        prev_cased = upper || lower;
+        has_cased |= prev_cased;
     }
     return has_cased;
 }
 
 int64_t dragon_str_isascii(const char* s) {
-    if (!s) return 1;
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    if (ds && ds->kind == 4) {
-        int64_t n = ds->len;
-        const uint32_t* cps = (const uint32_t*)ds->data;
-        for (int64_t i = 0; i < n; i++) if (cps[i] > 127) return 0;
-        return 1;
-    }
-    for (; *s; s++) if ((unsigned char)*s > 127) return 0;
-    return 1;
+    return dragon_str_is_ascii(s);
 }
 
 int64_t dragon_str_isdecimal(const char* s) { return dragon_str_isdigit(s); }
 int64_t dragon_str_isnumeric(const char* s) { return dragon_str_isdigit(s); }
 
+static int dragon_cp_is_printable(uint32_t cp) {
+    return cp >= 32 && cp != 127;
+}
+
 int64_t dragon_str_isprintable(const char* s) {
     if (!s) return 1;
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    if (ds && ds->kind == 4) {
-        int64_t n = ds->len;
-        const uint32_t* cps = (const uint32_t*)ds->data;
-        for (int64_t i = 0; i < n; i++) if (cps[i] < 32 || cps[i] == 127) return 0;
-        return 1;
-    }
-    if (!*s) return 1;
-    for (; *s; s++) if ((unsigned char)*s < 32 || (unsigned char)*s == 127) return 0;
-    return 1;
+    DragonStrView v = dragon_str_view(s);
+    if (v.nbytes == 0) return 1;
+    return dragon_str_all_cps(s, dragon_cp_is_printable);
+}
+
+static int dragon_cp_is_ident_tail(uint32_t cp) {
+    return cp == '_' || (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z') ||
+           (cp >= '0' && cp <= '9');
 }
 
 int64_t dragon_str_isidentifier(const char* s) {
-    DragonString* ds;
-    int64_t n = dragon_pred_len(s, &ds);
-    if (n <= 0) return 0;
-    for (int64_t i = 0; i < n; i++) {
-        uint32_t cp = dragon_str_cp_at(s, ds, i);
-        if (cp == '_') continue;
-        if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')) continue;
-        if (i > 0 && cp >= '0' && cp <= '9') continue;
-        return 0;
-    }
-    return 1;
+    if (!s) return 0;
+    DragonStrView v = dragon_str_view(s);
+    if (v.nbytes == 0) return 0;
+    if (v.s[0] >= '0' && v.s[0] <= '9') return 0;
+    return dragon_str_all_cps(s, dragon_cp_is_ident_tail);
 }
 
 #define DRAGON_SLICE_NONE (-9223372036854775807LL - 1)
@@ -909,54 +637,30 @@ void dragon_slice_indices(int64_t len, int64_t* start, int64_t* stop, int64_t st
     else if (*stop >= len) *stop = (step < 0) ? len : len;
 }
 
+static inline int64_t dragon_slice_count(int64_t start, int64_t stop, int64_t step) {
+    if (step > 0) return stop > start ? (stop - start + step - 1) / step : 0;
+    return start > stop ? (start - stop - step - 1) / (-step) : 0;
+}
+
 const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t step) {
     if (!s) return dragon_string_alloc("", 0);
     if (step == 0) {
         dragon_raise_exc_cstr(90, "ValueError: slice step cannot be zero");
     }
-    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t cp_count = in ? in->len : (int64_t)strlen(s);
+    DragonStrView v = dragon_str_view(s);
+    int64_t cp_count = dragon_view_cps(&v);
     dragon_slice_indices(cp_count, &start, &stop, step);
-    if (!in || in->kind == 1) {
-        int64_t out_count = 0;
-        if (step > 0) { for (int64_t i = start; i < stop; i += step) out_count++; }
-        else          { for (int64_t i = start; i > stop; i += step) out_count++; }
-        DragonString* ds = dragon_string_alloc_raw(out_count);
-        int64_t w = 0;
-        if (step > 0) { for (int64_t i = start; i < stop; i += step) ds->data[w++] = s[i]; }
-        else { for (int64_t i = start; i > stop; i += step) ds->data[w++] = s[i]; }
-        ds->data[w] = '\0';
-        ds->len = w;
-        return ds->data;
+    if (step == 1) {
+        if (stop <= start) return dragon_string_alloc_ascii(0)->data;
+        return dragon_str_from_range(&v, dragon_str_cp_offset(v.s, v.ds, start),
+                                     dragon_str_cp_offset(v.s, v.ds, stop));
     }
-    const uint32_t* src = (const uint32_t*)in->data;
-    int64_t out_count = 0;
-    if (step > 0) { for (int64_t i = start; i < stop; i += step) out_count++; }
-    else          { for (int64_t i = start; i > stop; i += step) out_count++; }
-    if (out_count == 0) return dragon_string_alloc("", 0);
-    uint32_t max_cp = 0;
-    if (step > 0) {
-        for (int64_t i = start; i < stop; i += step) {
-            if (src[i] > max_cp) max_cp = src[i];
-        }
-    } else {
-        for (int64_t i = start; i > stop; i += step) {
-            if (src[i] > max_cp) max_cp = src[i];
-        }
-    }
-    if (max_cp < 0x80) {
-        DragonString* ds = dragon_string_alloc_ascii(out_count);
-        int64_t w = 0;
-        if (step > 0) { for (int64_t i = start; i < stop; i += step) ds->data[w++] = (char)src[i]; }
-        else          { for (int64_t i = start; i > stop; i += step) ds->data[w++] = (char)src[i]; }
-        return ds->data;
-    }
-    DragonString* ds = dragon_string_alloc_ucs4(out_count);
-    uint32_t* dst = (uint32_t*)ds->data;
-    int64_t w = 0;
-    if (step > 0) { for (int64_t i = start; i < stop; i += step) dst[w++] = src[i]; }
-    else          { for (int64_t i = start; i > stop; i += step) dst[w++] = src[i]; }
-    return ds->data;
+    int64_t out_count = dragon_slice_count(start, stop, step);
+    if (out_count == 0) return dragon_string_alloc_ascii(0)->data;
+    DragonStrOut out = dragon_str_out_begin(out_count * 4);
+    for (int64_t k = 0; k < out_count; k++)
+        dragon_str_out_cp(&out, dragon_str_cp_at(v.s, v.ds, start + k * step));
+    return dragon_str_out_finish(&out);
 }
 
 DragonList* dragon_list_slice(DragonList* l, int64_t start, int64_t stop, int64_t step) {
@@ -998,55 +702,53 @@ DragonList* dragon_list_slice(DragonList* l, int64_t start, int64_t stop, int64_
     return r;
 }
 
-DragonList* dragon_str_split_max(const char* s, const char* sep, int64_t maxsplit) {
+static int64_t dragon_ws_run_end(DragonStrView* v, int64_t from, int want_ws) {
+    const unsigned char* base = (const unsigned char*)v->s;
+    const unsigned char* end = base + v->nbytes;
+    const unsigned char* q = base + from;
+    while (q < end) {
+        uint32_t cp;
+        int adv = dragon_utf8_next(q, end, &cp);
+        if (dragon_cp_is_strip_ws(cp) != want_ws) break;
+        q += adv;
+    }
+    return q - base;
+}
+
+static DragonList* dragon_str_split_ws(DragonStrView* v, int64_t maxsplit) {
     DragonList* l = dragon_list_new_tagged(8, TAG_STR);
-    if (!s) return l;
-    DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t slen = ds ? ds->len : (int64_t)strlen(s);
-    DragonString* dsep = (sep && dragon_is_heap_string(sep))
-        ? dragon_string_from_data(sep) : NULL;
-    int64_t seplen = sep
-        ? (dsep ? dsep->len : (int64_t)strlen(sep))
-        : 0;
-
-    auto is_ws_cp = [](uint32_t cp) {
-        return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r';
-    };
-
     int64_t nsplits = 0;
-    if (!sep || seplen == 0) {
-        int64_t i = 0;
-        while (i < slen) {
-            while (i < slen && is_ws_cp(dragon_str_cp_at(s, ds, i))) i++;
-            if (i >= slen) break;
-            int64_t start = i;
-            if (maxsplit >= 0 && nsplits >= maxsplit) {
-                dragon_list_append(l, (int64_t)dragon_str_slice(s, start, slen, 1));
-                break;
-            }
-            while (i < slen && !is_ws_cp(dragon_str_cp_at(s, ds, i))) i++;
-            const char* w = dragon_str_slice(s, start, i, 1);
-            dragon_list_append(l, (int64_t)w);
-            nsplits++;
+    int64_t i = 0;
+    while (i < v->nbytes) {
+        i = dragon_ws_run_end(v, i, 1);
+        if (i >= v->nbytes) break;
+        int64_t word_end = (maxsplit >= 0 && nsplits >= maxsplit)
+            ? v->nbytes : dragon_ws_run_end(v, i, 0);
+        dragon_list_append(l, (int64_t)dragon_str_from_range(v, i, word_end));
+        nsplits++;
+        i = word_end;
+    }
+    return l;
+}
+
+DragonList* dragon_str_split_max(const char* s, const char* sep, int64_t maxsplit) {
+    if (!s) return dragon_list_new_tagged(8, TAG_STR);
+    DragonStrView v = dragon_str_view(s);
+    if (!sep || !*sep) return dragon_str_split_ws(&v, maxsplit);
+    DragonStrView p = dragon_str_view(sep);
+    DragonList* l = dragon_list_new_tagged(8, TAG_STR);
+    int64_t pos = 0;
+    int64_t nsplits = 0;
+    for (;;) {
+        int64_t f = (maxsplit >= 0 && nsplits >= maxsplit) ? -1
+                  : dragon_find_bytes(&v, &p, pos, v.nbytes);
+        if (f < 0) {
+            dragon_list_append(l, (int64_t)dragon_str_from_range(&v, pos, v.nbytes));
+            break;
         }
-    } else {
-        int64_t pos = 0;
-        for (;;) {
-            if (maxsplit >= 0 && nsplits >= maxsplit) {
-                dragon_list_append(l, (int64_t)dragon_str_slice(s, pos, slen, 1));
-                break;
-            }
-            int64_t f = dragon_str_find_cp_se(s, sep, pos, -1);
-            if (f < 0) {
-                const char* w = dragon_str_slice(s, pos, slen, 1);
-                dragon_list_append(l, (int64_t)w);
-                break;
-            }
-            const char* w = dragon_str_slice(s, pos, f, 1);
-            dragon_list_append(l, (int64_t)w);
-            pos = f + seplen;
-            nsplits++;
-        }
+        dragon_list_append(l, (int64_t)dragon_str_from_range(&v, pos, f));
+        pos = f + p.nbytes;
+        nsplits++;
     }
     return l;
 }
@@ -1057,60 +759,20 @@ DragonList* dragon_str_split(const char* s, const char* sep) {
 
 static const char* dragon_join_utf8(const char* sep, const char** items, int64_t n) {
     if (n <= 0) return dragon_string_alloc("", 0);
-    int64_t sep_blen = 0;
-    char* sep_enc = sep ? dragon_str_to_utf8_alloc(sep, &sep_blen) : NULL;
-    const char* sep_bytes = sep_enc ? sep_enc : sep;
-
-    char** owned = (char**)dragon_calloc_nullable((size_t)n, sizeof(char*));
-    int64_t* blens = owned ? (int64_t*)dragon_calloc_nullable((size_t)n, sizeof(int64_t)) : NULL;
-    if (!owned || !blens) {
-        free(owned);
-        if (sep_enc) free(sep_enc);
-        dragon_raise_oom();
-    }
+    DragonStrView sv = dragon_str_view(sep);
     int64_t total = 0;
-    bool overflow = false;
     for (int64_t i = 0; i < n; ++i) {
-        const char* elem = items[i];
-        int64_t bl = 0;
-        owned[i] = elem ? dragon_str_to_utf8_alloc(elem, &bl) : NULL;
-        blens[i] = elem ? bl : 0;
-        int64_t add = blens[i] + (i > 0 ? sep_blen : 0);
-        if (add > INT64_MAX - total) { overflow = true; break; }
+        int64_t add = dragon_str_total_bytes(items[i]) + (i > 0 ? sv.nbytes : 0);
+        if (add > DRAGON_STR_MAX_BYTES - total)
+            dragon_raise_exc_cstr(43, "MemoryError: string too large");
         total += add;
     }
-    char* buf = overflow ? NULL : (char*)dragon_malloc_nullable(total > 0 ? (size_t)total : 1);
-    if (!buf) {
-        for (int64_t i = 0; i < n; ++i) free(owned[i]);
-        free(owned);
-        free(blens);
-        if (sep_enc) free(sep_enc);
-        if (overflow)
-            dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
-        dragon_raise_oom();
-    }
-    char* w = buf;
+    DragonStrOut out = dragon_str_out_begin(total);
     for (int64_t i = 0; i < n; ++i) {
-        if (i > 0 && sep_blen > 0) { memcpy(w, sep_bytes, (size_t)sep_blen); w += sep_blen; }
-        if (blens[i] > 0) {
-            const char* eb = owned[i] ? owned[i] : items[i];
-            memcpy(w, eb, (size_t)blens[i]);
-            w += blens[i];
-        }
-        if (owned[i]) free(owned[i]);
+        if (i > 0) dragon_str_out_bytes(&out, sv.s, sv.nbytes);
+        if (items[i]) dragon_str_out_bytes(&out, items[i], dragon_str_total_bytes(items[i]));
     }
-    int32_t clbase = dragon_cleanup_depth();
-    dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
-    dragon_cleanup_push((int64_t)(uintptr_t)owned, DCLEAN_FREE, 0);
-    dragon_cleanup_push((int64_t)(uintptr_t)blens, DCLEAN_FREE, 0);
-    if (sep_enc) dragon_cleanup_push((int64_t)(uintptr_t)sep_enc, DCLEAN_FREE, 0);
-    const char* result = dragon_string_alloc(buf, total);
-    dragon_cleanup_reset(clbase);
-    free(buf);
-    free(owned);
-    free(blens);
-    if (sep_enc) free(sep_enc);
-    return result;
+    return dragon_str_out_finish(&out);
 }
 
 const char* dragon_str_join_ptr(const char* sep, DragonListPtr* l) {
@@ -1144,88 +806,59 @@ const char* dragon_str_join(const char* sep, DragonList* l) {
 DragonList* dragon_str_splitlines(const char* s) {
     DragonList* r = dragon_list_new_tagged(8, TAG_STR);
     if (!s) return r;
-    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = in ? in->len : (int64_t)strlen(s);
+    DragonStrView v = dragon_str_view(s);
     int64_t start = 0;
     int64_t i = 0;
-    while (i < n) {
-        uint32_t cp = dragon_str_cp_at(s, in, i);
-        if (cp == '\n' || cp == '\r') {
-            const char* w = dragon_str_slice(s, start, i, 1);
-            dragon_list_append(r, (int64_t)w);
-            if (cp == '\r' && i + 1 < n && dragon_str_cp_at(s, in, i + 1) == '\n') i++;
-            i++;
-            start = i;
-        } else { i++; }
+    while (i < v.nbytes) {
+        char c = v.s[i];
+        if (c != '\n' && c != '\r') { i++; continue; }
+        dragon_list_append(r, (int64_t)dragon_str_from_range(&v, start, i));
+        if (c == '\r' && i + 1 < v.nbytes && v.s[i + 1] == '\n') i++;
+        i++;
+        start = i;
     }
-    if (start < n) {
-        const char* w = dragon_str_slice(s, start, n, 1);
-        dragon_list_append(r, (int64_t)w);
+    if (start < v.nbytes)
+        dragon_list_append(r, (int64_t)dragon_str_from_range(&v, start, v.nbytes));
+    return r;
+}
+
+static DragonTuple* dragon_partition_result(DragonStrView* v, DragonStrView* p,
+                                            int64_t at, int missing_left) {
+    DragonTuple* r = dragon_tuple_new(3);
+    if (at < 0) {
+        const char* whole = dragon_str_copy_view(v);
+        const char* empty_a = dragon_string_alloc("", 0);
+        const char* empty_b = dragon_string_alloc("", 0);
+        dragon_tuple_set_tagged(r, 0, (int64_t)(missing_left ? empty_a : whole), TAG_STR);
+        dragon_tuple_set_tagged(r, 1, (int64_t)empty_b, TAG_STR);
+        dragon_tuple_set_tagged(r, 2, (int64_t)(missing_left ? whole : empty_a), TAG_STR);
+        return r;
     }
+    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_from_range(v, 0, at), TAG_STR);
+    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_str_copy_view(p), TAG_STR);
+    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_from_range(v, at + p->nbytes, v->nbytes), TAG_STR);
     return r;
 }
 
 DragonTuple* dragon_str_partition(const char* s, const char* sep) {
-    DragonTuple* r = dragon_tuple_new(3);
-    if (!s || !sep) {
-        DragonString* si = s && dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-        int64_t sn = s ? (si ? si->len : (int64_t)strlen(s)) : 0;
-        dragon_tuple_set_tagged(r, 0, (int64_t)(s ? dragon_str_slice(s, 0, sn, 1) : dragon_string_alloc("", 0)), TAG_STR);
-        dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        return r;
-    }
-    DragonString* si = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    DragonString* pi = dragon_is_heap_string(sep) ? dragon_string_from_data(sep) : NULL;
-    int64_t sn = si ? si->len : (int64_t)strlen(s);
-    int64_t sl = pi ? pi->len : (int64_t)strlen(sep);
-    int64_t at = (sl == 0) ? -1 : dragon_str_find_cp(s, sep, 0);
-    if (at < 0) {
-        dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_slice(s, 0, sn, 1), TAG_STR);
-        dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        return r;
-    }
-    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_slice(s, 0, at, 1), TAG_STR);
-    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_str_slice(sep, 0, sl, 1), TAG_STR);
-    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_slice(s, at + sl, sn, 1), TAG_STR);
-    return r;
+    DragonStrView v = dragon_str_view(s);
+    DragonStrView p = dragon_str_view(sep);
+    int64_t at = (!s || !sep || p.nbytes == 0) ? -1 : dragon_find_bytes(&v, &p, 0, v.nbytes);
+    return dragon_partition_result(&v, &p, at, 0);
 }
 
 DragonTuple* dragon_str_rpartition(const char* s, const char* sep) {
-    DragonTuple* r = dragon_tuple_new(3);
-    if (!s || !sep) {
-        DragonString* si = s && dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-        int64_t sn = s ? (si ? si->len : (int64_t)strlen(s)) : 0;
-        dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 2, (int64_t)(s ? dragon_str_slice(s, 0, sn, 1) : dragon_string_alloc("", 0)), TAG_STR);
-        return r;
-    }
-    DragonString* si = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    DragonString* pi = dragon_is_heap_string(sep) ? dragon_string_from_data(sep) : NULL;
-    int64_t sn = si ? si->len : (int64_t)strlen(s);
-    int64_t sl = pi ? pi->len : (int64_t)strlen(sep);
+    DragonStrView v = dragon_str_view(s);
+    DragonStrView p = dragon_str_view(sep);
     int64_t last = -1;
-    if (sl > 0) {
-        int64_t pos = 0;
-        for (;;) {
-            int64_t at = dragon_str_find_cp(s, sep, pos);
-            if (at < 0) break;
-            last = at;
-            pos = at + sl;
-        }
+    int64_t pos = 0;
+    while (s && sep && p.nbytes > 0) {
+        int64_t at = dragon_find_bytes(&v, &p, pos, v.nbytes);
+        if (at < 0) break;
+        last = at;
+        pos = at + p.nbytes;
     }
-    if (last < 0) {
-        dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_slice(s, 0, sn, 1), TAG_STR);
-        return r;
-    }
-    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_slice(s, 0, last, 1), TAG_STR);
-    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_str_slice(sep, 0, sl, 1), TAG_STR);
-    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_slice(s, last + sl, sn, 1), TAG_STR);
-    return r;
+    return dragon_partition_result(&v, &p, last, 1);
 }
 
 DragonList* dragon_str_rsplit(const char* s, const char* sep, int64_t maxsplit) {

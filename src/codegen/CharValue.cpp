@@ -187,6 +187,66 @@ private:
 
 }
 
+namespace {
+
+class AssignedNameCollector : public DefaultASTVisitor {
+public:
+    explicit AssignedNameCollector(std::unordered_set<std::string>& out) : out_(out) {}
+    void visit(AssignStmt& node) override {
+        for (auto& t : node.targets) noteTarget(t.get());
+        DefaultASTVisitor::visit(node);
+    }
+    void visit(AugAssignStmt& node) override {
+        noteTarget(node.target.get());
+        DefaultASTVisitor::visit(node);
+    }
+    void visit(AnnAssignStmt& node) override {
+        noteTarget(node.target.get());
+        DefaultASTVisitor::visit(node);
+    }
+    void visit(WalrusExpr& node) override {
+        out_.insert(node.name);
+        DefaultASTVisitor::visit(node);
+    }
+    void visit(ForStmt& node) override {
+        noteTarget(node.target.get());
+        DefaultASTVisitor::visit(node);
+    }
+    void visit(DeleteStmt& node) override {
+        for (auto& t : node.targets) noteTarget(t.get());
+        DefaultASTVisitor::visit(node);
+    }
+    void visit(FunctionDecl& node) override { out_.insert(node.name); }
+    void visit(ClassDecl& node) override { out_.insert(node.name); }
+
+private:
+    void noteTarget(Expr* t) {
+        if (auto* n = dynamic_cast<NameExpr*>(t)) { out_.insert(n->name); return; }
+        if (auto* tup = dynamic_cast<TupleExpr*>(t))
+            for (auto& e : tup->elements) noteTarget(e.get());
+        if (auto* lst = dynamic_cast<ListExpr*>(t))
+            for (auto& e : lst->elements) noteTarget(e.get());
+    }
+    std::unordered_set<std::string>& out_;
+};
+
+}
+
+void CodeGen::Impl::collectAssignedNames(const std::vector<std::unique_ptr<Stmt>>& body,
+                                         std::unordered_set<std::string>& out) {
+    AssignedNameCollector collector(out);
+    for (auto& stmt : body) stmt->accept(collector);
+}
+
+llvm::Instruction* CodeGen::Impl::sequentialCacheResetFor(Expr* strExpr) {
+    if (loopStack.empty() || !loopStack.top().preheaderBr) return nullptr;
+    auto* name = dynamic_cast<NameExpr*>(strExpr);
+    if (!name || !lookupVar(name->name) || isCellBacked(name->name)) return nullptr;
+    if (lookupModuleGlobal(name->name)) return nullptr;
+    if (loopStack.top().assignedNames.count(name->name)) return nullptr;
+    return loopStack.top().preheaderBr;
+}
+
 bool CodeGen::Impl::charLoopTargetStaysValue(ForStmt& node, const std::string& name) {
     CharLoopPredicates preds{
         [this](Expr* e) { return asStrSubscript(e) != nullptr || singleCodePointLiteral(e).has_value(); },
@@ -208,7 +268,8 @@ bool CodeGen::Impl::charLoopTargetStaysValue(ForStmt& node, const std::string& n
 }
 
 llvm::Value* CodeGen::Impl::emitCodePointLoad(llvm::Value* str, llvm::Value* len,
-                                              llvm::Value* kind, llvm::Value* index) {
+                                              llvm::Value* kind, llvm::Value* index,
+                                              llvm::Instruction* cacheReset) {
     auto* func = currentFunction;
     auto* zero = llvm::ConstantInt::get(i64Type, 0);
     auto* isNeg = builder->CreateICmpSLT(index, zero, "ch.idx.neg");
@@ -226,11 +287,49 @@ llvm::Value* CodeGen::Impl::emitCodePointLoad(llvm::Value* str, llvm::Value* len
     builder->CreateUnreachable();
 
     builder->SetInsertPoint(okBB);
-    return emitCodePointLoadInBounds(str, kind, finalIdx);
+    return emitCodePointLoadInBounds(str, kind, finalIdx, cacheReset);
+}
+
+llvm::Value* CodeGen::Impl::emitCodePointAtOffset(llvm::Value* str, llvm::Value* offset,
+                                                  llvm::Value** advanceOut) {
+    auto* func = currentFunction;
+    auto* i8Ty = llvm::Type::getInt8Ty(*context);
+    auto* asciiBB = llvm::BasicBlock::Create(*context, "cp.ascii", func);
+    auto* multiBB = llvm::BasicBlock::Create(*context, "cp.multi", func);
+    auto* joinBB = llvm::BasicBlock::Create(*context, "cp.join", func);
+    auto* gep = builder->CreateGEP(i8Ty, str, offset, "cp.byte.gep");
+    auto* byte = builder->CreateZExt(builder->CreateLoad(i8Ty, gep, "cp.byte"), i64Type,
+                                     "cp.byte.i64");
+    builder->CreateCondBr(
+        builder->CreateICmpULT(byte, llvm::ConstantInt::get(i64Type, 0x80), "cp.is.ascii"),
+        asciiBB, multiBB);
+
+    builder->SetInsertPoint(asciiBB);
+    builder->CreateBr(joinBB);
+
+    builder->SetInsertPoint(multiBB);
+    auto* packed = builder->CreateCall(runtimeFuncs["dragon_str_decode_at"], {str, offset},
+                                       "cp.packed");
+    auto* multiCp = builder->CreateAnd(packed, llvm::ConstantInt::get(i64Type, 0x1FFFFF),
+                                       "cp.multi.cp");
+    auto* multiAdv = builder->CreateLShr(packed, llvm::ConstantInt::get(i64Type, 32),
+                                         "cp.multi.adv");
+    builder->CreateBr(joinBB);
+
+    builder->SetInsertPoint(joinBB);
+    auto* cp = builder->CreatePHI(i64Type, 2, "cp.value");
+    cp->addIncoming(byte, asciiBB);
+    cp->addIncoming(multiCp, multiBB);
+    auto* adv = builder->CreatePHI(i64Type, 2, "cp.advance");
+    adv->addIncoming(llvm::ConstantInt::get(i64Type, 1), asciiBB);
+    adv->addIncoming(multiAdv, multiBB);
+    if (advanceOut) *advanceOut = adv;
+    return cp;
 }
 
 llvm::Value* CodeGen::Impl::emitCodePointLoadInBounds(llvm::Value* str, llvm::Value* kind,
-                                                      llvm::Value* finalIdx) {
+                                                      llvm::Value* finalIdx,
+                                                      llvm::Instruction* cacheReset) {
     auto* func = currentFunction;
     auto* narrowBB = llvm::BasicBlock::Create(*context, "ch.narrow", func);
     auto* wideBB = llvm::BasicBlock::Create(*context, "ch.wide", func);
@@ -240,7 +339,6 @@ llvm::Value* CodeGen::Impl::emitCodePointLoadInBounds(llvm::Value* str, llvm::Va
         narrowBB, wideBB);
 
     auto* i8Ty = llvm::Type::getInt8Ty(*context);
-    auto* i32Ty = llvm::Type::getInt32Ty(*context);
 
     builder->SetInsertPoint(narrowBB);
     auto* narrowGep = builder->CreateGEP(i8Ty, str, finalIdx, "ch.byte.gep");
@@ -249,15 +347,60 @@ llvm::Value* CodeGen::Impl::emitCodePointLoadInBounds(llvm::Value* str, llvm::Va
     builder->CreateBr(joinBB);
 
     builder->SetInsertPoint(wideBB);
-    auto* wideGep = builder->CreateGEP(i32Ty, str, finalIdx, "ch.ucs4.gep");
-    auto* wide = builder->CreateZExt(
-        builder->CreateLoad(i32Ty, wideGep, "ch.ucs4"), i64Type, "ch.wide.cp");
+    llvm::Value* wide = nullptr;
+    llvm::BasicBlock* wideEndBB = nullptr;
+    if (!cacheReset) {
+        wide = builder->CreateCall(runtimeFuncs["dragon_str_cp_at_index"], {str, finalIdx},
+                                   "ch.wide.cp");
+        wideEndBB = builder->GetInsertBlock();
+    } else {
+        auto* cacheIdx = createEntryAllocaInit(func, "ch.cache.idx",
+                                               llvm::ConstantInt::get(i64Type, -2));
+        auto* cacheNext = createEntryAllocaInit(func, "ch.cache.next",
+                                                llvm::ConstantInt::get(i64Type, 0));
+        llvm::IRBuilder<> reset(cacheReset);
+        reset.CreateStore(llvm::ConstantInt::get(i64Type, -2), cacheIdx);
+        auto* nextIdx = builder->CreateAdd(builder->CreateLoad(i64Type, cacheIdx, "ch.cache.idx.v"),
+                                           llvm::ConstantInt::get(i64Type, 1), "ch.cache.idx.next");
+        auto* hit = builder->CreateICmpEQ(finalIdx, nextIdx, "ch.cache.hit");
+        auto* hitBB = llvm::BasicBlock::Create(*context, "ch.cache.hitbb", func);
+        auto* missBB = llvm::BasicBlock::Create(*context, "ch.cache.miss", func);
+        auto* offBB = llvm::BasicBlock::Create(*context, "ch.cache.off", func);
+        builder->CreateCondBr(hit, hitBB, missBB);
+
+        builder->SetInsertPoint(hitBB);
+        auto* hitOff = builder->CreateLoad(i64Type, cacheNext, "ch.cache.next.v");
+        builder->CreateBr(offBB);
+
+        builder->SetInsertPoint(missBB);
+        auto* missOff = builder->CreateCall(runtimeFuncs["dragon_str_cp_byte_offset"],
+                                            {str, finalIdx}, "ch.cache.lookup");
+        builder->CreateBr(offBB);
+
+        builder->SetInsertPoint(offBB);
+        auto* off = builder->CreatePHI(i64Type, 2, "ch.off");
+        off->addIncoming(hitOff, hitBB);
+        off->addIncoming(missOff, missBB);
+        llvm::Value* adv = nullptr;
+        wide = emitCodePointAtOffset(str, off, &adv);
+        builder->CreateStore(finalIdx, cacheIdx);
+        builder->CreateStore(builder->CreateAdd(off, adv, "ch.cache.next.new"), cacheNext);
+        wideEndBB = builder->GetInsertBlock();
+    }
     builder->CreateBr(joinBB);
 
     builder->SetInsertPoint(joinBB);
     auto* cp = builder->CreatePHI(i64Type, 2, "ch.cp");
     cp->addIncoming(narrow, narrowBB);
-    cp->addIncoming(wide, wideBB);
+    cp->addIncoming(wide, wideEndBB);
+    return cp;
+}
+
+llvm::Value* CodeGen::Impl::emitCodePointStep(llvm::Value* str, llvm::AllocaInst* cursor) {
+    auto* off = builder->CreateLoad(i64Type, cursor, "ch.step.off");
+    llvm::Value* adv = nullptr;
+    llvm::Value* cp = emitCodePointAtOffset(str, off, &adv);
+    builder->CreateStore(builder->CreateAdd(off, adv, "ch.step.next"), cursor);
     return cp;
 }
 
@@ -282,8 +425,9 @@ llvm::Value* CodeGen::Impl::emitCharValue(CodeGen& cg, Expr* e) {
     if (index->getType() != i64Type)
         index = builder->CreateZExtOrTrunc(index, i64Type, "ch.idx.i64");
     auto* len = builder->CreateCall(runtimeFuncs["dragon_str_len"], {str}, "ch.len");
-    auto* kind = builder->CreateCall(runtimeFuncs["dragon_str_kind"], {str}, "ch.kind");
-    llvm::Value* cp = emitCodePointLoad(str, len, kind, index);
+    auto* kind = builder->CreateCall(runtimeFuncs["dragon_str_is_ascii"], {str}, "ch.ascii");
+    llvm::Value* cp = emitCodePointLoad(str, len, kind, index,
+                                        sequentialCacheResetFor(sub->object.get()));
     popArgTempCleanups(bases);
     if (drain != VarKind::Other) emitDecrefByKind(str, drain);
     return cp;

@@ -1158,7 +1158,7 @@ static DragonBytes* dragon_bytes_borrow_str(const char* s, DragonString* owner) 
     auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes) + sizeof(DragonString*));
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->header.gc_flags |= GC_FLAG_BORROWED_BUFFER;
-    b->len = owner->len;
+    b->len = owner->nbytes;
     b->data = (uint8_t*)owner->data;
     *dragon_bytes_owner_slot(b) = owner;
     dragon_incref_str(s);
@@ -1168,8 +1168,8 @@ static DragonBytes* dragon_bytes_borrow_str(const char* s, DragonString* owner) 
 DragonBytes* dragon_bytes_of_utf8_str(const char* s) {
     if (!s) return dragon_bytes_empty();
     DragonString* ds = dragon_str_is_heap(s) ? dragon_string_from_data(s) : nullptr;
-    if (ds && ds->kind == 1) {
-        return ds->len > 0 ? dragon_bytes_borrow_str(s, ds) : dragon_bytes_empty();
+    if (ds) {
+        return ds->nbytes > 0 ? dragon_bytes_borrow_str(s, ds) : dragon_bytes_empty();
     }
     int64_t blen = 0;
     char* enc = dragon_str_to_utf8_alloc(s, &blen);
@@ -1460,6 +1460,7 @@ const char* dragon_str_from_bytes(DragonBytes* b) {
     if (!b || b->len == 0) return dragon_string_alloc("", 0);
     DragonString* s = dragon_string_alloc_raw(b->len);
     memcpy(s->data, b->data, (size_t)b->len);
+    dragon_string_raw_finish(s, b->len);
     return s->data;
 }
 
@@ -1703,14 +1704,13 @@ const char* dragon_bytes_hex(DragonBytes* b) {
     }
     DragonString* ds = dragon_string_alloc_raw(b->len * 2);
     dragon_hex_encode(ds->data, b->data, b->len);
-    ds->data[b->len * 2] = '\0';
+    dragon_string_raw_finish(ds, b->len * 2);
     return ds->data;
 }
 
 DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
     if (!hex_str) return dragon_bytes_empty();
-    if (dragon_str_is_heap(hex_str) &&
-        dragon_string_from_data(hex_str)->kind == 4) {
+    if (!dragon_str_is_ascii(hex_str)) {
         dragon_raise_exc_cstr(90, "ValueError: non-hexadecimal number found in fromhex() arg");
     }
     auto hexval = [](char c) -> int {

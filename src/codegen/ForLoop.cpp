@@ -807,10 +807,11 @@ void CodeGen::visit(ForStmt& node) {
     auto* charTargetName = dynamic_cast<NameExpr*>(node.target.get());
     bool charLoop = isStrIterable && charTargetName &&
                     impl_->charLoopTargetStaysValue(node, charTargetName->name);
-    llvm::Value* strKindVal = charLoop
-        ? impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_str_kind"],
-                                     {iterableVal}, "str.kind")
-        : nullptr;
+    llvm::AllocaInst* strCursor = nullptr;
+    if (charLoop) {
+        strCursor = impl_->createEntryAlloca(func, "__str.cursor", impl_->i64Type);
+        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), strCursor);
+    }
 
     auto* condBB = llvm::BasicBlock::Create(*impl_->context, "forcond", func);
     auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "forbody", func);
@@ -821,7 +822,10 @@ void CodeGen::visit(ForStmt& node) {
         : llvm::BasicBlock::Create(*impl_->context, "forelse", func);
 
     impl_->loopStack.push({endBB, incBB, impl_->scopes.size(), impl_->tryFrameFuncs.size(), impl_->exitCleanupStack.size()});
-    impl_->builder->CreateBr(condBB);
+    impl_->collectAssignedNames(node.body, impl_->loopStack.top().assignedNames);
+    if (auto* loopTarget = dynamic_cast<NameExpr*>(node.target.get()))
+        impl_->loopStack.top().assignedNames.insert(loopTarget->name);
+    impl_->loopStack.top().preheaderBr = impl_->builder->CreateBr(condBB);
 
     impl_->builder->SetInsertPoint(condBB);
     llvm::Value* currentIdx = impl_->builder->CreateLoad(impl_->i64Type, idxVar, "__i");
@@ -1044,7 +1048,7 @@ void CodeGen::visit(ForStmt& node) {
         impl_->builder->CreateStore(elem, targetAlloca);
         impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Int);
     } else if (charLoop) {
-        llvm::Value* cp = impl_->emitCodePointLoadInBounds(iterLoaded, strKindVal, currentIdx);
+        llvm::Value* cp = impl_->emitCodePointStep(iterLoaded, strCursor);
         auto* cpAlloca = impl_->createEntryAlloca(func, targetName->name + ".cp", impl_->i64Type);
         impl_->builder->CreateStore(cp, cpAlloca);
         impl_->scopes.back().charValueVars[targetName->name] = cpAlloca;

@@ -112,8 +112,16 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_str_len",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
-    getOrDeclareRuntime("dragon_str_kind",
+    getOrDeclareRuntime("dragon_str_is_ascii",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_str_cp_at_index",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_str_next_cp",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_str_decode_at",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_str_cp_byte_offset",
+        llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
     auto* strIndexError = getOrDeclareRuntime("dragon_str_index_error",
         llvm::FunctionType::get(voidType, {}, false));
     strIndexError->addFnAttr(llvm::Attribute::NoReturn);
@@ -1056,7 +1064,13 @@ void CodeGen::Impl::declareRuntimeFunctions() {
                        llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref));
     markPureGetter(runtimeFuncs["dragon_str_len"],
                    llvm::MemoryEffects::readOnly());
-    markPureGetter(runtimeFuncs["dragon_str_kind"],
+    markPureGetter(runtimeFuncs["dragon_str_is_ascii"],
+                   llvm::MemoryEffects::readOnly());
+    markPureGetter(runtimeFuncs["dragon_str_cp_at_index"],
+                   llvm::MemoryEffects::readOnly());
+    markPureGetter(runtimeFuncs["dragon_str_decode_at"],
+                   llvm::MemoryEffects::readOnly());
+    markPureGetter(runtimeFuncs["dragon_str_cp_byte_offset"],
                    llvm::MemoryEffects::readOnly());
     for (const char* pred : {"dragon_cp_isdigit", "dragon_cp_isalpha",
                              "dragon_cp_isalnum", "dragon_cp_isspace"})

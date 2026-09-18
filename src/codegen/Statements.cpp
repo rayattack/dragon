@@ -362,7 +362,8 @@ void CodeGen::visit(WhileStmt& node) {
     }
 
     impl_->loopStack.push({endBB, condBB, impl_->scopes.size(), impl_->tryFrameFuncs.size(), impl_->exitCleanupStack.size()});
-    impl_->builder->CreateBr(condBB);
+    impl_->collectAssignedNames(node.body, impl_->loopStack.top().assignedNames);
+    impl_->loopStack.top().preheaderBr = impl_->builder->CreateBr(condBB);
 
     impl_->builder->SetInsertPoint(condBB);
     node.condition->accept(*this);

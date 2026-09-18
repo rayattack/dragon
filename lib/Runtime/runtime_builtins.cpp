@@ -490,24 +490,12 @@ const char* dragon_repr_int(int64_t x) {
 
 const char* dragon_repr_str(const char* s) {
     if (!s) return dragon_string_alloc("None", 4);
-    DragonString* src = dragon_str_is_heap(s) ? dragon_string_from_data(s) : NULL;
-    if (src && src->kind == 4) {
-        if (src->len > INT64_MAX - 2) {
-            dragon_raise_exc_cstr(43, "MemoryError: string too large");
-        }
-        DragonString* out = dragon_string_alloc_ucs4(src->len + 2);
-        uint32_t* o = (uint32_t*)out->data;
-        o[0] = '\'';
-        memcpy(o + 1, src->data, (size_t)src->len * 4);
-        o[src->len + 1] = '\'';
-        return out->data;
-    }
-    size_t len = src ? (size_t)src->len : strlen(s);
+    size_t len = (size_t)dragon_str_total_bytes(s);
     DragonString* ds = dragon_string_alloc_raw((int64_t)(len + 2));
     ds->data[0] = '\'';
     memcpy(ds->data + 1, s, len);
     ds->data[len + 1] = '\'';
-    ds->data[len + 2] = '\0';
+    dragon_string_raw_finish(ds, (int64_t)(len + 2));
     return ds->data;
 }
 
@@ -619,8 +607,7 @@ const char* dragon_file_read_bytes(void* handle) {
             if (remaining <= 0) return dragon_string_alloc("", 0);
             DragonString* ds = dragon_string_alloc_raw((int64_t)remaining);
             size_t nread = dragon_blocking_fread(ds->data, 1, (size_t)remaining, f);
-            ds->len = (int64_t)nread;
-            ds->data[nread] = '\0';
+            dragon_string_raw_finish(ds, (int64_t)nread);
             return ds->data;
         }
     }
@@ -640,8 +627,7 @@ const char* dragon_file_read_bytes(void* handle) {
     }
     DragonString* ds = dragon_string_alloc_raw((int64_t)len);
     memcpy(ds->data, buf, len);
-    ds->data[len] = '\0';
-    ds->len = (int64_t)len;
+    dragon_string_raw_finish(ds, (int64_t)len);
     free(buf);
     return ds->data;
 }

@@ -2530,8 +2530,13 @@ class IndexOracleTests(TestCase) {
         self.assertEqual(ord(raw[2]), 233)
         self.assertEqual(ord(raw[3]), 255)
         self.assertEqual(raw[4], "c")
-        self.assertEqual(raw[1:4], "".join(walk[1:4]))
-        self.assertEqual("".join(walk) == raw, True)
+        const piece: str = raw[1:4]
+        self.assertEqual(len(piece), 3)
+        self.assertEqual(ord(piece[0]), ord(walk[1]))
+        self.assertEqual(ord(piece[1]), ord(walk[2]))
+        self.assertEqual(ord(piece[2]), ord(walk[3]))
+        self.assertEqual(len(raw.encode("utf-8")), 6)
+        self.assertEqual(raw == dragon_str_from_bytes(b"ab\xe9\xffcd"), True)
     }
 }
 

@@ -64,6 +64,7 @@ typedef struct {
 #define GC_FLAG_SHARED    0x04
 #define GC_FLAG_IN_TO_FREE 0x08
 #define GC_FLAG_BORROWED_BUFFER 0x10
+#define GC_FLAG_STR_ASCII 0x20
 #define GC_FLAG_HEAP_OBJ  0x80
 
 #define DRAGON_IMMORTAL_REFCOUNT ((int64_t)0x4000000000000000LL)
@@ -148,14 +149,22 @@ typedef struct DragonVThreadQueue {
 typedef struct {
     DragonObjectHeader header;
     int64_t len;
-    uint8_t kind;
-    uint8_t _pad[3];
+    int32_t nbytes;
     int32_t cap;
     char    data[];
 } DragonString;
 
+static_assert((GC_FLAG_STR_ASCII & (GC_FLAG_TRACKED | GC_FLAG_REACHABLE | GC_FLAG_SHARED |
+                                    GC_FLAG_IN_TO_FREE | GC_FLAG_BORROWED_BUFFER |
+                                    GC_FLAG_HEAP_OBJ)) == 0,
+              "the ascii flag must not share a bit with any other header flag");
+
 static inline int64_t dragon_str_byte_len(const DragonString* s) {
-    return s->len * (int64_t)s->kind;
+    return s->nbytes;
+}
+
+static inline int dragon_str_ascii_flag(const DragonString* s) {
+    return (s->header.gc_flags & GC_FLAG_STR_ASCII) ? 1 : 0;
 }
 
 static inline int32_t dragon_cap_clamp(int64_t bytes) {
@@ -628,10 +637,7 @@ static inline int dragon_str_is_heap(const char* s) {
 
 static inline int64_t dragon_str_total_bytes(const char* s) {
     if (!s) return 0;
-    if (dragon_str_is_heap(s)) {
-        DragonString* ds = dragon_string_from_data(s);
-        return ds->len * (int64_t)ds->kind;
-    }
+    if (dragon_str_is_heap(s)) return dragon_string_from_data(s)->nbytes;
     return (int64_t)strlen(s);
 }
 
@@ -1062,7 +1068,13 @@ DragonListPtr* dragon_dir(int64_t instance_or_desc, int64_t is_descriptor);
 const char* dragon_string_alloc(const char* src, int64_t len);
 const char* dragon_str_intern(const char* utf8_bytes, int64_t byte_len);
 DragonString* dragon_string_alloc_raw(int64_t len);
+void dragon_string_raw_finish(DragonString* s, int64_t nbytes);
 char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
+int64_t dragon_str_is_ascii(const char* s);
+int64_t dragon_str_cp_at_index(const char* s, int64_t index);
+int64_t dragon_str_next_cp(const char* s, int64_t* byte_cursor);
+int64_t dragon_str_decode_at(const char* s, int64_t byte_off);
+int64_t dragon_str_cp_byte_offset(const char* s, int64_t index);
 
 #define DRAGON_MAX_RECV_BYTES (1LL << 30)
 
