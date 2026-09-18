@@ -907,7 +907,7 @@ void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
         llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context)),
         "__decorated_" + node.name);
     decoratedFunctions[node.name] = gv;
-    callableTypes[node.name] = func->getFunctionType();
+    bindCallableType(node.name, func->getFunctionType());
 }
 
 void CodeGen::visit(FunctionDecl& node) {
@@ -1291,7 +1291,7 @@ void CodeGen::visit(FunctionDecl& node) {
                 impl_->decoratedFunctions[node.name] = gv;
             }
             impl_->builder->CreateStore(current, gv);
-            impl_->callableTypes[node.name] = func->getFunctionType();
+            impl_->bindCallableType(node.name, func->getFunctionType());
         }
     }
 }
@@ -1325,6 +1325,25 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     auto* userFnType = llvm::FunctionType::get(retType, userParamTypes, false);
     auto* nestedFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, mangledName, impl_->module.get());
+    {
+        std::vector<Expr*> defaults;
+        std::vector<Impl::VarKind> kinds;
+        for (auto& p : node.params) {
+            defaults.push_back(p.defaultValue.get());
+            kinds.push_back(impl_->typeExprToKind(p.type.get()));
+        }
+        std::vector<std::string> names;
+        std::vector<bool> owns;
+        for (auto& p : node.params) {
+            names.push_back(p.name);
+            owns.push_back(p.isOwn);
+        }
+        impl_->funcParamOwns[mangledName] = std::move(owns);
+        impl_->funcParamDefaults[mangledName] = std::move(defaults);
+        impl_->funcParamKinds[mangledName] = std::move(kinds);
+        impl_->funcParamNames[mangledName] = std::move(names);
+        impl_->funcDefiningModule[mangledName] = impl_->currentModuleName;
+    }
 
     std::vector<FnCapture> captures =
         collectFnCaptures(node.capturedVars, node.mutatedCapturedVars);
@@ -1434,7 +1453,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         prevFunc, node.name, impl_->i8PtrType);
     impl_->builder->CreateStore(boundValue, localAlloca);
     impl_->setVar(node.name, localAlloca, boundKind);
-    impl_->callableTypes[node.name] = userFnType;
+    impl_->bindCallableType(node.name, userFnType);
+    impl_->callableNestedSymbol[node.name] = mangledName;
     if (!isClosure) {
         impl_->varIsPtrCallable.insert(node.name);
     }

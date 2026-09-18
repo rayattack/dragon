@@ -148,10 +148,15 @@ CodeGen::Impl::VarKind CodeGen::Impl::inferYieldKind(const std::vector<std::uniq
 void CodeGen::Impl::fillDefaultArgs(const std::string& funcName, llvm::Function* func,
                      std::vector<llvm::Value*>& args, CodeGen& cg,
                      std::vector<std::pair<llvm::Value*, VarKind>>* defaultTemps) {
+        fillDefaultArgs(funcName, func->getFunctionType(), args, cg, defaultTemps);
+    }
+
+void CodeGen::Impl::fillDefaultArgs(const std::string& funcName, llvm::FunctionType* funcType,
+                     std::vector<llvm::Value*>& args, CodeGen& cg,
+                     std::vector<std::pair<llvm::Value*, VarKind>>* defaultTemps) {
         auto it = funcParamDefaults.find(funcName);
         if (it == funcParamDefaults.end()) return;
         auto& defaults = it->second;
-        auto funcType = func->getFunctionType();
         unsigned numParams = funcType->getNumParams();
         if (args.size() < numParams)
             args.resize(numParams, nullptr);
@@ -185,6 +190,56 @@ void CodeGen::Impl::fillDefaultArgs(const std::string& funcName, llvm::Function*
             val = coerceArg(val, funcType->getParamType((unsigned)i));
             args[i] = val;
         }
+    }
+
+bool CodeGen::Impl::placeKeywordArgs(const std::string& funcName, const std::string& shownName,
+                                     llvm::FunctionType* funcType, CallExpr& node,
+                                     std::vector<llvm::Value*>& args, CodeGen& cg,
+                                     std::vector<std::pair<llvm::Value*, VarKind>>& temps) {
+        if (node.kwArgs.empty()) return true;
+        auto nIt = funcParamNames.find(funcName);
+        if (nIt == funcParamNames.end()) {
+            addError("'" + shownName + "' does not accept keyword arguments here",
+                     node.location());
+            return false;
+        }
+        const auto& paramNames = nIt->second;
+        unsigned numParams = funcType->getNumParams();
+        if (args.size() < numParams) args.resize(numParams, nullptr);
+        auto fpkIt = funcParamKinds.find(funcName);
+        for (auto& [kwName, kwVal] : node.kwArgs) {
+            if (kwName.empty()) {
+                addError("call-site spread into '" + shownName + "' is not supported",
+                         node.location());
+                return false;
+            }
+            auto nameIt = std::find(paramNames.begin(), paramNames.end(), kwName);
+            if (nameIt == paramNames.end()) {
+                addError("'" + shownName + "' got an unexpected keyword argument '" +
+                             kwName + "'", node.location());
+                return false;
+            }
+            size_t idx = (size_t)std::distance(paramNames.begin(), nameIt);
+            if (idx >= numParams) {
+                addError("keyword argument '" + kwName +
+                             "' resolves to a param index outside the LLVM signature",
+                         node.location());
+                return false;
+            }
+            if (args[idx] != nullptr) {
+                addError("'" + shownName + "' got multiple values for argument '" +
+                             kwName + "'", node.location());
+                return false;
+            }
+            kwVal->accept(cg);
+            llvm::Value* val = lastValue;
+            if (fpkIt != funcParamKinds.end() && idx < fpkIt->second.size()) {
+                VarKind dk = argTempDecrefKind(kwVal.get(), fpkIt->second[idx], val);
+                if (dk != VarKind::Other) temps.emplace_back(val, dk);
+            }
+            args[idx] = coerceArgFromExpr(kwVal.get(), val, funcType->getParamType((unsigned)idx));
+        }
+        return true;
     }
 
 void CodeGen::Impl::emitIncrefByKind(llvm::Value* val, VarKind kind) {

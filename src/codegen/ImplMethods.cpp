@@ -27,7 +27,7 @@ void CodeGen::Impl::trackPtrParam(const std::string& paramName, TypeExpr* typeEx
             return;
         }
         if (auto* callable = dynamic_cast<CallableTypeExpr*>(typeExpr)) {
-            callableTypes[paramName] = callableTypeExprToFnType(callable);
+            bindCallableType(paramName, callableTypeExprToFnType(callable));
             varIsPtrCallable.insert(paramName);
             return;
         }
@@ -63,7 +63,7 @@ void CodeGen::Impl::trackPtrParam(const std::string& paramName, TypeExpr* typeEx
         }
         if (TypeExpr* niche = unionNicheMember(typeExpr)) {
             if (auto* callable = dynamic_cast<CallableTypeExpr*>(niche)) {
-                callableTypes[paramName] = callableTypeExprToFnType(callable);
+                bindCallableType(paramName, callableTypeExprToFnType(callable));
                 varIsPtrCallable.insert(paramName);
             }
         }

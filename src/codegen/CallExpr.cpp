@@ -794,17 +794,36 @@ void CodeGen::visit(CallExpr& node) {
                         userFnType = llvm::FunctionType::get(impl_->i64Type, pt, false);
                     }
 
+                    auto nsIt = impl_->callableNestedSymbol.find(name);
+                    const std::string* nestedSym =
+                        nsIt != impl_->callableNestedSymbol.end() ? &nsIt->second : nullptr;
+                    std::vector<std::pair<llvm::Value*, Impl::VarKind>> closureTemps;
                     std::vector<llvm::Value*> args;
                     for (size_t i = 0; i < node.args.size(); ++i) {
                         node.args[i]->accept(*this);
                         llvm::Value* arg = impl_->lastValue;
+                        Impl::VarKind dk = impl_->callableArgTempKind(
+                            nestedSym, (unsigned)i, node.args[i].get(), arg);
+                        if (dk != Impl::VarKind::Other) closureTemps.emplace_back(arg, dk);
                         if (i < userFnType->getNumParams())
                             arg = impl_->coerceArg(arg, userFnType->getParamType(i));
                         args.push_back(arg);
                     }
+                    if (nestedSym) {
+                        if (!impl_->placeKeywordArgs(*nestedSym, name, userFnType, node,
+                                                     args, *this, closureTemps)) {
+                            impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
+                            return;
+                        }
+                        impl_->fillDefaultArgs(*nestedSym, userFnType, args, *this,
+                                               &closureTemps);
+                    }
 
+                    auto closureTempBases = impl_->pushArgTempCleanups(closureTemps);
                     emitCallableValueCall(calleeVal, userFnType, args,
                                           false, name);
+                    impl_->popArgTempCleanups(closureTempBases);
+                    impl_->drainBorrowTemps(closureTemps);
                     return;
                 }
 
@@ -831,14 +850,34 @@ void CodeGen::visit(CallExpr& node) {
                         calleeVal, llvm::PointerType::getUnqual(*impl_->context));
                 }
 
+                auto nsIt = impl_->callableNestedSymbol.find(name);
+                const std::string* nestedSym =
+                    nsIt != impl_->callableNestedSymbol.end() ? &nsIt->second : nullptr;
+                std::vector<std::pair<llvm::Value*, Impl::VarKind>> defaultTemps;
                 std::vector<llvm::Value*> args;
                 for (size_t i = 0; i < node.args.size(); ++i) {
                     node.args[i]->accept(*this);
                     llvm::Value* arg = impl_->lastValue;
+                    Impl::VarKind dk = impl_->callableArgTempKind(
+                        nestedSym, (unsigned)i, node.args[i].get(), arg);
+                    if (dk != Impl::VarKind::Other) defaultTemps.emplace_back(arg, dk);
                     if (i < fnType->getNumParams())
                         arg = impl_->coerceArg(arg, fnType->getParamType(i));
                     args.push_back(arg);
                 }
+                if (nestedSym) {
+                    if (!impl_->placeKeywordArgs(*nestedSym, name, fnType, node, args,
+                                                 *this, defaultTemps)) {
+                        impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
+                        return;
+                    }
+                    impl_->fillDefaultArgs(*nestedSym, fnType, args, *this, &defaultTemps);
+                }
+                auto defaultTempBases = impl_->pushArgTempCleanups(defaultTemps);
+                auto drainDefaultTemps = [&]() {
+                    impl_->popArgTempCleanups(defaultTempBases);
+                    impl_->drainBorrowTemps(defaultTemps);
+                };
 
                 if (valIsTypedCallable) {
                     auto* i8Ty = llvm::Type::getInt8Ty(*impl_->context);
@@ -921,6 +960,7 @@ void CodeGen::visit(CallExpr& node) {
                         phi->addIncoming(bareRet, bareBB);
                         impl_->lastValue = impl_->normalizeIntC(phi);
                     }
+                    drainDefaultTemps();
                     return;
                 } else {
                     if (fnType->getReturnType() == impl_->voidType) {
@@ -931,6 +971,7 @@ void CodeGen::visit(CallExpr& node) {
                         impl_->lastValue = impl_->normalizeIntC(
                             impl_->builder->CreateCall(fnType, fnPtr, args, "icall"));
                     }
+                    drainDefaultTemps();
                     return;
                 }
             }

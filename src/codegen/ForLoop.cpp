@@ -1255,7 +1255,7 @@ void CodeGen::visit(ForStmt& node) {
             }
         }
         if (elemCallable) {
-            impl_->callableTypes[targetName->name] = elemCallable;
+            impl_->bindCallableType(targetName->name, elemCallable);
             impl_->varIsPtrCallable.insert(targetName->name);
         }
     }

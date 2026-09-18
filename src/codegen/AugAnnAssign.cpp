@@ -804,7 +804,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     if (auto* rhsCallee = dynamic_cast<NameExpr*>(rhsCall->callee.get())) {
                         if (rhsCallee->name == "getattr" ||
                             impl_->funcReturnsClosure.count(impl_->resolveCalleeSymbol(rhsCallee->name))) {
-                            impl_->callableTypes[name->name] = impl_->callableTypeExprToFnType(callableAnnot);
+                            impl_->bindCallableType(name->name, impl_->callableTypeExprToFnType(callableAnnot));
                             varKind = Impl::VarKind::Closure;
                         }
                     }
@@ -979,8 +979,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     if (auto* rhsCallee = dynamic_cast<NameExpr*>(rhsCall->callee.get())) {
                         if (rhsCallee->name == "getattr" ||
                             impl_->funcReturnsClosure.count(impl_->resolveCalleeSymbol(rhsCallee->name))) {
-                            impl_->callableTypes[name->name] =
-                                impl_->callableTypeExprToFnType(callableAnnot);
+                            impl_->bindCallableType(name->name, impl_->callableTypeExprToFnType(callableAnnot));
                             impl_->setVar(name->name, alloca, Impl::VarKind::Closure);
                             varKind = Impl::VarKind::Closure;
                         }

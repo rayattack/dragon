@@ -391,5 +391,107 @@ class GetattrTests(TestCase) {
 }
 
 
+def count_tags(text: str) -> int {
+    def is_tag(c: str, open_mark: str = "<") -> bool {
+        return c == open_mark
+    }
+    n: int = 0
+    for c in text {
+        if is_tag(c) {
+            n = n + 1
+        }
+        if is_tag(c, ">") {
+            n = n + 1
+        }
+    }
+    return n
+}
+
+
+def greet_all(names: list[str]) -> list[str] {
+    suffix: str = "!"
+    def greet(name: str, opener: str = "hi ", closer: str = suffix) -> str {
+        return opener + name + closer
+    }
+    out: list[str] = []
+    for name in names {
+        out.append(greet(name))
+    }
+    suffix = "?"
+    out.append(greet("late"))
+    out.append(greet("all", "yo "))
+    return out
+}
+
+
+def sum_with_fresh_default(n: int) -> int {
+    def total(xs: list[int] = [1, 2, 3]) -> int {
+        acc: int = 0
+        for x in xs {
+            acc = acc + x
+        }
+        return acc
+    }
+    result: int = 0
+    i: int = 0
+    while i < n {
+        result = result + total()
+        i = i + 1
+    }
+    return result + total([10])
+}
+
+
+def captured_with_default(base: int) -> int {
+    def scaled(k: int = 2) -> int {
+        return base * k
+    }
+    return scaled() + scaled(3)
+}
+
+
+def label_with_keywords(n: int) -> str {
+    def h(a: int, b: str = "b", c: str = "c") -> str {
+        return str(a) + b + c
+    }
+    return h(n, b="z") + "|" + h(n, c="z") + "|" + h(n, c="y", b="x") + "|" + h(n)
+}
+
+
+def capturing_keyword_default(base: int) -> int {
+    def scaled(k: int = 2, extra: int = 0) -> int {
+        return base * k + extra
+    }
+    return scaled(extra=1) + scaled(k=3) + scaled(3, extra=base)
+}
+
+
+class NestedDefaultArgTests(TestCase) {
+    def test_keyword_arguments_fill_around_defaults() {
+        self.assertEqual(label_with_keywords(1), "1zc|1bz|1xy|1bc")
+    }
+
+    def test_keyword_arguments_on_a_capturing_nested_def() {
+        self.assertEqual(capturing_keyword_default(5), 11 + 15 + 20)
+    }
+
+    def test_nested_def_called_without_its_default() {
+        self.assertEqual(count_tags("".join(["a<b>", "<c"])), 3)
+    }
+
+    def test_defaults_read_the_enclosing_scope_at_call_time() {
+        self.assertEqual(greet_all(["x", "y"]), ["hi x!", "hi y!", "hi late?", "yo all?"])
+    }
+
+    def test_a_fresh_default_is_released_every_call() {
+        self.assertEqual(sum_with_fresh_default(3000), 3000 * 6 + 10)
+    }
+
+    def test_a_capturing_nested_def_keeps_its_default() {
+        self.assertEqual(captured_with_default(5), 25)
+    }
+}
+
+
 main([NestedAttrIterationTests(), NestedAttrStoreTest(), NestedSubscriptStore(),
-      CycleTests(), NonAsciiContainerTests(), GetattrTests()])
+      CycleTests(), NonAsciiContainerTests(), GetattrTests(), NestedDefaultArgTests()])

@@ -1035,7 +1035,7 @@ void CodeGen::emitNewModuleGlobalStore(NameExpr& name, AssignStmt& node,
     impl_->storeWithRCOverwrite(
         gv, gv->getValueType(), val, Impl::VarKind::Other, vk, rhsBorrowed, name.name);
     if (auto* boundClosureType = impl_->takeCallableTypeFor(val)) {
-        impl_->callableTypes[name.name] = boundClosureType;
+        impl_->bindCallableType(name.name, boundClosureType);
         impl_->moduleGlobalKinds[gKey] = Impl::VarKind::Closure;
     }
     if (impl_->lastValueIsType) {
@@ -1182,7 +1182,7 @@ void CodeGen::emitLocalSlotStore(NameExpr& name, AssignStmt& node,
         impl_->emitUnionDecref(ownedBoxPayload, ownedBoxTag);
 
     if (auto* boundClosureType = impl_->takeCallableTypeFor(val)) {
-        impl_->callableTypes[name.name] = boundClosureType;
+        impl_->bindCallableType(name.name, boundClosureType);
         impl_->setVar(name.name, alloca, Impl::VarKind::Closure);
     }
     else if (impl_->lastValueIsType) {
@@ -1338,7 +1338,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::inferBoundVarKind(
 void CodeGen::Impl::recordAssignedCallableType(const std::string& name,
                                                llvm::Value* val, Expr* rhs) {
     if (auto* lambdaFn = llvm::dyn_cast<llvm::Function>(val)) {
-        callableTypes[name] = lambdaFn->getFunctionType();
+        bindCallableType(name, lambdaFn->getFunctionType());
         return;
     }
     auto* rhsName = dynamic_cast<NameExpr*>(rhs);
@@ -1354,10 +1354,10 @@ void CodeGen::Impl::recordAssignedCallableType(const std::string& name,
         refFunc = module->getFunction(userFuncName(rhsName->name));
     if (!refFunc) refFunc = module->getFunction(rhsName->name);
     if (refFunc)
-        callableTypes[name] = refFunc->getFunctionType();
+        bindCallableType(name, refFunc->getFunctionType());
     auto ctIt = callableTypes.find(rhsName->name);
     if (ctIt != callableTypes.end())
-        callableTypes[name] = ctIt->second;
+        bindCallableType(name, ctIt->second);
 }
 
 }

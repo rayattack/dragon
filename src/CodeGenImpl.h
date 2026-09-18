@@ -645,6 +645,7 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, std::string> funcDefiningModule;
 
     std::unordered_map<std::string, std::vector<std::string>> funcParamNames;
+    std::unordered_map<std::string, std::string> callableNestedSymbol;
 
     std::unordered_map<std::string, std::vector<VarKind>> unionMemberKinds;
 
@@ -1242,6 +1243,29 @@ struct CodeGen::Impl {
     void fillDefaultArgs(const std::string& funcName, llvm::Function* func,
                          std::vector<llvm::Value*>& args, CodeGen& cg,
                          std::vector<std::pair<llvm::Value*, VarKind>>* defaultTemps = nullptr);
+    void fillDefaultArgs(const std::string& funcName, llvm::FunctionType* funcType,
+                         std::vector<llvm::Value*>& args, CodeGen& cg,
+                         std::vector<std::pair<llvm::Value*, VarKind>>* defaultTemps);
+
+    bool placeKeywordArgs(const std::string& funcName, const std::string& shownName,
+                          llvm::FunctionType* funcType, CallExpr& node,
+                          std::vector<llvm::Value*>& args, CodeGen& cg,
+                          std::vector<std::pair<llvm::Value*, VarKind>>& temps);
+
+    VarKind callableArgTempKind(const std::string* nestedSym, unsigned index,
+                                Expr* argExpr, llvm::Value* val) {
+        if (!nestedSym) return ownedTempDrainKind(argExpr, val);
+        if (paramIsOwn(*nestedSym, index)) return VarKind::Other;
+        auto kIt = funcParamKinds.find(*nestedSym);
+        if (kIt == funcParamKinds.end() || index >= kIt->second.size())
+            return ownedTempDrainKind(argExpr, val);
+        return argTempDecrefKind(argExpr, kIt->second[index], val);
+    }
+
+    void bindCallableType(const std::string& name, llvm::FunctionType* type) {
+        callableTypes[name] = type;
+        callableNestedSymbol.erase(name);
+    }
 
     void emitMarkShared(llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
