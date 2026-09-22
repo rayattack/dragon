@@ -743,6 +743,7 @@ void dragon_share_callable(void* p);
 void dragon_make_immortal(void* obj);
 int64_t dragon_is_immortal_obj(void* obj);
 void dragon_gc_track(void* obj);
+bool dragon_gc_try_track(void* obj);
 void dragon_gc_untrack(void* obj);
 void dragon_gc_set_threshold(int64_t n);
 int64_t dragon_gc_collect();

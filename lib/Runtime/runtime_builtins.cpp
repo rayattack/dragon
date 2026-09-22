@@ -676,6 +676,12 @@ void* dragon_instance_alloc(int64_t size) {
     return dragon_xcalloc_n(size, 1);
 }
 
+void dragon_instance_track(void* obj) {
+    if (dragon_gc_try_track(obj)) return;
+    free(obj);
+    dragon_raise_oom();
+}
+
 void dragon_generator_attach(void* gen_ptr, void* frame) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
     if (gen) gen->frame = frame;
@@ -1102,7 +1108,10 @@ void* dragon_env_alloc(int64_t total_size,
     DragonEnv* env = (DragonEnv*)dragon_xcalloc_n(total_size, 1);
     dragon_obj_init(&env->header, DRAGON_TAG_ENV);
     env->gc_fn = gc_fn;
-    if (trackable) dragon_gc_track(env);
+    if (trackable && !dragon_gc_try_track(env)) {
+        free(env);
+        dragon_raise_oom();
+    }
     return env;
 }
 
@@ -1111,8 +1120,12 @@ void* dragon_closure_create(void* fn_ptr, void* env) {
     dragon_obj_init(&cls->header, DRAGON_TAG_CLOSURE);
     cls->fn_ptr = fn_ptr;
     cls->env = (DragonEnv*)env;
-    if (env && (((DragonEnv*)env)->header.gc_flags & GC_FLAG_TRACKED))
-        dragon_gc_track(cls);
+    if (env && (((DragonEnv*)env)->header.gc_flags & GC_FLAG_TRACKED) &&
+        !dragon_gc_try_track(cls)) {
+        free(cls);
+        dragon_decref(env);
+        dragon_raise_oom();
+    }
     return cls;
 }
 

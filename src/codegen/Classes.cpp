@@ -1055,7 +1055,7 @@ void CodeGen::visit(ClassDecl& node) {
             impl_->builder->CreateStore(headerWord, tagGEP);
             if (!classIsAcyclic) {
                 impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_gc_track"], {self});
+                    impl_->runtimeFuncs["dragon_instance_track"], {self});
             }
 
             if (vtableGlobal) {

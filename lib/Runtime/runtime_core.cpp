@@ -306,6 +306,13 @@ static void gc_resume_the_world(DragonMutator* self, int64_t pause_ns) {
     pthread_mutex_unlock(&gc_stop_lock);
 }
 
+static void gc_defer_the_world(DragonMutator* self) {
+    pthread_mutex_lock(&gc_stop_lock);
+    if (self) gc_release_world(self);
+    gc_stat_deferred++;
+    pthread_mutex_unlock(&gc_stop_lock);
+}
+
 int64_t dragon_gc_collections() {
     return __atomic_load_n(&gc_stat_collections, __ATOMIC_RELAXED);
 }
@@ -343,7 +350,7 @@ void dragon_fatal_concurrent_mutation(const char* kind) {
     abort();
 }
 
-static inline void gc_tracked_append(DragonObjectHeader* h, void* obj);
+static inline bool gc_tracked_append(DragonObjectHeader* h, void* obj);
 static inline void gc_tracked_remove(DragonObjectHeader* h);
 
 static int gc_in_progress = 0;
@@ -562,7 +569,7 @@ int64_t dragon_is_immortal_obj(void* obj) {
     return (int64_t)dragon_is_immortal(obj);
 }
 
-static inline void gc_tracked_append(DragonObjectHeader* h, void* obj) {
+static inline bool gc_tracked_append(DragonObjectHeader* h, void* obj) {
     dragon_gc_assert_mutable("gc track");
     if (gc_tracked_size >= gc_tracked_cap) {
         int64_t new_cap = gc_tracked_cap ? (int64_t)gc_tracked_cap * 2 : 256;
@@ -573,16 +580,14 @@ static inline void gc_tracked_append(DragonObjectHeader* h, void* obj) {
         }
         void** grown = (void**)dragon_realloc_nullable(
             gc_tracked, dragon_alloc_bytes_or_abort(new_cap, sizeof(void*)));
-        if (!grown) {
-            fprintf(stderr, "dragon: out of memory growing GC tracked-set\n");
-            abort();
-        }
+        if (!grown) return false;
         gc_tracked = grown;
         gc_tracked_cap = (int32_t)new_cap;
     }
     h->gc_track_idx = gc_tracked_size;
     h->gc_flags |= GC_FLAG_TRACKED;
     gc_tracked[gc_tracked_size++] = obj;
+    return true;
 }
 
 static inline void gc_tracked_remove(DragonObjectHeader* h) {
@@ -606,26 +611,34 @@ static void dragon_gc_age_one() {
     }
 }
 
-void dragon_gc_track(void* obj) {
-    if (!obj) return;
+bool dragon_gc_try_track(void* obj) {
+    if (!obj) return true;
     auto* h = (DragonObjectHeader*)obj;
-    if (h->gc_flags & GC_FLAG_TRACKED) return;
+    if (h->gc_flags & GC_FLAG_TRACKED) return true;
 
     if (!__atomic_load_n(&gc_concurrent, __ATOMIC_ACQUIRE)) {
-        gc_tracked_append(h, obj);
+        if (!gc_tracked_append(h, obj)) return false;
         dragon_gc_age_one();
-        return;
+        return true;
     }
 
     pthread_mutex_lock(&gc_lock);
     if (h->gc_flags & GC_FLAG_TRACKED) {
         pthread_mutex_unlock(&gc_lock);
-        return;
+        return true;
     }
-    gc_tracked_append(h, obj);
+    bool appended = gc_tracked_append(h, obj);
     pthread_mutex_unlock(&gc_lock);
+    if (!appended) return false;
     dragon_gc_poll();
     dragon_gc_age_one();
+    return true;
+}
+
+void dragon_gc_track(void* obj) {
+    if (dragon_gc_try_track(obj)) return;
+    fprintf(stderr, "dragon: out of memory growing GC tracked-set\n");
+    abort();
 }
 
 void dragon_gc_untrack(void* obj) {
@@ -951,15 +964,10 @@ static int32_t gc_ht_lookup(GCHashEntry* ht, int32_t mask, void* key) {
     }
 }
 
-static void* gc_alloc_or_abort(int64_t count, size_t elem_size, int zero) {
-    size_t bytes = dragon_alloc_bytes_ex_or_abort(count, elem_size, 0);
-    void* p = zero ? dragon_calloc_nullable(1, bytes)
-                   : dragon_malloc_nullable(bytes);
-    if (!p && bytes) {
-        fprintf(stderr, "dragon: out of memory during gc\n");
-        abort();
-    }
-    return p;
+static void* gc_scratch_alloc(int64_t count, size_t elem_size, int zero) {
+    size_t bytes;
+    if (!dragon_alloc_bytes_try(count, elem_size, 0, &bytes)) return nullptr;
+    return zero ? dragon_calloc_nullable(1, bytes) : dragon_malloc_nullable(bytes);
 }
 
 static void gc_ht_insert(GCHashEntry* ht, int32_t mask, void* key, int32_t idx) {
@@ -1038,9 +1046,22 @@ int64_t dragon_gc_collect() {
     }
     int32_t ht_cap = (int32_t)ht_cap64;
     int32_t ht_mask = ht_cap - 1;
-    auto* ht = (GCHashEntry*)gc_alloc_or_abort(ht_cap, sizeof(GCHashEntry), 1);
+    auto* ht = (GCHashEntry*)gc_scratch_alloc(ht_cap, sizeof(GCHashEntry), 1);
+    auto* refs = (int64_t*)gc_scratch_alloc(n, sizeof(int64_t), 0);
+    auto* queue = (int32_t*)gc_scratch_alloc((int64_t)n + 1, sizeof(int32_t), 0);
+    auto* to_free = (void**)gc_scratch_alloc(n, sizeof(void*), 0);
+    if (!ht || !refs || !queue || !to_free) {
+        free(to_free);
+        free(queue);
+        free(refs);
+        free(ht);
+        gc_retune_threshold(0);
+        gc_in_progress = 0;
+        pthread_mutex_unlock(&gc_lock);
+        gc_defer_the_world(stw_self);
+        return 0;
+    }
 
-    auto* refs = (int64_t*)gc_alloc_or_abort(n, sizeof(int64_t), 0);
     for (int32_t i = 0; i < n; i++) {
         DragonObjectHeader* h = (DragonObjectHeader*)gc_tracked[i];
         int64_t rc = dragon_refcount_load(h);
@@ -1056,7 +1077,6 @@ int64_t dragon_gc_collect() {
         dragon_traverse(gc_tracked[i], gc_visit_subtract, nullptr);
     }
 
-    auto* queue = (int32_t*)gc_alloc_or_abort((int64_t)n + 1, sizeof(int32_t), 0);
     queue[0] = 0;
 
     for (int32_t i = 0; i < n; i++) {
@@ -1075,7 +1095,6 @@ int64_t dragon_gc_collect() {
 
     __atomic_store_n(&gc_collecting, 1, __ATOMIC_RELEASE);
     int64_t collected = 0;
-    void** to_free = (void**)gc_alloc_or_abort(n, sizeof(void*), 0);
     int32_t to_free_count = 0;
     // Two-pass tear-down: Pass 1 marks every unreachable object IN_TO_FREE so Pass 2's clear_refs
     // and any concurrent mutator decref both skip dealloc (owned by the loop below). The flag must precede any clear_refs decref into to_free children, else a sibling decref races the flag-set -> UAF.

@@ -48,8 +48,11 @@ DragonList* dragon_list_new_tagged(int64_t capacity, int64_t elem_tag) {
     list->elem_tag = (uint8_t)elem_tag;
     list->elem_size = esize;
     list->data = data;
-    if (list->elem_tag != TAG_INT && list->elem_tag != TAG_BOOL) {
-        dragon_gc_track(list);
+    if (list->elem_tag != TAG_INT && list->elem_tag != TAG_BOOL &&
+        !dragon_gc_try_track(list)) {
+        free(data);
+        free(list);
+        dragon_raise_oom();
     }
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
@@ -678,7 +681,11 @@ DragonListPtr* dragon_list_new_ptr(int64_t capacity, int64_t elem_tag) {
     list->elem_tag = (uint8_t)elem_tag;
     list->elem_size = 8;
     list->data = data;
-    dragon_gc_track(list);
+    if (!dragon_gc_try_track(list)) {
+        free(data);
+        free(list);
+        dragon_raise_oom();
+    }
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
         dragon_gc_collect();
@@ -763,7 +770,11 @@ DragonListBox* dragon_list_box_new(int64_t capacity) {
     list->capacity = cap;
     list->size = 0;
     list->data = data;
-    dragon_gc_track(list);
+    if (!dragon_gc_try_track(list)) {
+        free(data);
+        free(list);
+        dragon_raise_oom();
+    }
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
         dragon_gc_collect();

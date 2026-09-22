@@ -1,0 +1,150 @@
+from unittest import TestCase, main
+
+extern "C" def dragon_gc_tracked_count() -> int
+extern "C" def dragon_gc_deferred_collections() -> int
+extern "C" def dragon_gc_collect() -> int
+
+class Packet {
+    payload: bytes
+    def (payload: bytes) {
+        self.payload = payload
+    }
+}
+
+def reader(p: Packet) -> Callable[[], int] {
+    return lambda () -> int { return len(p.payload) }
+}
+
+def fill_tracked_set(rows: list[list[Packet]], payload: bytes) -> int {
+    row: list[Packet] = []
+    rows.append(row)
+    births: int = 0
+    while births < 1000000 {
+        try {
+            if len(row) == 256 {
+                row = []
+                rows.append(row)
+            }
+            row.append(Packet(payload))
+        } except MemoryError {
+            return births
+        }
+        births = births + 1
+    }
+    return -1
+}
+
+def packet_births_refused(payload: bytes, attempts: int) -> int {
+    refused: int = 0
+    i: int = 0
+    while i < attempts {
+        try {
+            p: Packet = Packet(payload)
+            print(len(p.payload))
+        } except MemoryError {
+            refused = refused + 1
+        }
+        i = i + 1
+    }
+    return refused
+}
+
+def list_births_refused(attempts: int) -> int {
+    refused: int = 0
+    i: int = 0
+    while i < attempts {
+        try {
+            packets: list[Packet] = []
+            words: list[str] = []
+            print(len(packets) + len(words))
+        } except MemoryError {
+            refused = refused + 1
+        }
+        i = i + 1
+    }
+    return refused
+}
+
+def set_births_refused(attempts: int) -> int {
+    refused: int = 0
+    i: int = 0
+    while i < attempts {
+        try {
+            seen: set[int] = set()
+            print(len(seen))
+        } except MemoryError {
+            refused = refused + 1
+        }
+        i = i + 1
+    }
+    return refused
+}
+
+def closure_births_refused(probe: Packet, attempts: int) -> int {
+    refused: int = 0
+    i: int = 0
+    while i < attempts {
+        try {
+            f: Callable[[], int] = reader(probe)
+            print(f())
+        } except MemoryError {
+            refused = refused + 1
+        }
+        i = i + 1
+    }
+    return refused
+}
+
+class TrackedBirthOomTests(TestCase) {
+    def test_every_tracked_birth_raises_once_the_tracked_set_is_full() {
+        payload: bytes = b"x" * 8
+        probe: Packet = Packet(payload)
+        rows: list[list[Packet]] = []
+        baseline: int = dragon_gc_tracked_count()
+        deferred_before_fill: int = dragon_gc_deferred_collections()
+
+        births: int = fill_tracked_set(rows, payload)
+        full: int = dragon_gc_tracked_count()
+        deferred_after_fill: int = dragon_gc_deferred_collections()
+
+        packets_refused: int = packet_births_refused(payload, 50)
+        after_packets: int = dragon_gc_tracked_count()
+        lists_refused: int = list_births_refused(50)
+        after_lists: int = dragon_gc_tracked_count()
+        sets_refused: int = set_births_refused(50)
+        after_sets: int = dragon_gc_tracked_count()
+        envs_refused: int = closure_births_refused(probe, 50)
+        after_envs: int = dragon_gc_tracked_count()
+
+        rows[0].pop()
+        one_free: int = dragon_gc_tracked_count()
+        closures_refused: int = closure_births_refused(probe, 50)
+        after_closures: int = dragon_gc_tracked_count()
+
+        rows.clear()
+        deferred_before_collect: int = dragon_gc_deferred_collections()
+        dragon_gc_collect()
+        deferred_after_collect: int = dragon_gc_deferred_collections()
+        drained: int = dragon_gc_tracked_count()
+
+        self.assertTrue(births > 0)
+        self.assertTrue(deferred_after_fill > deferred_before_fill)
+        self.assertEqual(packets_refused, 50)
+        self.assertEqual(after_packets, full)
+        self.assertEqual(lists_refused, 50)
+        self.assertEqual(after_lists, full)
+        self.assertEqual(sets_refused, 50)
+        self.assertEqual(after_sets, full)
+        self.assertEqual(envs_refused, 50)
+        self.assertEqual(after_envs, full)
+        self.assertEqual(one_free, full - 1)
+        self.assertEqual(closures_refused, 50)
+        self.assertEqual(after_closures, one_free)
+        self.assertEqual(deferred_after_collect, deferred_before_collect)
+        self.assertEqual(drained, baseline)
+        survivor: Packet = Packet(b"ok")
+        self.assertEqual(survivor.payload, b"ok")
+    }
+}
+
+main([TrackedBirthOomTests()])

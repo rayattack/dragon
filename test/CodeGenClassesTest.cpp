@@ -227,13 +227,13 @@ TEST(CodeGenIR, ClassClearZerosFields) {
 
 TEST(CodeGenIR, AcyclicClassNotTracked) {
     auto ir = generateIR(code("acyclic_class_not_tracked"));
-    EXPECT_EQ(ir.find("call void @dragon_gc_track"), std::string::npos)
+    EXPECT_EQ(ir.find("call void @dragon_instance_track"), std::string::npos)
         << "Acyclic class (int + str fields) must NOT be gc_tracked\nIR:\n" << ir;
 }
 
 TEST(CodeGenIR, CyclicCapableClassTracked) {
     auto ir = generateIR(code("cyclic_capable_class_tracked"));
-    EXPECT_NE(ir.find("call void @dragon_gc_track"), std::string::npos)
+    EXPECT_NE(ir.find("call void @dragon_instance_track"), std::string::npos)
         << "Cyclic-capable class (list field) must still be gc_tracked\nIR:\n" << ir;
 }
 

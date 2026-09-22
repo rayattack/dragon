@@ -169,6 +169,12 @@ if(NOT APPLE)
             COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_${_grow}_grow.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow && ( ulimit -v 32768 && ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow 2>&1 ; echo \"rc=$?\" ) | grep -q 'rc=134'")
         set_tests_properties(dr_oom_${_grow}_grow PROPERTIES TIMEOUT 90)
     endforeach()
+
+    if(DRAGON_ASAN)
+        add_test(NAME dr_oom_gc_track
+            COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_gc_track.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_gc_track && ASAN_OPTIONS=detect_leaks=1:allocator_may_return_null=1:max_allocation_size_mb=1:hard_rss_limit_mb=2048 exec ${CMAKE_CURRENT_BINARY_DIR}/oom_gc_track")
+        set_tests_properties(dr_oom_gc_track PROPERTIES TIMEOUT 90)
+    endif()
 endif()
 
 file(GLOB_RECURSE DRAGON_STDLIB_MODULES CONFIGURE_DEPENDS

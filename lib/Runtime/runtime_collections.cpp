@@ -704,7 +704,7 @@ static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
     s->elem_tag = elem_tag;
     s->buckets = buckets;
     s->states = states;
-    dragon_gc_track(s);
+    if (!dragon_gc_try_track(s)) { free(states); free(buckets); free(s); dragon_raise_oom(); }
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
         dragon_gc_collect();

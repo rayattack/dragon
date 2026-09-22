@@ -51,6 +51,32 @@ def hoard_cells_until_dead(cap_slots: int) -> int {
     return deaths
 }
 
+class Packet {
+    payload: bytes
+    def (payload: bytes) {
+        self.payload = payload
+    }
+}
+
+def hoard_packets_until_dead(cap_slots: int) -> int {
+    payload: bytes = b"x" * unit_len()
+    packets: list[Packet] = [Packet(payload)] * cap_slots
+    deaths: int = 0
+    i: int = 0
+    while i < cap_slots {
+        try {
+            packets[i] = Packet(payload)
+        } except MemoryError {
+            deaths = deaths + 1
+        }
+        if deaths >= 200 {
+            break
+        }
+        i = i + 1
+    }
+    return deaths
+}
+
 class SustainedOomTests(TestCase) {
     def test_memoryerror_stays_catchable_under_sustained_oom() {
         deaths: int = hoard_until_dead(6000000)
@@ -65,6 +91,13 @@ class SustainedOomTests(TestCase) {
         self.assertEqual(deaths, 200)
         survivor: Cell = Cell("ok")
         self.assertEqual(survivor.label, "ok")
+    }
+
+    def test_tracked_constructor_oom_stays_catchable() {
+        deaths: int = hoard_packets_until_dead(8000000)
+        self.assertEqual(deaths, 200)
+        survivor: Packet = Packet(b"ok")
+        self.assertEqual(survivor.payload, b"ok")
     }
 }
 
