@@ -672,6 +672,10 @@ void dragon_generator_frame_free(void* mem) {
     free(mem);
 }
 
+void* dragon_instance_alloc(int64_t size) {
+    return dragon_xcalloc_n(size, 1);
+}
+
 void dragon_generator_attach(void* gen_ptr, void* frame) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
     if (gen) gen->frame = frame;

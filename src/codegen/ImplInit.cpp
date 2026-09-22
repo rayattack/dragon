@@ -826,6 +826,9 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i64Type}, false));
     getOrDeclareRuntime("dragon_generator_frame_free",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
+    auto* instanceAlloc = getOrDeclareRuntime("dragon_instance_alloc",
+        llvm::FunctionType::get(i8PtrType, {i64Type}, false));
+    instanceAlloc->addRetAttr(llvm::Attribute::NoAlias);
     getOrDeclareRuntime("dragon_generator_finish",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_generator_set_raised",

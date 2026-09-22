@@ -1031,29 +1031,13 @@ void CodeGen::visit(ClassDecl& node) {
         auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", newFunc);
         impl_->builder->SetInsertPoint(entry);
 
-        auto* mallocFunc = impl_->module->getFunction("malloc");
-        if (!mallocFunc) {
-            auto* mallocType = llvm::FunctionType::get(impl_->i8PtrType, {impl_->i64Type}, false);
-            mallocFunc = llvm::Function::Create(
-                mallocType, llvm::Function::ExternalLinkage, "malloc", impl_->module.get());
-        }
-
         uint64_t structSize = (fields.size() + headerOffset) * 8;
         if (impl_->module->getDataLayout().getPointerSize() > 0) {
             structSize = impl_->module->getDataLayout().getTypeAllocSize(structType);
         }
         auto* sizeVal = llvm::ConstantInt::get(impl_->i64Type, structSize);
-        auto* self = impl_->builder->CreateCall(mallocFunc, {sizeVal}, "self");
-
-        auto* memsetFunc = impl_->module->getFunction("memset");
-        if (!memsetFunc) {
-            auto* memsetType = llvm::FunctionType::get(impl_->i8PtrType,
-                {impl_->i8PtrType, llvm::Type::getInt32Ty(*impl_->context), impl_->i64Type}, false);
-            memsetFunc = llvm::Function::Create(
-                memsetType, llvm::Function::ExternalLinkage, "memset", impl_->module.get());
-        }
-        impl_->builder->CreateCall(memsetFunc,
-            {self, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0), sizeVal});
+        auto* self = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_instance_alloc"], {sizeVal}, "self");
 
         if (impl_->options.gcMode == GCMode::RC) {
             auto* rcGEP = impl_->builder->CreateStructGEP(structType, self, 0, "rc_ptr");

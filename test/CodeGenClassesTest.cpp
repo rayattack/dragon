@@ -86,8 +86,10 @@ TEST(CodeGenTest, ClassDeclStructType) {
         << "Expected __init__ function declaration in IR";
     EXPECT_NE(ir.find("Counter_new"), std::string::npos)
         << "Expected _new constructor in IR";
-    EXPECT_NE(ir.find("@malloc"), std::string::npos)
-        << "Expected malloc call in constructor";
+    EXPECT_NE(ir.find("@dragon_instance_alloc"), std::string::npos)
+        << "Expected dragon_instance_alloc call in constructor";
+    EXPECT_EQ(ir.find("@malloc"), std::string::npos)
+        << "Expected no raw malloc in constructor";
 }
 
 TEST(CodeGenTest, ClassMethodDecl) {

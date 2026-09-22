@@ -25,6 +25,32 @@ def hoard_until_dead(cap_slots: int) -> int {
     return deaths
 }
 
+class Cell {
+    label: str
+    def (label: str) {
+        self.label = label
+    }
+}
+
+def hoard_cells_until_dead(cap_slots: int) -> int {
+    label: str = "x" * unit_len()
+    cells: list[Cell] = [Cell(label)] * cap_slots
+    deaths: int = 0
+    i: int = 0
+    while i < cap_slots {
+        try {
+            cells[i] = Cell(label)
+        } except MemoryError {
+            deaths = deaths + 1
+        }
+        if deaths >= 200 {
+            break
+        }
+        i = i + 1
+    }
+    return deaths
+}
+
 class SustainedOomTests(TestCase) {
     def test_memoryerror_stays_catchable_under_sustained_oom() {
         deaths: int = hoard_until_dead(6000000)
@@ -32,6 +58,13 @@ class SustainedOomTests(TestCase) {
         ys: list[str] = ["ok"] * 4
         self.assertEqual(len(ys), 4)
         self.assertEqual(ys[3], "ok")
+    }
+
+    def test_constructor_oom_stays_catchable() {
+        deaths: int = hoard_cells_until_dead(8000000)
+        self.assertEqual(deaths, 200)
+        survivor: Cell = Cell("ok")
+        self.assertEqual(survivor.label, "ok")
     }
 }
 
