@@ -1359,32 +1359,43 @@ struct CodeGen::Impl {
         return false;
     }
 
+    static bool isHeapElementArrival(Type::Kind k) {
+        switch (k) {
+            case Type::Kind::Str:
+            case Type::Kind::Bytes:
+            case Type::Kind::List:
+            case Type::Kind::Dict:
+            case Type::Kind::Set:
+            case Type::Kind::Tuple:
+            case Type::Kind::Instance:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool subscriptYieldsOwnedElement(SubscriptExpr* sub) {
+        if (dynamic_cast<SliceExpr*>(sub->index.get()) != nullptr) return true;
+        if (!sub->object || !sub->object->type) return false;
+        Type::Kind receiverKind = sub->object->type->kind();
+        if (receiverKind == Type::Kind::Str) return true;
+        if (!isHeapElementArrival(arrivalKind(sub))) return false;
+        if (receiverKind == Type::Kind::Instance) {
+            auto* inst = dynamic_cast<InstanceType*>(sub->object->type.get());
+            return inst && inst->classType && !inst->classType->isTypedDict;
+        }
+        if (receiverKind != Type::Kind::List &&
+            receiverKind != Type::Kind::Tuple &&
+            receiverKind != Type::Kind::Dict)
+            return false;
+        return !isBorrowedHeapExpr(sub->object.get());
+    }
+
     static bool isBorrowedHeapExpr(Expr* expr) {
         if (auto* cast = dynamic_cast<AsCastExpr*>(expr))
             return isBorrowedHeapExpr(cast->operand.get());
-        if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
-            if (dynamic_cast<SliceExpr*>(sub->index.get()) != nullptr)
-                return false;
-            if (sub->object && sub->object->type &&
-                sub->object->type->kind() == Type::Kind::Str)
-                return false;
-            if (sub->object && dynamic_cast<CallExpr*>(sub->object.get()) &&
-                sub->object->type &&
-                sub->object->type->kind() == Type::Kind::Dict && expr->type) {
-                switch (arrivalKind(expr)) {
-                    case Type::Kind::Str:
-                    case Type::Kind::Bytes:
-                    case Type::Kind::List:
-                    case Type::Kind::Dict:
-                    case Type::Kind::Set:
-                    case Type::Kind::Tuple:
-                    case Type::Kind::Instance:
-                        return false;
-                    default: break;
-                }
-            }
-            return true;
-        }
+        if (auto* sub = dynamic_cast<SubscriptExpr*>(expr))
+            return !subscriptYieldsOwnedElement(sub);
         // A walrus target adopts its value's +1 (store skips the incref), so it hands the
         // consumer a borrow, like reading the name. Classifying it owned let a call site drain `takes(x := ...)` while x still held the pointer (A/B-proven UAF, test_rc_walrus.dr).
         if (dynamic_cast<WalrusExpr*>(expr) != nullptr) return true;
@@ -1394,7 +1405,13 @@ struct CodeGen::Impl {
         }
         if (auto* at = dynamic_cast<AttributeExpr*>(expr)) {
             if (at->isPropertyAccess) return false;
-            return !dynamic_cast<CallExpr*>(at->object.get());
+            Expr* holder = at->object.get();
+            if (dynamic_cast<CallExpr*>(holder)) return false;
+            auto* heldElement = dynamic_cast<SubscriptExpr*>(holder);
+            if (!heldElement || !subscriptYieldsOwnedElement(heldElement)) return true;
+            auto* heldClass = dynamic_cast<InstanceType*>(holder->type.get());
+            return !(heldClass && heldClass->classType &&
+                     !heldClass->classType->isTypedDict);
         }
         return false;
     }
@@ -1530,6 +1547,7 @@ struct CodeGen::Impl {
             case Type::Kind::Str:
                 return isOwnedStrResult(v) ? VarKind::Str : VarKind::Other;
             case Type::Kind::Bytes:
+            case Type::Kind::ByteArray:
             case Type::Kind::List:
             case Type::Kind::Deque:
             case Type::Kind::Dict:
@@ -1568,6 +1586,19 @@ struct CodeGen::Impl {
         if (ck == DCLEAN_STR || ck == DCLEAN_CALLABLE || ck == DCLEAN_OBJ)
             bases.push_back(emitCleanupPushTemp(v, ck));
     }
+
+    llvm::Value* searchWindowBound(CodeGen& cg, CallExpr& node, size_t at,
+                                   int64_t absent);
+
+    llvm::Value* emitSearchCall(CodeGen& cg, CallExpr& node,
+                                const std::string& base, llvm::Value* obj,
+                                llvm::Value* needle);
+
+    llvm::Value* slotIntOr(CodeGen& cg, Expr* slot, int64_t absent);
+
+    llvm::Value* slotTextOr(CodeGen& cg, Expr* slot, llvm::Value* absent,
+                            std::vector<std::pair<llvm::Value*, VarKind>>& temps,
+                            std::vector<llvm::Value*>& bases);
 
     llvm::Value* trackBorrowTempGuarded(Expr* e, llvm::Value* v,
                                  std::vector<std::pair<llvm::Value*, VarKind>>& sink,

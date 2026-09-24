@@ -841,6 +841,12 @@ DragonBoxValue dragon_list_box_get(DragonListBox* list, int64_t index) {
     return v;
 }
 
+DragonBoxValue dragon_list_box_get_retained(DragonListBox* list, int64_t index) {
+    DragonBoxValue v = dragon_list_box_get(list, index);
+    dragon_incref_boxed(v.tag, v.payload);
+    return v;
+}
+
 void dragon_list_box_set(DragonListBox* list, int64_t index, int64_t tag, int64_t payload) {
     if (index < 0) index += list->size;
     if (index < 0 || index >= list->size) {

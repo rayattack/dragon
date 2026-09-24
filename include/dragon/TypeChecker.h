@@ -118,6 +118,7 @@ public:
     std::vector<std::string> paramNames;
     std::vector<bool> paramOwns;
     size_t requiredParams = 0;
+    size_t positionalOnlyParams = 0;
     bool hasVarArg = false;
     bool hasKwArg = false;
     bool spawnsFreshTask = false;

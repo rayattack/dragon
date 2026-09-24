@@ -2266,3 +2266,21 @@ TEST(TypeCheckerTest, ByteArraySliceStoreRules) {
     EXPECT_TRUE(checkHasErrors(code("bytearray_element_store_needs_int")));
     EXPECT_TRUE(checkOk(code("bytearray_slice_store_accepted")));
 }
+
+TEST(TypeCheckerTest, StrAndBytesMethodsRejectArgumentsTheyCannotUse) {
+    EXPECT_TRUE(checkHasErrors(code("str_upper_takes_no_argument")));
+    EXPECT_TRUE(checkHasErrors(code("str_strip_takes_one_character_set")));
+    EXPECT_TRUE(checkHasErrors(code("str_zfill_takes_one_width")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_upper_takes_no_argument")));
+    EXPECT_TRUE(checkHasErrors(code("str_find_takes_at_most_three_arguments")));
+    EXPECT_TRUE(checkHasErrors(code("str_find_takes_no_keyword_arguments")));
+    EXPECT_TRUE(checkHasErrors(code("str_startswith_takes_no_keyword_arguments")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_find_takes_no_keyword_arguments")));
+    EXPECT_TRUE(checkHasErrors(code("str_split_rejects_an_unknown_keyword")));
+    EXPECT_TRUE(checkHasErrors(code("str_splitlines_keepends_is_a_bool")));
+    EXPECT_TRUE(checkHasErrors(code("str_start_argument_is_an_int")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_end_argument_is_an_int")));
+    EXPECT_TRUE(checkHasErrors(code("str_replace_count_is_an_int")));
+    EXPECT_TRUE(checkHasErrors(code("bytes_strip_chars_is_bytes")));
+    EXPECT_TRUE(checkOk(code("str_search_window_accepted")));
+}

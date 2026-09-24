@@ -173,6 +173,18 @@ static inline int32_t dragon_cap_clamp(int64_t bytes) {
     return bytes > 0x7fffffff ? (int32_t)0x7fffffff : (int32_t)bytes;
 }
 
+#define DRAGON_WINDOW_END_DEFAULT INT64_MAX
+
+static inline void dragon_window_adjust(int64_t len, int64_t* start, int64_t* end) {
+    int64_t s = *start;
+    int64_t e = *end;
+    if (e > len) e = len;
+    else if (e < 0) e = (e < -len) ? 0 : e + len;
+    if (s < 0) s = (s < -len) ? 0 : s + len;
+    *start = s;
+    *end = e;
+}
+
 struct DragonList {
     DragonObjectHeader header;
     void*    data;

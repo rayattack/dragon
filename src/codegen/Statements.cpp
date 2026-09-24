@@ -444,9 +444,7 @@ void CodeGen::emitReturnBorrowIncref(Expr* value, llvm::Value* retVal) {
     }
     auto* subExpr = dynamic_cast<SubscriptExpr*>(retSrc);
     if (!subExpr) return;
-    if (dynamic_cast<SliceExpr*>(subExpr->index.get()) != nullptr) return;
-    if (subExpr->object && subExpr->object->type &&
-        subExpr->object->type->kind() == Type::Kind::Str) return;
+    if (Impl::subscriptYieldsOwnedElement(subExpr)) return;
     if (!value->type) return;
     increfIfHeap(Impl::typeKindToVarKind(value->type->kind()));
 }

@@ -2,6 +2,68 @@
 
 namespace dragon {
 
+static const int64_t kSearchWindowEndDefault =
+    std::numeric_limits<int64_t>::max();
+
+static std::vector<Expr*> methodArgSlots(CallExpr& node,
+                                         std::initializer_list<const char*> names) {
+    std::vector<Expr*> slots(names.size(), nullptr);
+    for (size_t i = 0; i < node.args.size() && i < slots.size(); ++i)
+        slots[i] = node.args[i].get();
+    for (auto& kw : node.kwArgs) {
+        size_t idx = 0;
+        for (const char* name : names) {
+            if (kw.second && !slots[idx] && kw.first == name)
+                slots[idx] = kw.second.get();
+            ++idx;
+        }
+    }
+    return slots;
+}
+
+llvm::Value* CodeGen::Impl::searchWindowBound(CodeGen& cg, CallExpr& node,
+                                              size_t at, int64_t absent) {
+    if (at >= node.args.size())
+        return llvm::ConstantInt::get(i64Type, absent);
+    node.args[at]->accept(cg);
+    return lastValue;
+}
+
+llvm::Value* CodeGen::Impl::emitSearchCall(CodeGen& cg, CallExpr& node,
+                                           const std::string& base,
+                                           llvm::Value* obj, llvm::Value* needle) {
+    std::vector<llvm::Value*> args{obj, needle};
+    std::vector<llvm::Type*> params{i8PtrType, i8PtrType};
+    std::string name = base;
+    if (node.args.size() > 1) {
+        args.push_back(searchWindowBound(cg, node, 1, 0));
+        args.push_back(searchWindowBound(cg, node, 2, kSearchWindowEndDefault));
+        params.push_back(i64Type);
+        params.push_back(i64Type);
+        name += "_se";
+    }
+    auto* fn = getOrDeclareRuntime(name,
+        llvm::FunctionType::get(i64Type, params, false));
+    return builder->CreateCall(fn, args, base);
+}
+
+llvm::Value* CodeGen::Impl::slotIntOr(CodeGen& cg, Expr* slot, int64_t absent) {
+    if (!slot) return llvm::ConstantInt::get(i64Type, absent);
+    slot->accept(cg);
+    llvm::Value* v = lastValue;
+    return v->getType()->isIntegerTy(64) ? v
+                                         : builder->CreateZExt(v, i64Type);
+}
+
+llvm::Value* CodeGen::Impl::slotTextOr(
+        CodeGen& cg, Expr* slot, llvm::Value* absent,
+        std::vector<std::pair<llvm::Value*, VarKind>>& temps,
+        std::vector<llvm::Value*>& bases) {
+    if (!slot) return absent;
+    slot->accept(cg);
+    return trackBorrowTempGuarded(slot, lastValue, temps, bases);
+}
+
 bool CodeGen::Impl::packVarArgMethodArgs(
         CodeGen& cg, CallExpr& node, const std::string& methodFuncName,
         llvm::FunctionType* methodFuncType,
@@ -961,9 +1023,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-            auto* fn = impl_->getOrDeclareRuntime("dragon_str_" + method,
-                llvm::FunctionType::get(impl_->i64Type, {impl_->i8PtrType, impl_->i8PtrType}, false));
-            llvm::Value* call = impl_->builder->CreateCall(fn, {obj, arg}, method);
+            llvm::Value* call = impl_->emitSearchCall(*this, node,
+                                               "dragon_str_" + method, obj, arg);
             impl_->lastValue = impl_->builder->CreateICmpNE(
                 call, llvm::ConstantInt::get(impl_->i64Type, 0), method + ".b");
             return true;
@@ -973,27 +1034,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args.size() >= 1 && node.args.size() <= 3) {
             node.args[0]->accept(*this);
             llvm::Value* sub = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-            if (node.args.size() == 1) {
-                auto* fn = impl_->getOrDeclareRuntime("dragon_str_" + method,
-                    llvm::FunctionType::get(impl_->i64Type,
-                        {impl_->i8PtrType, impl_->i8PtrType}, false));
-                impl_->lastValue = impl_->builder->CreateCall(fn, {obj, sub}, method);
-                return true;
-            }
-            node.args[1]->accept(*this);
-            llvm::Value* start = impl_->lastValue;
-            llvm::Value* end = nullptr;
-            if (node.args.size() == 3) {
-                node.args[2]->accept(*this);
-                end = impl_->lastValue;
-            } else {
-                end = llvm::ConstantInt::get(impl_->i64Type, -1);
-            }
-            auto* fn = impl_->getOrDeclareRuntime("dragon_str_" + method + "_se",
-                llvm::FunctionType::get(impl_->i64Type,
-                    {impl_->i8PtrType, impl_->i8PtrType, impl_->i64Type, impl_->i64Type},
-                    false));
-            impl_->lastValue = impl_->builder->CreateCall(fn, {obj, sub, start, end}, method);
+            impl_->lastValue = impl_->emitSearchCall(*this, node,
+                                              "dragon_str_" + method, obj, sub);
             return true;
         }
 
@@ -1001,9 +1043,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
             std::string rtName = (method == "index") ? "dragon_str_index_of" : "dragon_str_rindex";
-            auto* fn = impl_->getOrDeclareRuntime(rtName,
-                llvm::FunctionType::get(impl_->i64Type, {impl_->i8PtrType, impl_->i8PtrType}, false));
-            impl_->lastValue = impl_->builder->CreateCall(fn, {obj, arg}, method);
+            impl_->lastValue = impl_->emitSearchCall(*this, node, rtName, obj, arg);
             return true;
         }
 
@@ -1038,8 +1078,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         if (method == "expandtabs") {
-            llvm::Value* tabsize = llvm::ConstantInt::get(impl_->i64Type, 8);
-            if (node.args.size() >= 1) { node.args[0]->accept(*this); tabsize = impl_->lastValue; }
+            auto slots = methodArgSlots(node, {"tabsize"});
+            llvm::Value* tabsize = impl_->slotIntOr(*this, slots[0], 8);
             auto* fn = impl_->getOrDeclareRuntime("dragon_str_expandtabs",
                 llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType, impl_->i64Type}, false));
             impl_->lastValue = impl_->builder->CreateCall(fn, {obj, tabsize}, "expandtabs");
@@ -1067,11 +1107,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         if (method == "split" || method == "rsplit") {
-            llvm::Value* sep = llvm::ConstantPointerNull::get(
-                llvm::PointerType::getUnqual(*impl_->context));
-            if (node.args.size() >= 1) { node.args[0]->accept(*this); sep = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases); }
-            llvm::Value* maxsplit = llvm::ConstantInt::get(impl_->i64Type, -1);
-            if (node.args.size() >= 2) { node.args[1]->accept(*this); maxsplit = impl_->lastValue; }
+            auto slots = methodArgSlots(node, {"sep", "maxsplit"});
+            llvm::Value* sep = impl_->slotTextOr(*this, slots[0],
+                llvm::ConstantPointerNull::get(
+                    llvm::PointerType::getUnqual(*impl_->context)),
+                argTemps, argTempBases);
+            llvm::Value* maxsplit = impl_->slotIntOr(*this, slots[1], -1);
             const char* rt = (method == "split") ? "dragon_str_split_max" : "dragon_str_rsplit";
             auto* fn = impl_->getOrDeclareRuntime(rt,
                 llvm::FunctionType::get(impl_->i8PtrType,
@@ -1090,9 +1131,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         if (method == "splitlines") {
-            auto* fn = impl_->getOrDeclareRuntime("dragon_str_splitlines",
-                llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType}, false));
-            impl_->lastValue = impl_->builder->CreateCall(fn, {obj}, "splitlines");
+            auto slots = methodArgSlots(node, {"keepends"});
+            llvm::Value* keepends = impl_->slotIntOr(*this, slots[0], 0);
+            auto* fn = impl_->getOrDeclareRuntime("dragon_str_splitlines_ex",
+                llvm::FunctionType::get(impl_->i8PtrType,
+                    {impl_->i8PtrType, impl_->i64Type}, false));
+            impl_->lastValue = impl_->builder->CreateCall(fn, {obj, keepends}, "splitlines");
             return true;
         }
 
@@ -1106,10 +1150,11 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         if (method == "encode") {
-            llvm::Value* enc = impl_->builder->CreateGlobalString("utf-8");
-            llvm::Value* err = impl_->builder->CreateGlobalString("strict");
-            if (node.args.size() >= 1) { node.args[0]->accept(*this); enc = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases); }
-            if (node.args.size() >= 2) { node.args[1]->accept(*this); err = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, argTemps, argTempBases); }
+            auto slots = methodArgSlots(node, {"encoding", "errors"});
+            llvm::Value* enc = impl_->slotTextOr(*this, slots[0],
+                impl_->builder->CreateGlobalString("utf-8"), argTemps, argTempBases);
+            llvm::Value* err = impl_->slotTextOr(*this, slots[1],
+                impl_->builder->CreateGlobalString("strict"), argTemps, argTempBases);
             auto* fn = impl_->getOrDeclareRuntime("dragon_str_encode_ex",
                 llvm::FunctionType::get(impl_->i8PtrType,
                     {impl_->i8PtrType, impl_->i8PtrType, impl_->i8PtrType}, false));
@@ -1142,10 +1187,23 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         bool recvAdopted = false;
         bool bytesHandled = [&]() -> bool {
 
-        if (method == "upper" || method == "lower" || method == "strip" ||
-            method == "lstrip" || method == "rstrip") {
+        if (method == "upper" || method == "lower") {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_bytes_" + method], {obj}, method);
+            return true;
+        }
+
+        if (method == "strip" || method == "lstrip" || method == "rstrip") {
+            auto slots = methodArgSlots(node, {"chars"});
+            llvm::Value* chars = impl_->slotTextOr(*this, slots[0], nullptr,
+                                            argTemps, argTempBases);
+            auto* plain = impl_->runtimeFuncs["dragon_bytes_" + method];
+            auto* fn = impl_->getOrDeclareRuntime("dragon_bytes_" + method + "_chars",
+                llvm::FunctionType::get(impl_->i8PtrType,
+                    {impl_->i8PtrType, impl_->i8PtrType}, false));
+            impl_->lastValue = chars
+                ? impl_->builder->CreateCall(fn, {obj, chars}, method)
+                : impl_->builder->CreateCall(plain, {obj}, method);
             return true;
         }
 
@@ -1159,10 +1217,11 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         if (method == "decode") {
-            llvm::Value* enc = impl_->builder->CreateGlobalString("utf-8");
-            llvm::Value* err = impl_->builder->CreateGlobalString("strict");
-            if (node.args.size() >= 1) { node.args[0]->accept(*this); enc = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases); }
-            if (node.args.size() >= 2) { node.args[1]->accept(*this); err = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, argTemps, argTempBases); }
+            auto slots = methodArgSlots(node, {"encoding", "errors"});
+            llvm::Value* enc = impl_->slotTextOr(*this, slots[0],
+                impl_->builder->CreateGlobalString("utf-8"), argTemps, argTempBases);
+            llvm::Value* err = impl_->slotTextOr(*this, slots[1],
+                impl_->builder->CreateGlobalString("strict"), argTemps, argTempBases);
             recvAdopted = ownedBytesRecv;
             auto* fn = impl_->getOrDeclareRuntime(
                 recvAdopted ? "dragon_bytes_decode_owned_ex" : "dragon_bytes_decode_ex",
@@ -1173,8 +1232,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         if (method == "hex") {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_hex"], {obj}, "hex");
+            auto slots = methodArgSlots(node, {"sep"});
+            llvm::Value* sep = impl_->slotTextOr(*this, slots[0], nullptr,
+                                          argTemps, argTempBases);
+            auto* withSep = impl_->getOrDeclareRuntime("dragon_bytes_hex_sep",
+                llvm::FunctionType::get(impl_->i8PtrType,
+                    {impl_->i8PtrType, impl_->i8PtrType}, false));
+            impl_->lastValue = sep
+                ? impl_->builder->CreateCall(withSep, {obj, sep}, "hex")
+                : impl_->builder->CreateCall(
+                      impl_->runtimeFuncs["dragon_bytes_hex"], {obj}, "hex");
             return true;
         }
 
@@ -1182,8 +1249,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-            llvm::Value* call = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_" + method], {obj, arg}, method);
+            llvm::Value* call = impl_->emitSearchCall(*this, node,
+                                               "dragon_bytes_" + method, obj, arg);
             impl_->lastValue = impl_->builder->CreateICmpNE(
                 call, llvm::ConstantInt::get(impl_->i64Type, 0), method + ".b");
             return true;
@@ -1193,8 +1260,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_" + method], {obj, arg}, method);
+            impl_->lastValue = impl_->emitSearchCall(*this, node,
+                                              "dragon_bytes_" + method, obj, arg);
             return true;
         }
 
@@ -1202,8 +1269,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
             std::string rtName = (method == "index") ? "dragon_bytes_index_of" : "dragon_bytes_rindex";
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs[rtName], {obj, arg}, method);
+            impl_->lastValue = impl_->emitSearchCall(*this, node, rtName, obj, arg);
             return true;
         }
 
@@ -1212,17 +1278,31 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             llvm::Value* old_b = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
             node.args[1]->accept(*this);
             llvm::Value* new_b = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* count = impl_->slotIntOr(*this,
+                node.args.size() >= 3 ? node.args[2].get() : nullptr, -1);
+            auto* fn = impl_->getOrDeclareRuntime("dragon_bytes_replace_n",
+                llvm::FunctionType::get(impl_->i8PtrType,
+                    {impl_->i8PtrType, impl_->i8PtrType, impl_->i8PtrType, impl_->i64Type},
+                    false));
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_replace"], {obj, old_b, new_b}, "replace");
+                fn, {obj, old_b, new_b, count}, "replace");
             return true;
         }
 
-        if (method == "split") {
-            llvm::Value* sep = llvm::ConstantPointerNull::get(
-                llvm::PointerType::getUnqual(*impl_->context));
-            if (node.args.size() >= 1) { node.args[0]->accept(*this); sep = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases); }
+        if (method == "split" || method == "rsplit") {
+            auto slots = methodArgSlots(node, {"sep", "maxsplit"});
+            llvm::Value* sep = impl_->slotTextOr(*this, slots[0],
+                llvm::ConstantPointerNull::get(
+                    llvm::PointerType::getUnqual(*impl_->context)),
+                argTemps, argTempBases);
+            llvm::Value* maxsplit = impl_->slotIntOr(*this, slots[1], -1);
+            const char* rt = (method == "split") ? "dragon_bytes_split_max"
+                                                 : "dragon_bytes_rsplit";
+            auto* fn = impl_->getOrDeclareRuntime(rt,
+                llvm::FunctionType::get(impl_->i8PtrType,
+                    {impl_->i8PtrType, impl_->i8PtrType, impl_->i64Type}, false));
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_split"], {obj, sep}, "split");
+                fn, {obj, sep, maxsplit}, method);
             return true;
         }
 

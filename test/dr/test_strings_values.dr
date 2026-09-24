@@ -2786,10 +2786,249 @@ class NulAndShadowTests(TestCase) {
 }
 
 
+const WINDOW_LENGTHS: list[int] = [63, 64, 65, 129]
+const PREFIX_PROBE_ROUNDS: int = 3000
+const PREFIX_PROBE_SPAN: int = 97
+const REPLACEMENT_CHARACTER: int = 65533
+
+
+def _bytes_index_past_the_match() {
+    at: int = b"aaaabbbbcccc".index(b"bbbb", 5)
+}
+
+
+def _bytes_rindex_before_the_match() {
+    at: int = b"abcabc".rindex(b"c", 0, 2)
+}
+
+
+def _str_index_past_the_match() {
+    at: int = "aaaabbbbcccc".index("bbbb", 5)
+}
+
+
+def _str_rindex_before_the_match() {
+    at: int = "abcabc".rindex("c", 0, 2)
+}
+
+
+class SearchWindowTests(TestCase) {
+    """A start and an end argument name a window inside the receiver, and every
+    search method has to answer about that window only. They used to reach the
+    runtime entry point that takes no window at all, so the answer described the
+    whole receiver: page.startswith(needle, 4) said False about a prefix that is
+    there, and page.find(needle, 5) reported a hit before the start it was given.
+    The same table dropped the chars, count, maxsplit, separator and keepends
+    arguments of the neighbouring methods.
+
+    On a str the positions are code point positions, so the wide cases below run
+    at lengths that cross the offset-table stride."""
+
+    def test_a_bytes_window_bounds_every_search() {
+        const page: bytes = b"aaaabbbbcccc"
+        const needle: bytes = b"bbbb"
+        self.assertTrue(page.startswith(needle, 4))
+        self.assertFalse(page.startswith(needle, 3))
+        self.assertEqual(page.find(needle, 5), -1)
+        self.assertEqual(page.find(needle, 4), 4)
+        self.assertTrue(page.endswith(needle, 0, 8))
+        self.assertFalse(page.endswith(needle, 0, 9))
+        self.assertEqual(page.count(needle, 0, 4), 0)
+        self.assertEqual(page.count(needle, 0, 8), 1)
+        self.assertEqual(page.rfind(needle, 0, 7), -1)
+        self.assertEqual(page.rfind(needle, 0, 8), 4)
+        self.assertEqual(page.index(needle, 4), 4)
+        self.assertEqual(page.rindex(needle, 0, 8), 4)
+    }
+
+    def test_a_str_window_bounds_every_search() {
+        const page: str = "aaaabbbbcccc"
+        const needle: str = "bbbb"
+        self.assertTrue(page.startswith(needle, 4))
+        self.assertFalse(page.startswith(needle, 3))
+        self.assertEqual(page.find(needle, 5), -1)
+        self.assertEqual(page.find(needle, 4), 4)
+        self.assertTrue(page.endswith(needle, 0, 8))
+        self.assertFalse(page.endswith(needle, 0, 9))
+        self.assertTrue("abcabc".endswith("a", 0, 1))
+        self.assertEqual("abcabc".index("b", 2), 4)
+        self.assertEqual("abcabc".rindex("a", 0, 2), 0)
+        self.assertEqual(page.count("a", 0, 2), 2)
+        self.assertEqual(page.rfind(needle, 0, 7), -1)
+        self.assertEqual(page.index(needle, 4), 4)
+    }
+
+    def test_a_negative_start_or_end_counts_from_the_end() {
+        const page: bytes = b"aaaabbbbcccc"
+        const needle: bytes = b"bbbb"
+        self.assertTrue(page.startswith(needle, -8))
+        self.assertEqual(page.find(needle, -8), 4)
+        self.assertTrue(page.endswith(needle, -12, -4))
+        self.assertEqual(page.count(needle, -12, -4), 1)
+        const text: str = "abcabc"
+        self.assertEqual(text.find("a", -2), -1)
+        self.assertEqual(text.rfind("c", 0, -1), 2)
+        self.assertEqual(text.count("a", -3), 1)
+        self.assertEqual(text.count("a", 0, -3), 1)
+        self.assertTrue("aaaabbbbcccc".startswith("bbbb", -8))
+        self.assertEqual("aaaabbbbcccc".find("bbbb", -8), 4)
+        self.assertTrue("aaaabbbbcccc".endswith("bbbb", -12, -4))
+    }
+
+    def test_a_start_past_the_end_matches_nothing() {
+        const page: bytes = b"aaaabbbbcccc"
+        const needle: bytes = b"bbbb"
+        self.assertFalse(page.startswith(needle, 20))
+        self.assertEqual(page.find(needle, 20), -1)
+        self.assertEqual(page.count(needle, 20), 0)
+        self.assertFalse("aaaabbbbcccc".startswith("bbbb", 20))
+        self.assertEqual("aaaabbbbcccc".find("bbbb", 20), -1)
+        self.assertEqual("aaaabbbbcccc".count("a", 20), 0)
+    }
+
+    def test_an_end_before_the_start_matches_nothing() {
+        const page: bytes = b"aaaabbbbcccc"
+        const needle: bytes = b"bbbb"
+        self.assertEqual(page.find(needle, 6, 2), -1)
+        self.assertEqual(page.count(needle, 6, 2), 0)
+        self.assertFalse(page.startswith(needle, 6, 2))
+        self.assertEqual("aaaabbbbcccc".find("b", 6, 2), -1)
+        self.assertFalse("aaaabbbbcccc".startswith("b", 6, 2))
+    }
+
+    def test_an_empty_needle_lands_on_the_start() {
+        const page: bytes = b"aaaabbbbcccc"
+        self.assertEqual(page.find(b"", 3), 3)
+        self.assertEqual(page.find(b"", 20), -1)
+        self.assertEqual(page.rfind(b"", 0, 4), 4)
+        self.assertTrue(page.startswith(b"", 3))
+        self.assertFalse(page.startswith(b"", 20))
+        self.assertTrue(page.endswith(b"", 3))
+        const text: str = "aaaabbbbcccc"
+        self.assertEqual(text.find("", 3), 3)
+        self.assertEqual(text.find("", 20), -1)
+        self.assertEqual(text.rfind("", 0, 4), 4)
+        self.assertTrue(text.startswith("", 3))
+        self.assertFalse(text.startswith("", 20))
+        self.assertTrue(text.endswith("", 4))
+        self.assertEqual("".find("", 3), -1)
+        self.assertEqual("ab".find("", 5), -1)
+        self.assertEqual("ab".find("", 1), 1)
+    }
+
+    def test_a_wide_receiver_counts_positions_in_code_points() {
+        for n in WINDOW_LENGTHS {
+            const s: str = "é" * n + "xy"
+            self.assertEqual(s.find("y", n), n + 1)
+            self.assertTrue(s.startswith("xy", n))
+            self.assertTrue(s.endswith("é", 0, n))
+            self.assertEqual(s.rfind("é", 0, n), n - 1)
+            self.assertEqual(s.count("é", 1, n), n - 1)
+            self.assertEqual(s.index("x", n), n)
+            self.assertEqual(s.rindex("é", 0, n), n - 1)
+            self.assertEqual(s.find("y", -1), n + 1)
+            self.assertTrue(s.startswith("x", -2))
+            self.assertEqual(s.count("é", -n - 2, -2), n)
+            self.assertTrue(s.endswith("y", n))
+            self.assertEqual(s.find("é", n), -1)
+            self.assertEqual(s.rfind("x", 0, n), -1)
+        }
+        self.assertEqual("ééxx".find("x", 2), 2)
+        self.assertTrue("ééxx".startswith("x", 2))
+        self.assertEqual("中中中".rfind("中", 0, 2), 1)
+        self.assertEqual("中中中".count("中", 1), 2)
+        self.assertEqual("中中中".index("中", 1), 1)
+    }
+
+    def test_index_and_rindex_raise_outside_the_window() {
+        self.assertRaises(ValueError, _bytes_index_past_the_match)
+        self.assertRaises(ValueError, _bytes_rindex_before_the_match)
+        self.assertRaises(ValueError, _str_index_past_the_match)
+        self.assertRaises(ValueError, _str_rindex_before_the_match)
+    }
+
+    def test_bytes_strip_takes_a_character_set() {
+        self.assertEqual(b"xxhixx".strip(b"x"), b"hi")
+        self.assertEqual(b"xxhixx".lstrip(b"x"), b"hixx")
+        self.assertEqual(b"xxhixx".rstrip(b"x"), b"xxhi")
+        self.assertEqual(b"abcba".strip(b"ab"), b"c")
+        self.assertEqual(b"  hi  ".strip(), b"hi")
+    }
+
+    def test_bytes_replace_takes_a_count() {
+        self.assertEqual(b"aaa".replace(b"a", b"b", 1), b"baa")
+        self.assertEqual(b"aaa".replace(b"a", b"b", 0), b"aaa")
+        self.assertEqual(b"aaa".replace(b"a", b"b"), b"bbb")
+    }
+
+    def test_bytes_split_takes_a_maxsplit_and_rsplit_splits_from_the_right() {
+        const head: list[bytes] = b"a,b,c".split(b",", 1)
+        self.assertEqual(len(head), 2)
+        self.assertEqual(head[0], b"a")
+        self.assertEqual(head[1], b"b,c")
+        const tail: list[bytes] = b"a,b,c".rsplit(b",", 1)
+        self.assertEqual(len(tail), 2)
+        self.assertEqual(tail[0], b"a,b")
+        self.assertEqual(tail[1], b"c")
+        const whole: list[bytes] = b"a,b,c".rsplit(b",")
+        self.assertEqual(len(whole), 3)
+        const words: list[bytes] = b"a b c".rsplit()
+        self.assertEqual(len(words), 3)
+        self.assertEqual(words[2], b"c")
+    }
+
+    def test_bytes_hex_takes_a_separator() {
+        self.assertEqual(b"\x01\x02\x03".hex(":"), "01:02:03")
+        self.assertEqual(b"\x01\x02\x03".hex(), "010203")
+        self.assertEqual(bytes().hex(":"), "")
+        self.assertEqual(b"\xff".hex(":"), "ff")
+    }
+
+    def test_splitlines_keeps_the_line_ends() {
+        self.assertEqual("a\nb\n".splitlines(True), ["a\n", "b\n"])
+        self.assertEqual("a\nb\n".splitlines(False), ["a", "b"])
+        self.assertEqual("a\r\nb".splitlines(True), ["a\r\n", "b"])
+        self.assertEqual("a\nb\n".splitlines(), ["a", "b"])
+    }
+
+    def test_a_keyword_argument_reaches_the_runtime() {
+        self.assertEqual("a,b,c".split(",", maxsplit=1), ["a", "b,c"])
+        self.assertEqual("a b c".split(maxsplit=1), ["a", "b c"])
+        self.assertEqual("a,b,c".rsplit(",", maxsplit=1), ["a,b", "c"])
+        self.assertEqual("a\nb\n".splitlines(keepends=True), ["a\n", "b\n"])
+        self.assertEqual("a\tb".expandtabs(tabsize=2), "a b")
+        self.assertEqual("aé".encode("ascii", errors="replace"), b"a?")
+        self.assertEqual(b"a\xffb".decode("utf-8", errors="replace"),
+                         "a" + chr(REPLACEMENT_CHARACTER) + "b")
+        const commas: list[bytes] = b"a,b".split(sep=b",")
+        self.assertEqual(len(commas), 2)
+        self.assertEqual(b"\x01\x02".hex(sep=":"), "01:02")
+    }
+
+    def test_a_bounded_prefix_probe_allocates_nothing() {
+        const page: bytes = b"aaaabbbbcccc" * 8
+        const key: bytes = b"bbbb"
+        hits: int = 0
+        i: int = 0
+        while i < PREFIX_PROBE_ROUNDS {
+            const off: int = i % PREFIX_PROBE_SPAN
+            if page.startswith(key, off) {
+                hits = hits + 1
+            }
+            const at: int = page.find(key, off)
+            if at >= 0 {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertTrue(hits > 0)
+    }
+}
+
 main([StringEmptyOperandTests(), StringLiteralHeaderTests(), StrSubstringInTests(),
       IntToStrTests(), OrdTests(), PredicateTests(), ReprTests(), HashTests(),
       ConversionTests(), TypeBuiltinTests(), BytesIterationTests(),
       BytesElementAccessTests(), BytesEmptyAndSliceTests(), BytesDecodeTests(),
       BytesLiteralImmortalTests(), ByteArrayTests(),
       Move0EscapeProbe(), CharValueProbe(), EscapeSequenceTests(), IndexOracleTests(),
-      DecodeEncodeLayoutTests(), NulAndShadowTests()])
+      DecodeEncodeLayoutTests(), NulAndShadowTests(), SearchWindowTests()])

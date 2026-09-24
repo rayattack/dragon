@@ -797,6 +797,12 @@ void TypeChecker::visit(CallExpr& node) {
                 continue;
             }
             size_t idx = (size_t)std::distance(ft.paramNames.begin(), it);
+            if (idx < ft.positionalOnlyParams) {
+                error(node.location(),
+                      dispName + " takes no keyword arguments; pass '" +
+                      kw.first + "' by position");
+                err = true; continue;
+            }
             if (filled[idx]) {
                 error(node.location(),
                       dispName + " got multiple values for argument '" + kw.first + "'");
@@ -1535,6 +1541,19 @@ static bool builtinMembersAreClosed(const std::shared_ptr<Type>& t) {
     }
 }
 
+static std::shared_ptr<FunctionType> builtinSignature(
+    std::vector<std::string> names,
+    std::vector<std::shared_ptr<Type>> params,
+    size_t required, size_t positionalOnly,
+    std::shared_ptr<Type> ret) {
+    auto ft = std::make_shared<FunctionType>(std::move(params), std::move(ret));
+    ft->paramNames = std::move(names);
+    ft->requiredParams = required;
+    ft->positionalOnlyParams = positionalOnly;
+    ft->hasArgMeta = true;
+    return ft;
+}
+
 void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
     const Expr* savedMethodOk = impl_->methodRefOkExpr;
     if (node.attribute == "__doc__")
@@ -1766,103 +1785,152 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             return;
         }
         if (node.attribute == "upper" || node.attribute == "lower" ||
-            node.attribute == "strip" || node.attribute == "lstrip" ||
-            node.attribute == "rstrip" || node.attribute == "replace" ||
-            node.attribute == "join" ||
             node.attribute == "title" || node.attribute == "capitalize" ||
-            node.attribute == "swapcase" || node.attribute == "center" ||
-            node.attribute == "ljust" || node.attribute == "rjust" ||
-            node.attribute == "zfill" || node.attribute == "removeprefix" ||
-            node.attribute == "removesuffix" || node.attribute == "expandtabs" ||
-            node.attribute == "casefold") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->boxedType},
+            node.attribute == "swapcase" || node.attribute == "casefold") {
+            node.type = builtinSignature({}, {}, 0, 0, impl_->strType);
+            return;
+        }
+        if (node.attribute == "strip" || node.attribute == "lstrip" ||
+            node.attribute == "rstrip") {
+            node.type = builtinSignature({"chars"}, {impl_->strType}, 0, 1,
+                                         impl_->strType);
+            return;
+        }
+        if (node.attribute == "replace") {
+            node.type = builtinSignature({"old", "new", "count"},
+                {impl_->strType, impl_->strType, impl_->intType}, 2, 3,
                 impl_->strType);
+            return;
+        }
+        if (node.attribute == "join") {
+            node.type = builtinSignature({"iterable"},
+                {std::make_shared<ListType>(impl_->strType)}, 1, 1,
+                impl_->strType);
+            return;
+        }
+        if (node.attribute == "center" || node.attribute == "ljust" ||
+            node.attribute == "rjust") {
+            node.type = builtinSignature({"width", "fillchar"},
+                {impl_->intType, impl_->strType}, 1, 2, impl_->strType);
+            return;
+        }
+        if (node.attribute == "zfill") {
+            node.type = builtinSignature({"width"}, {impl_->intType}, 1, 1,
+                                         impl_->strType);
+            return;
+        }
+        if (node.attribute == "removeprefix" || node.attribute == "removesuffix") {
+            node.type = builtinSignature({"affix"}, {impl_->strType}, 1, 1,
+                                         impl_->strType);
+            return;
+        }
+        if (node.attribute == "expandtabs") {
+            node.type = builtinSignature({"tabsize"}, {impl_->intType}, 0, 0,
+                                         impl_->strType);
             return;
         }
         if (node.attribute == "find" || node.attribute == "index" ||
             node.attribute == "rfind" || node.attribute == "rindex" ||
             node.attribute == "count") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->strType},
+            node.type = builtinSignature({"sub", "start", "end"},
+                {impl_->strType, impl_->intType, impl_->intType}, 1, 3,
                 impl_->intType);
             return;
         }
-        if (node.attribute == "startswith" || node.attribute == "endswith" ||
-            node.attribute == "isdigit" || node.attribute == "isalpha" ||
+        if (node.attribute == "startswith" || node.attribute == "endswith") {
+            node.type = builtinSignature({"affix", "start", "end"},
+                {impl_->strType, impl_->intType, impl_->intType}, 1, 3,
+                impl_->boolType);
+            return;
+        }
+        if (node.attribute == "isdigit" || node.attribute == "isalpha" ||
             node.attribute == "isalnum" || node.attribute == "isspace" ||
             node.attribute == "isupper" || node.attribute == "islower" ||
             node.attribute == "istitle" || node.attribute == "isnumeric" ||
             node.attribute == "isdecimal" || node.attribute == "isascii" ||
             node.attribute == "isidentifier" || node.attribute == "isprintable") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->strType},
-                impl_->boolType);
+            node.type = builtinSignature({}, {}, 0, 0, impl_->boolType);
             return;
         }
         if (node.attribute == "partition" || node.attribute == "rpartition") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->strType},
+            node.type = builtinSignature({"sep"}, {impl_->strType}, 1, 1,
                 std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{
                     impl_->strType, impl_->strType, impl_->strType}));
             return;
         }
-        if (node.attribute == "split" || node.attribute == "rsplit" ||
-            node.attribute == "splitlines") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->strType},
+        if (node.attribute == "split" || node.attribute == "rsplit") {
+            node.type = builtinSignature({"sep", "maxsplit"},
+                {impl_->strType, impl_->intType}, 0, 0,
+                std::make_shared<ListType>(impl_->strType));
+            return;
+        }
+        if (node.attribute == "splitlines") {
+            node.type = builtinSignature({"keepends"}, {impl_->boolType}, 0, 0,
                 std::make_shared<ListType>(impl_->strType));
             return;
         }
         if (node.attribute == "encode") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->strType},
-                impl_->bytesType);
+            node.type = builtinSignature({"encoding", "errors"},
+                {impl_->strType, impl_->strType}, 0, 0, impl_->bytesType);
             return;
         }
     }
 
     if (objType->kind() == Type::Kind::Bytes) {
-        if (node.attribute == "decode" || node.attribute == "hex") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->strType},
-                impl_->strType);
+        if (node.attribute == "decode") {
+            node.type = builtinSignature({"encoding", "errors"},
+                {impl_->strType, impl_->strType}, 0, 0, impl_->strType);
             return;
         }
-        if (node.attribute == "upper" || node.attribute == "lower" ||
-            node.attribute == "strip" || node.attribute == "lstrip" ||
-            node.attribute == "rstrip" || node.attribute == "replace") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{},
+        if (node.attribute == "hex") {
+            node.type = builtinSignature({"sep"}, {impl_->strType}, 0, 0,
+                                         impl_->strType);
+            return;
+        }
+        if (node.attribute == "upper" || node.attribute == "lower") {
+            node.type = builtinSignature({}, {}, 0, 0, impl_->bytesType);
+            return;
+        }
+        if (node.attribute == "strip" || node.attribute == "lstrip" ||
+            node.attribute == "rstrip") {
+            node.type = builtinSignature({"chars"}, {impl_->bytesType}, 0, 1,
+                                         impl_->bytesType);
+            return;
+        }
+        if (node.attribute == "replace") {
+            node.type = builtinSignature({"old", "new", "count"},
+                {impl_->bytesType, impl_->bytesType, impl_->intType}, 2, 3,
                 impl_->bytesType);
             return;
         }
         if (node.attribute == "join") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{
-                    std::make_shared<ListType>(impl_->bytesType)},
+            node.type = builtinSignature({"iterable"},
+                {std::make_shared<ListType>(impl_->bytesType)}, 1, 1,
                 impl_->bytesType);
             return;
         }
         if (node.attribute == "split" || node.attribute == "rsplit") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->bytesType},
+            node.type = builtinSignature({"sep", "maxsplit"},
+                {impl_->bytesType, impl_->intType}, 0, 0,
                 std::make_shared<ListType>(impl_->bytesType));
             return;
         }
         if (node.attribute == "isdigit" || node.attribute == "isalpha" ||
-            node.attribute == "isalnum" || node.attribute == "isspace" ||
-            node.attribute == "startswith" || node.attribute == "endswith") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->bytesType},
+            node.attribute == "isalnum" || node.attribute == "isspace") {
+            node.type = builtinSignature({}, {}, 0, 0, impl_->boolType);
+            return;
+        }
+        if (node.attribute == "startswith" || node.attribute == "endswith") {
+            node.type = builtinSignature({"affix", "start", "end"},
+                {impl_->bytesType, impl_->intType, impl_->intType}, 1, 3,
                 impl_->boolType);
             return;
         }
         if (node.attribute == "find" || node.attribute == "rfind" ||
             node.attribute == "count" || node.attribute == "index" ||
             node.attribute == "rindex") {
-            node.type = std::make_shared<FunctionType>(
-                std::vector<std::shared_ptr<Type>>{impl_->bytesType},
+            node.type = builtinSignature({"sub", "start", "end"},
+                {impl_->bytesType, impl_->intType, impl_->intType}, 1, 3,
                 impl_->intType);
             return;
         }

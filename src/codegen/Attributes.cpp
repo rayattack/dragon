@@ -638,17 +638,30 @@ void CodeGen::visit(AttributeExpr& node) {
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 void CodeGen::visit(SubscriptExpr& node) {
+    const bool retainsElement = impl_->options.gcMode == GCMode::RC &&
+                                Impl::subscriptYieldsOwnedElement(&node);
+    auto retainElement = [&](llvm::Value* elem, bool isStr) -> llvm::Value* {
+        auto* retainFn = impl_->getOrDeclareRuntime(
+            isStr ? "dragon_str_retain" : "dragon_obj_retain",
+            llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType}, false));
+        return impl_->builder->CreateCall(
+            retainFn, {impl_->toI8Ptr(elem)}, "subscript.retain");
+    };
+
     std::string subClassName = impl_->resolveExprClassName(node.object.get());
     if (!subClassName.empty() && impl_->hasDunder(subClassName, "__getitem__")) {
         node.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
+        Impl::VarKind dunderRecvDrain =
+            impl_->ownedTempDrainKind(node.object.get(), obj);
         std::vector<llvm::Value*> dunderBases;
-        impl_->pushTempCleanupByKind(
-            obj, impl_->ownedTempDrainKind(node.object.get(), obj), dunderBases);
+        impl_->pushTempCleanupByKind(obj, dunderRecvDrain, dunderBases);
         node.index->accept(*this);
         llvm::Value* idx = impl_->lastValue;
         impl_->lastValue = impl_->callDunder(subClassName, "__getitem__", obj, {idx});
         impl_->popArgTempCleanups(dunderBases);
+        if (dunderRecvDrain != Impl::VarKind::Other)
+            impl_->emitDecrefByKind(obj, dunderRecvDrain);
         return;
     }
 
@@ -760,23 +773,17 @@ void CodeGen::visit(SubscriptExpr& node) {
                 impl_->emitDecrefByKind(dict, recvDrain);
         };
         auto retainElemThenReleaseRecv = [&](int64_t tag) {
-            if (recvDrain == Impl::VarKind::Other) return;
+            if (!retainsElement && recvDrain == Impl::VarKind::Other) return;
             llvm::Value* v = impl_->lastValue;
-            if (v && v->getType()->isPointerTy()) {
-                if (tag == 10) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_incref_callable"],
-                        {impl_->toI8Ptr(v)});
-                } else {
-                    auto* retainFn = impl_->getOrDeclareRuntime(
-                        tag == 1 ? "dragon_str_retain" : "dragon_obj_retain",
-                        llvm::FunctionType::get(impl_->i8PtrType,
-                                                {impl_->i8PtrType}, false));
-                    impl_->lastValue = impl_->builder->CreateCall(
-                        retainFn, {impl_->toI8Ptr(v)}, "dictget.retain");
-                }
-            }
-            impl_->emitDecrefByKind(dict, recvDrain);
+            const bool ptrElem = v && v->getType()->isPointerTy();
+            if (ptrElem && tag == TAG_CALLABLE)
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_incref_callable"],
+                    {impl_->toI8Ptr(v)});
+            else if (ptrElem)
+                impl_->lastValue = retainElement(v, tag == TAG_STR);
+            if (recvDrain != Impl::VarKind::Other)
+                impl_->emitDecrefByKind(dict, recvDrain);
         };
 
         int64_t checkTag = impl_->pendingDictCheckTag;
@@ -997,10 +1004,11 @@ void CodeGen::visit(SubscriptExpr& node) {
     if (isTuple) {
         node.object->accept(*this);
         llvm::Value* tuplePtr = impl_->lastValue;
+        const Impl::VarKind tupRecvDrain =
+            impl_->ownedTempDrainKind(node.object.get(), tuplePtr);
+        const bool releaseTuple = tupRecvDrain != Impl::VarKind::Other;
         std::vector<llvm::Value*> tupBases;
-        impl_->pushTempCleanupByKind(
-            tuplePtr, impl_->ownedTempDrainKind(node.object.get(), tuplePtr),
-            tupBases);
+        impl_->pushTempCleanupByKind(tuplePtr, tupRecvDrain, tupBases);
         node.index->accept(*this);
         llvm::Value* tupleIdx = impl_->lastValue;
         if (tupleIdx->getType() == impl_->i1Type) {
@@ -1009,9 +1017,12 @@ void CodeGen::visit(SubscriptExpr& node) {
         if (node.type && (node.type->kind() == Type::Kind::Boxed ||
                           node.type->kind() == Type::Kind::Union)) {
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_tuple_box_get"],
+                impl_->runtimeFuncs[releaseTuple || retainsElement
+                                        ? "dragon_tuple_box_get_retained"
+                                        : "dragon_tuple_box_get"],
                 {tuplePtr, tupleIdx}, "tupleget.box");
             impl_->popArgTempCleanups(tupBases);
+            if (releaseTuple) impl_->emitDecrefByKind(tuplePtr, tupRecvDrain);
             return;
         }
         llvm::Value* raw = impl_->builder->CreateCall(
@@ -1019,33 +1030,44 @@ void CodeGen::visit(SubscriptExpr& node) {
         impl_->popArgTempCleanups(tupBases);
         // Convert i64 storage back to its native LLVM type, else `const matched:
         // dict = result[1]` stores i64 into a ptr alloca and storeWithRCOverwrite's incref silently no-ops -> shared ref with the tuple, double-free on cleanup.
-        if (node.type) {
-            auto k = node.type->kind();
-            switch (k) {
-                case Type::Kind::Str:
-                case Type::Kind::Bytes:
-                case Type::Kind::List:
-                case Type::Kind::Dict:
-                case Type::Kind::Set:
-                case Type::Kind::Tuple:
-                case Type::Kind::Instance:
-                case Type::Kind::Ptr:
-                    impl_->lastValue = impl_->builder->CreateIntToPtr(
-                        raw, impl_->i8PtrType, "tupleget.ptr");
-                    return;
-                case Type::Kind::Float:
-                    impl_->lastValue = impl_->builder->CreateBitCast(
-                        raw, impl_->f64Type, "tupleget.f64");
-                    return;
-                case Type::Kind::Bool:
-                    impl_->lastValue = impl_->builder->CreateICmpNE(
-                        raw, llvm::ConstantInt::get(impl_->i64Type, 0), "tupleget.bool");
-                    return;
-                default:
-                    break;
+        const Type::Kind elemKind =
+            node.type ? node.type->kind() : Type::Kind::Unknown;
+        bool elementOutlivesTuple = true;
+        switch (elemKind) {
+            case Type::Kind::Str:
+            case Type::Kind::Bytes:
+            case Type::Kind::List:
+            case Type::Kind::Dict:
+            case Type::Kind::Set:
+            case Type::Kind::Tuple:
+            case Type::Kind::Instance:
+            case Type::Kind::Ptr: {
+                llvm::Value* elem = impl_->builder->CreateIntToPtr(
+                    raw, impl_->i8PtrType, "tupleget.ptr");
+                impl_->lastValue = retainsElement
+                    ? retainElement(elem, elemKind == Type::Kind::Str)
+                    : elem;
+                elementOutlivesTuple = retainsElement;
+                break;
             }
+            case Type::Kind::Float:
+                impl_->lastValue = impl_->builder->CreateBitCast(
+                    raw, impl_->f64Type, "tupleget.f64");
+                break;
+            case Type::Kind::Bool:
+                impl_->lastValue = impl_->builder->CreateICmpNE(
+                    raw, llvm::ConstantInt::get(impl_->i64Type, 0), "tupleget.bool");
+                break;
+            case Type::Kind::Int:
+                impl_->lastValue = raw;
+                break;
+            default:
+                impl_->lastValue = raw;
+                elementOutlivesTuple = false;
+                break;
         }
-        impl_->lastValue = raw;
+        if (releaseTuple && elementOutlivesTuple)
+            impl_->emitDecrefByKind(tuplePtr, tupRecvDrain);
         return;
     }
 
@@ -1083,6 +1105,8 @@ void CodeGen::visit(SubscriptExpr& node) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_bytearray_get"], {obj, idx}, "ba.get");
         impl_->popArgTempCleanups(subBases);
+        if (subRecvDrain != Impl::VarKind::Other)
+            impl_->emitDecrefByKind(obj, subRecvDrain);
         return;
     }
 
@@ -1145,10 +1169,14 @@ void CodeGen::visit(SubscriptExpr& node) {
             }
         }
         if (elemIsAny) {
+            const bool releaseList = subRecvDrain != Impl::VarKind::Other;
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_box_get"], {obj, idx},
-                "listget.box");
+                impl_->runtimeFuncs[releaseList || retainsElement
+                                        ? "dragon_list_box_get_retained"
+                                        : "dragon_list_box_get"],
+                {obj, idx}, "listget.box");
             impl_->popArgTempCleanups(subBases);
+            if (releaseList) impl_->emitDecrefByKind(obj, subRecvDrain);
             return;
         }
 
@@ -1256,8 +1284,11 @@ void CodeGen::visit(SubscriptExpr& node) {
         } else {
             impl_->lastValue = elemLoad;
         }
-        // An OWNED receiver temp (`make()[0]`) is released only for a PROVABLY
-        // SCALAR element read (audit 1.7) - a ptr element is borrowed FROM the receiver, so releasing here before the consumer takes its ref would be a use-after-free.
+        const bool elemRetained = retainsElement && isPtrElem;
+        if (elemRetained)
+            impl_->lastValue = retainElement(elemLoad, elemKind == Type::Kind::Str);
+        // An OWNED receiver temp (`make()[0]`) is released only after a PROVABLY SCALAR read or once a ptr
+        // element is retained (audit 1.7) - a ptr element is borrowed FROM the receiver, so releasing it before the element holds its own ref would be a use-after-free.
         bool elemProvablyScalar = false;
         if (node.object->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.object->type.get())) {
@@ -1269,8 +1300,9 @@ void CodeGen::visit(SubscriptExpr& node) {
                 }
             }
         }
-        if (!isPtrElem && elemProvablyScalar &&
-            subRecvDrain != Impl::VarKind::Other)
+        const bool elemIndependent =
+            elemRetained || (!isPtrElem && elemProvablyScalar);
+        if (elemIndependent && subRecvDrain != Impl::VarKind::Other)
             impl_->emitDecrefByKind(obj, subRecvDrain);
     } else if (isBytes) {
         impl_->lastValue = emitBytesIndexRead(*impl_, obj, idx,

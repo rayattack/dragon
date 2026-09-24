@@ -8,6 +8,8 @@ from collections import deque
 from os import getcwd
 from os.path import relpath
 
+extern "C" def dragon_gc_tracked_count() -> int
+
 
 def two() -> tuple[int, int] {
     return (11, 22)
@@ -637,6 +639,73 @@ def held_tuple_then_raising_element(n: int) -> tuple[int, bool] {
 }
 
 
+const SUB_ROUNDS: int = 300
+const SUB_MISSING: int = 9
+const SUB_Z: int = 122
+
+def sub_ints(n: int) -> list[int] {
+    return [n, n + 1, n + 2]
+}
+
+def sub_strs(n: int) -> list[str] {
+    return ["a" + str(n), "b" + str(n)]
+}
+
+def sub_grid(n: int) -> list[list[int]] {
+    return [[n, n], [n + 1]]
+}
+
+def sub_dogs(n: int) -> list[Dog] {
+    return [Dog("dog" + str(n))]
+}
+
+def sub_pair(n: int) -> tuple[int, str] {
+    return (n, "t" + str(n))
+}
+
+def sub_counts(n: int) -> dict[str, int] {
+    return {"k": n, "j": n + 1}
+}
+
+def sub_names(n: int) -> dict[str, str] {
+    return {"k": "name" + str(n)}
+}
+
+def sub_index(n: int) -> dict[int, list[int]] {
+    return {(n): [n, n]}
+}
+
+def sub_nested_names(n: int) -> dict[str, dict[str, str]] {
+    return {"a": {"b": "deep" + str(n)}}
+}
+
+def sub_bytes(n: int) -> bytes {
+    return ("z" + str(n)).encode()
+}
+
+class SubShelf {
+    items: list[str]
+    def(n: int) { self.items = ["s" + str(n), "t" + str(n)] }
+
+    def __getitem__(i: int) -> str {
+        return self.items[i]
+    }
+}
+
+class SubHolder {
+    names: list[str]
+    def(n: int) { self.names = ["h" + str(n)] }
+}
+
+def sub_first_name(n: int) -> str {
+    return sub_strs(n)[0]
+}
+
+def sub_first_named(n: int) -> str {
+    return sub_names(n)["k"]
+}
+
+
 class OwnedTempConsumersProbe(TestCase) {
     def test_chained_list_concat() {
         a: list[int] = [1, 2]
@@ -788,6 +857,190 @@ class OwnedTempConsumersProbe(TestCase) {
             i = i + 1
         }
         self.assertEqual(caught, 300)
+    }
+
+    def test_subscript_of_a_temporary_releases_it_for_every_receiver_kind() {
+        self.every_receiver_kind_round(0)
+        tracked: int = dragon_gc_tracked_count()
+        i: int = 1
+        while i < SUB_ROUNDS {
+            self.every_receiver_kind_round(i)
+            i = i + 1
+        }
+        self.assertEqual(dragon_gc_tracked_count(), tracked)
+    }
+
+    def every_receiver_kind_round(i: int) {
+        d: int = len(str(i))
+        self.assertEqual(sub_ints(i)[0], i)
+        self.assertEqual(len(sub_strs(i)[1]), d + 1)
+        self.assertEqual(sub_grid(i)[1][0], i + 1)
+        self.assertEqual(len(sub_grid(i)[0]), 2)
+        self.assertEqual(len(sub_dogs(i)[0].name), d + 3)
+        self.assertEqual(sub_pair(i)[0], i)
+        self.assertEqual(len(sub_pair(i)[1]), d + 1)
+        self.assertEqual(sub_counts(i)["j"], i + 1)
+        self.assertEqual(len(sub_names(i)["k"]), d + 4)
+        self.assertEqual(len(sub_index(i)[i]), 2)
+        self.assertEqual(len(sub_nested_names(i)["a"]["b"]), d + 4)
+        self.assertEqual(len("a,b,c".split(",")[2]), 1)
+        self.assertEqual(len("x/y".partition("/")[0]), 1)
+        self.assertEqual(len(("é" * 3).split("é")[1]), 0)
+        self.assertEqual(sub_bytes(i)[0], SUB_Z)
+        self.assertEqual(bytearray(SUB_MISSING + 1)[SUB_MISSING], 0)
+        self.assertEqual(len(SubShelf(i)[1]), d + 1)
+        self.assertEqual(len(SubHolder(i).names[0]), d + 1)
+        self.assertEqual(len({"k": "v" + str(i)}["k"]), d + 1)
+        self.assertEqual(len([str(i), "w"][0]), d)
+    }
+
+    def test_subscript_of_a_temporary_hands_out_an_element_that_outlives_it() {
+        kept: list[str] = []
+        shelf: SubShelf = SubShelf(SUB_ROUNDS)
+        self.outliving_element_round(0, kept, shelf)
+        tracked: int = dragon_gc_tracked_count()
+        i: int = 1
+        while i < SUB_ROUNDS {
+            self.outliving_element_round(i, kept, shelf)
+            i = i + 1
+        }
+        self.assertEqual(dragon_gc_tracked_count(), tracked)
+        self.assertEqual(len(kept), SUB_ROUNDS)
+        self.assertEqual(kept[SUB_ROUNDS - 1], "a" + str(SUB_ROUNDS - 1))
+    }
+
+    def outliving_element_round(i: int, kept: list[str], shelf: SubShelf) {
+        s: str = sub_strs(i)[1]
+        row: list[int] = sub_grid(i)[0]
+        dog: Dog = sub_dogs(i)[0]
+        dog_name: str = sub_dogs(i)[0].name
+        tail: str = sub_pair(i)[1]
+        name: str = sub_names(i)["k"]
+        deep: str = sub_nested_names(i)["a"]["b"]
+        shelved: str = SubShelf(i)[0]
+        named: str = shelf[1]
+        held: str = SubHolder(i).names[0]
+        kept.append(sub_strs(i)[0])
+        self.assertEqual(s, "b" + str(i))
+        self.assertEqual(row, [i, i])
+        self.assertEqual(dog.name, "dog" + str(i))
+        self.assertEqual(dog_name, "dog" + str(i))
+        self.assertEqual(tail, "t" + str(i))
+        self.assertEqual(name, "name" + str(i))
+        self.assertEqual(deep, "deep" + str(i))
+        self.assertEqual(shelved, "s" + str(i))
+        self.assertEqual(named, "t" + str(SUB_ROUNDS))
+        self.assertEqual(held, "h" + str(i))
+        self.assertEqual(sub_first_name(i), "a" + str(i))
+        self.assertEqual(sub_first_named(i), "name" + str(i))
+    }
+
+    def test_subscript_of_a_temporary_with_slices_and_negative_indices() {
+        self.slice_and_negative_round(0)
+        tracked: int = dragon_gc_tracked_count()
+        i: int = 1
+        while i < SUB_ROUNDS {
+            self.slice_and_negative_round(i)
+            i = i + 1
+        }
+        self.assertEqual(dragon_gc_tracked_count(), tracked)
+    }
+
+    def slice_and_negative_round(i: int) {
+        self.assertEqual(len(sub_ints(i)[1:]), 2)
+        self.assertEqual(sub_ints(i)[-1], i + 2)
+        self.assertEqual(sub_strs(i)[-1], "b" + str(i))
+        self.assertEqual(sub_grid(i)[0][1:], [i])
+        self.assertEqual(sub_strs(i)[0][1:], str(i))
+        self.assertEqual(sub_grid(i)[-1][-1], i + 1)
+    }
+
+    def test_subscript_of_a_temporary_inside_conditions_calls_and_methods() {
+        hits: int = self.condition_and_call_round(0)
+        tracked: int = dragon_gc_tracked_count()
+        i: int = 1
+        while i < SUB_ROUNDS {
+            hits = hits + self.condition_and_call_round(i)
+            i = i + 1
+        }
+        self.assertEqual(dragon_gc_tracked_count(), tracked)
+        self.assertEqual(hits, SUB_ROUNDS * 8)
+    }
+
+    def condition_and_call_round(i: int) -> int {
+        hits: int = 0
+        if sub_ints(i)[0] == i { hits = hits + 1 }
+        if sub_strs(i)[0] == "a" + str(i) { hits = hits + 1 }
+        if "b" in sub_strs(i)[1] { hits = hits + 1 }
+        if sub_names(i)["k"].upper() == "NAME" + str(i) { hits = hits + 1 }
+        if f"{sub_pair(i)[1]}" == "t" + str(i) { hits = hits + 1 }
+        if str(sub_grid(i)[1]) == "[" + str(i + 1) + "]" { hits = hits + 1 }
+        if sub_strs(i)[0] + sub_strs(i)[1] == "a" + str(i) + "b" + str(i) { hits = hits + 1 }
+        xs: list[int] = [sub_ints(i)[2], sub_ints(i)[0]]
+        if xs == [i + 2, i] { hits = hits + 1 }
+        return hits
+    }
+
+    def test_subscript_of_a_temporary_that_raises_releases_it() {
+        caught: int = self.raising_read_round(0)
+        tracked: int = dragon_gc_tracked_count()
+        i: int = 1
+        while i < SUB_ROUNDS {
+            caught = caught + self.raising_read_round(i)
+            i = i + 1
+        }
+        self.assertEqual(dragon_gc_tracked_count(), tracked)
+        self.assertEqual(caught, SUB_ROUNDS * 4)
+    }
+
+    def raising_read_round(i: int) -> int {
+        caught: int = 0
+        try {
+            n: int = sub_ints(i)[SUB_MISSING]
+        } except IndexError {
+            caught = caught + 1
+        }
+        try {
+            s: str = sub_strs(i)[SUB_MISSING]
+        } except IndexError {
+            caught = caught + 1
+        }
+        try {
+            c: int = sub_counts(i)["missing"]
+        } except KeyError {
+            caught = caught + 1
+        }
+        try {
+            nm: str = sub_names(i)["missing"]
+        } except KeyError {
+            caught = caught + 1
+        }
+        return caught
+    }
+
+    def test_subscript_of_a_temporary_holding_boxed_elements() {
+        seen: int = self.boxed_element_round(0)
+        tracked: int = dragon_gc_tracked_count()
+        i: int = 1
+        while i < SUB_ROUNDS {
+            seen = seen + self.boxed_element_round(i)
+            i = i + 1
+        }
+        self.assertEqual(dragon_gc_tracked_count(), tracked)
+        self.assertEqual(seen, SUB_ROUNDS * 3)
+    }
+
+    def boxed_element_round(i: int) -> int {
+        seen: int = 0
+        e: Boxed = mk_any_str_tuple(i)[0]
+        if isinstance(e, str) {
+            es: str = e
+            if es == "hydra" + str(i) { seen = seen + 1 }
+        }
+        row: Boxed = boxed_rows(2)[1]
+        if isinstance(row, dict) { seen = seen + 1 }
+        if str(boxed_rows(1)[0]) != "" { seen = seen + 1 }
+        return seen
     }
 }
 

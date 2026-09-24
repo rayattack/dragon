@@ -286,6 +286,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i64Type}, false));
     getOrDeclareRuntime("dragon_list_box_get",
         llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_list_box_get_retained",
+        llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_list_view_check",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_box_len",
@@ -461,6 +463,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_tuple_get",
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_tuple_box_get",
+        llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_tuple_box_get_retained",
         llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_tuple_set",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));

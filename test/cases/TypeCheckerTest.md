@@ -4344,3 +4344,132 @@ def main() -> None {
 
 main()
 ```
+
+#### :str_upper_takes_no_argument
+
+`str.upper()` takes nothing, so an extra positional cannot be silently dropped.
+
+```dr
+s: str = "hi"
+print(s.upper("zz"))
+```
+
+#### :str_strip_takes_one_character_set
+
+```dr
+s: str = "hi"
+print(s.strip("x", "y"))
+```
+
+#### :str_zfill_takes_one_width
+
+```dr
+s: str = "hi"
+print(s.zfill(3, 4))
+```
+
+#### :bytes_upper_takes_no_argument
+
+```dr
+b: bytes = b"hi"
+print(len(b.upper(b"zz")))
+```
+
+#### :str_find_takes_at_most_three_arguments
+
+`str.find()` is sub, start, end and nothing more.
+
+```dr
+s: str = "hello"
+print(s.find("l", 1, 4, 9))
+```
+
+#### :str_find_takes_no_keyword_arguments
+
+CPython rejects keywords on the search family, so a `start=` here is a typo the
+compiler has to name rather than drop.
+
+```dr
+s: str = "hello"
+print(s.find("l", start=2))
+```
+
+#### :str_startswith_takes_no_keyword_arguments
+
+```dr
+s: str = "hello"
+print(s.startswith("h", start=2))
+```
+
+#### :bytes_find_takes_no_keyword_arguments
+
+```dr
+b: bytes = b"hello"
+print(b.find(b"l", start=2))
+```
+
+#### :str_split_rejects_an_unknown_keyword
+
+```dr
+s: str = "a,b"
+print(len(s.split(",", maxsplits=1)))
+```
+
+#### :str_splitlines_keepends_is_a_bool
+
+`splitlines()` takes a bool keepends, not a string.
+
+```dr
+s: str = "a\nb"
+print(len(s.splitlines("x")))
+```
+
+#### :str_start_argument_is_an_int
+
+```dr
+s: str = "hello"
+print(s.find("l", "1"))
+```
+
+#### :bytes_end_argument_is_an_int
+
+```dr
+b: bytes = b"hello"
+print(b.startswith(b"h", 0, b"2"))
+```
+
+#### :str_replace_count_is_an_int
+
+```dr
+s: str = "aaa"
+print(s.replace("a", "b", "1"))
+```
+
+#### :bytes_strip_chars_is_bytes
+
+```dr
+b: bytes = b"xhix"
+print(len(b.strip("x")))
+```
+
+#### :str_search_window_accepted
+
+```dr
+s: str = "aaaabbbbcccc"
+b: bytes = b"aaaabbbbcccc"
+print(s.startswith("bbbb", 4))
+print(s.endswith("bbbb", 0, 8))
+print(s.index("bbbb", 4))
+print(s.rindex("bbbb", 0, 8))
+print(s.count("a", 0, 2))
+print(b.startswith(b"bbbb", 4))
+print(b.find(b"bbbb", 5))
+print(b.rfind(b"bbbb", 0, 8))
+print(b.count(b"bbbb", 0, 4))
+print(len(s.split(",", maxsplit=1)))
+print(len(s.splitlines(keepends=True)))
+print(len(b.rsplit(b",", 1)))
+print(b.hex(":"))
+print(len(b.replace(b"a", b"b", 1)))
+print(len(b.strip(b"a")))
+```

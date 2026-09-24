@@ -272,8 +272,7 @@ static int64_t dragon_str_find_impl(const char* haystack, const char* needle,
     DragonStrView h = dragon_str_view(haystack);
     DragonStrView n = dragon_str_view(needle);
     int64_t hlen = dragon_view_cps(&h);
-    if (start < 0) start = 0;
-    if (end < 0 || end > hlen) end = hlen;
+    dragon_window_adjust(hlen, &start, &end);
     if (start > end) return -1;
     int64_t nlen = dragon_view_cps(&n);
     if (nlen == 0) return reverse ? end : start;
@@ -293,7 +292,7 @@ static int64_t dragon_str_find_impl(const char* haystack, const char* needle,
 }
 
 int64_t dragon_str_find(const char* s, const char* sub) {
-    return dragon_str_find_impl(s, sub, 0, -1, 0);
+    return dragon_str_find_impl(s, sub, 0, DRAGON_WINDOW_END_DEFAULT, 0);
 }
 
 int64_t dragon_str_find_se(const char* s, const char* sub, int64_t start, int64_t end) {
@@ -301,27 +300,34 @@ int64_t dragon_str_find_se(const char* s, const char* sub, int64_t start, int64_
 }
 
 int64_t dragon_str_rfind(const char* s, const char* sub) {
-    return dragon_str_find_impl(s, sub, 0, -1, 1);
+    return dragon_str_find_impl(s, sub, 0, DRAGON_WINDOW_END_DEFAULT, 1);
 }
 
 int64_t dragon_str_rfind_se(const char* s, const char* sub, int64_t start, int64_t end) {
     return dragon_str_find_impl(s, sub, start, end, 1);
 }
 
-int64_t dragon_str_index_of(const char* s, const char* sub) {
-    int64_t r = dragon_str_find(s, sub);
-    if (r < 0) {
+static int64_t dragon_str_require_found(int64_t at) {
+    if (at < 0) {
         dragon_raise_exc_cstr(90, "ValueError: substring not found");
     }
-    return r;
+    return at;
+}
+
+int64_t dragon_str_index_of(const char* s, const char* sub) {
+    return dragon_str_require_found(dragon_str_find(s, sub));
+}
+
+int64_t dragon_str_index_of_se(const char* s, const char* sub, int64_t start, int64_t end) {
+    return dragon_str_require_found(dragon_str_find_impl(s, sub, start, end, 0));
 }
 
 int64_t dragon_str_rindex(const char* s, const char* sub) {
-    int64_t r = dragon_str_rfind(s, sub);
-    if (r < 0) {
-        dragon_raise_exc_cstr(90, "ValueError: substring not found");
-    }
-    return r;
+    return dragon_str_require_found(dragon_str_rfind(s, sub));
+}
+
+int64_t dragon_str_rindex_se(const char* s, const char* sub, int64_t start, int64_t end) {
+    return dragon_str_require_found(dragon_str_find_impl(s, sub, start, end, 1));
 }
 
 static int64_t dragon_str_count_impl(const char* s, const char* sub, int64_t start, int64_t end) {
@@ -330,8 +336,7 @@ static int64_t dragon_str_count_impl(const char* s, const char* sub, int64_t sta
     DragonStrView n = dragon_str_view(sub);
     if (n.nbytes == 0) return 0;
     int64_t hlen = dragon_view_cps(&h);
-    if (start < 0) start = 0;
-    if (end < 0 || end > hlen) end = hlen;
+    dragon_window_adjust(hlen, &start, &end);
     if (start > end) return 0;
     int64_t pos = dragon_str_cp_offset(h.s, h.ds, start);
     int64_t end_byte = dragon_str_cp_offset(h.s, h.ds, end);
@@ -346,7 +351,7 @@ static int64_t dragon_str_count_impl(const char* s, const char* sub, int64_t sta
 }
 
 int64_t dragon_str_count(const char* s, const char* sub) {
-    return dragon_str_count_impl(s, sub, 0, -1);
+    return dragon_str_count_impl(s, sub, 0, DRAGON_WINDOW_END_DEFAULT);
 }
 
 int64_t dragon_str_count_se(const char* s, const char* sub, int64_t start, int64_t end) {
@@ -493,23 +498,44 @@ const char* dragon_str_expandtabs(const char* s, int64_t tabsize) {
     return dragon_str_out_finish(&out);
 }
 
-int64_t dragon_str_startswith(const char* s, const char* prefix) {
-    if (!s || !prefix) return 0;
+static int64_t dragon_str_tailmatch(const char* s, const char* affix,
+                                    int64_t start, int64_t end, int from_end) {
+    if (!s || !affix) return 0;
     DragonStrView v = dragon_str_view(s);
-    DragonStrView p = dragon_str_view(prefix);
-    if (p.nbytes > v.nbytes) return 0;
-    return memcmp(v.s, p.s, (size_t)p.nbytes) == 0 &&
-           dragon_str_offset_is_boundary(v.s, v.ds, p.nbytes);
+    DragonStrView a = dragon_str_view(affix);
+    int64_t first = 0;
+    int64_t last = v.nbytes;
+    if (start != 0 || end != DRAGON_WINDOW_END_DEFAULT) {
+        int64_t hlen = dragon_view_cps(&v);
+        dragon_window_adjust(hlen, &start, &end);
+        if (start > end) return 0;
+        first = dragon_str_cp_offset(v.s, v.ds, start);
+        last = dragon_str_cp_offset(v.s, v.ds, end);
+    }
+    if (last - first < a.nbytes) return 0;
+    int64_t off = from_end ? last - a.nbytes : first;
+    if (a.nbytes == 0) return 1;
+    return memcmp(v.s + off, a.s, (size_t)a.nbytes) == 0 &&
+           dragon_str_offset_is_boundary(v.s, v.ds,
+                                         from_end ? off : off + a.nbytes);
+}
+
+int64_t dragon_str_startswith(const char* s, const char* prefix) {
+    return dragon_str_tailmatch(s, prefix, 0, DRAGON_WINDOW_END_DEFAULT, 0);
+}
+
+int64_t dragon_str_startswith_se(const char* s, const char* prefix,
+                                 int64_t start, int64_t end) {
+    return dragon_str_tailmatch(s, prefix, start, end, 0);
 }
 
 int64_t dragon_str_endswith(const char* s, const char* suffix) {
-    if (!s || !suffix) return 0;
-    DragonStrView v = dragon_str_view(s);
-    DragonStrView x = dragon_str_view(suffix);
-    if (x.nbytes > v.nbytes) return 0;
-    int64_t off = v.nbytes - x.nbytes;
-    return memcmp(v.s + off, x.s, (size_t)x.nbytes) == 0 &&
-           dragon_str_offset_is_boundary(v.s, v.ds, off);
+    return dragon_str_tailmatch(s, suffix, 0, DRAGON_WINDOW_END_DEFAULT, 1);
+}
+
+int64_t dragon_str_endswith_se(const char* s, const char* suffix,
+                               int64_t start, int64_t end) {
+    return dragon_str_tailmatch(s, suffix, start, end, 1);
 }
 
 int64_t dragon_str_contains(const char* s, const char* sub) {
@@ -803,7 +829,7 @@ const char* dragon_str_join(const char* sep, DragonList* l) {
     return r;
 }
 
-DragonList* dragon_str_splitlines(const char* s) {
+static DragonList* dragon_str_splitlines_impl(const char* s, int keepends) {
     DragonList* r = dragon_list_new_tagged(8, TAG_STR);
     if (!s) return r;
     DragonStrView v = dragon_str_view(s);
@@ -812,14 +838,24 @@ DragonList* dragon_str_splitlines(const char* s) {
     while (i < v.nbytes) {
         char c = v.s[i];
         if (c != '\n' && c != '\r') { i++; continue; }
-        dragon_list_append(r, (int64_t)dragon_str_from_range(&v, start, i));
+        int64_t bare = i;
         if (c == '\r' && i + 1 < v.nbytes && v.s[i + 1] == '\n') i++;
         i++;
+        dragon_list_append(r, (int64_t)dragon_str_from_range(&v, start,
+                                                            keepends ? i : bare));
         start = i;
     }
     if (start < v.nbytes)
         dragon_list_append(r, (int64_t)dragon_str_from_range(&v, start, v.nbytes));
     return r;
+}
+
+DragonList* dragon_str_splitlines(const char* s) {
+    return dragon_str_splitlines_impl(s, 0);
+}
+
+DragonList* dragon_str_splitlines_ex(const char* s, int64_t keepends) {
+    return dragon_str_splitlines_impl(s, keepends != 0);
 }
 
 static DragonTuple* dragon_partition_result(DragonStrView* v, DragonStrView* p,

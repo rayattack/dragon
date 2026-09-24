@@ -586,6 +586,12 @@ DragonBox dragon_tuple_box_get(DragonTuple* t, int64_t index) {
     return v;
 }
 
+DragonBox dragon_tuple_box_get_retained(DragonTuple* t, int64_t index) {
+    DragonBox v = dragon_tuple_box_get(t, index);
+    dragon_incref_boxed(v.tag, v.payload);
+    return v;
+}
+
 int64_t dragon_tuple_len(DragonTuple* t) {
     return t ? t->length : 0;
 }
@@ -1473,52 +1479,32 @@ DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
 }
 
 
-static int64_t bytes_find_impl(DragonBytes* haystack, DragonBytes* needle, bool reverse) {
+static int64_t bytes_find_window(DragonBytes* haystack, DragonBytes* needle,
+                                 int64_t start, int64_t end, bool reverse) {
     if (!haystack || !needle) return -1;
-    if (needle->len == 0) return reverse ? haystack->len : 0;
-    if (needle->len > haystack->len) return -1;
+    dragon_window_adjust(haystack->len, &start, &end);
+    if (start > end) return -1;
+    if (needle->len == 0) return reverse ? end : start;
+    if (end - start < needle->len) return -1;
     if (!reverse) {
-        for (int64_t i = 0; i <= haystack->len - needle->len; i++) {
+        for (int64_t i = start; i <= end - needle->len; i++) {
             if (memcmp(haystack->data + i, needle->data, needle->len) == 0) return i;
         }
     } else {
-        for (int64_t i = haystack->len - needle->len; i >= 0; i--) {
+        for (int64_t i = end - needle->len; i >= start; i--) {
             if (memcmp(haystack->data + i, needle->data, needle->len) == 0) return i;
         }
     }
     return -1;
 }
 
-int64_t dragon_bytes_find(DragonBytes* h, DragonBytes* n) { return bytes_find_impl(h, n, false); }
-int64_t dragon_bytes_rfind(DragonBytes* h, DragonBytes* n) { return bytes_find_impl(h, n, true); }
-
-int64_t dragon_bytes_find_from(DragonBytes* h, DragonBytes* n, int64_t start) {
-    if (!h || !n) return -1;
-    if (start < 0) start = 0;
-    if (n->len == 0) return start <= h->len ? start : -1;
-    for (int64_t i = start; i <= h->len - n->len; i++) {
-        if (memcmp(h->data + i, n->data, n->len) == 0) return i;
-    }
-    return -1;
-}
-
-int64_t dragon_bytes_index_of(DragonBytes* h, DragonBytes* n) {
-    int64_t r = bytes_find_impl(h, n, false);
-    if (r < 0) dragon_raise_exc_cstr(90, "ValueError: subsequence not found");
-    return r;
-}
-
-int64_t dragon_bytes_rindex(DragonBytes* h, DragonBytes* n) {
-    int64_t r = bytes_find_impl(h, n, true);
-    if (r < 0) dragon_raise_exc_cstr(90, "ValueError: subsequence not found");
-    return r;
-}
-
-int64_t dragon_bytes_count(DragonBytes* haystack, DragonBytes* needle) {
+static int64_t bytes_count_window(DragonBytes* haystack, DragonBytes* needle,
+                                  int64_t start, int64_t end) {
     if (!haystack || !needle || needle->len == 0) return 0;
-    if (needle->len > haystack->len) return 0;
+    dragon_window_adjust(haystack->len, &start, &end);
+    if (start > end || end - start < needle->len) return 0;
     int64_t count = 0;
-    for (int64_t i = 0; i <= haystack->len - needle->len; i++) {
+    for (int64_t i = start; i <= end - needle->len; i++) {
         if (memcmp(haystack->data + i, needle->data, needle->len) == 0) {
             count++;
             i += needle->len - 1;
@@ -1527,27 +1513,96 @@ int64_t dragon_bytes_count(DragonBytes* haystack, DragonBytes* needle) {
     return count;
 }
 
+static int64_t bytes_tailmatch(DragonBytes* b, DragonBytes* affix,
+                               int64_t start, int64_t end, bool from_end) {
+    if (!b || !affix) return 0;
+    dragon_window_adjust(b->len, &start, &end);
+    if (start > end || end - start < affix->len) return 0;
+    if (affix->len == 0) return 1;
+    int64_t off = from_end ? end - affix->len : start;
+    return memcmp(b->data + off, affix->data, affix->len) == 0 ? 1 : 0;
+}
+
+static int64_t bytes_require_found(int64_t at) {
+    if (at < 0) dragon_raise_exc_cstr(90, "ValueError: subsequence not found");
+    return at;
+}
+
+int64_t dragon_bytes_find(DragonBytes* h, DragonBytes* n) {
+    return bytes_find_window(h, n, 0, DRAGON_WINDOW_END_DEFAULT, false);
+}
+
+int64_t dragon_bytes_rfind(DragonBytes* h, DragonBytes* n) {
+    return bytes_find_window(h, n, 0, DRAGON_WINDOW_END_DEFAULT, true);
+}
+
+int64_t dragon_bytes_find_se(DragonBytes* h, DragonBytes* n, int64_t start, int64_t end) {
+    return bytes_find_window(h, n, start, end, false);
+}
+
+int64_t dragon_bytes_rfind_se(DragonBytes* h, DragonBytes* n, int64_t start, int64_t end) {
+    return bytes_find_window(h, n, start, end, true);
+}
+
+int64_t dragon_bytes_find_from(DragonBytes* h, DragonBytes* n, int64_t start) {
+    return bytes_find_window(h, n, start, DRAGON_WINDOW_END_DEFAULT, false);
+}
+
+int64_t dragon_bytes_index_of(DragonBytes* h, DragonBytes* n) {
+    return bytes_require_found(dragon_bytes_find(h, n));
+}
+
+int64_t dragon_bytes_index_of_se(DragonBytes* h, DragonBytes* n, int64_t start, int64_t end) {
+    return bytes_require_found(bytes_find_window(h, n, start, end, false));
+}
+
+int64_t dragon_bytes_rindex(DragonBytes* h, DragonBytes* n) {
+    return bytes_require_found(dragon_bytes_rfind(h, n));
+}
+
+int64_t dragon_bytes_rindex_se(DragonBytes* h, DragonBytes* n, int64_t start, int64_t end) {
+    return bytes_require_found(bytes_find_window(h, n, start, end, true));
+}
+
+int64_t dragon_bytes_count(DragonBytes* haystack, DragonBytes* needle) {
+    return bytes_count_window(haystack, needle, 0, DRAGON_WINDOW_END_DEFAULT);
+}
+
+int64_t dragon_bytes_count_se(DragonBytes* h, DragonBytes* n, int64_t start, int64_t end) {
+    return bytes_count_window(h, n, start, end);
+}
+
 int64_t dragon_bytes_startswith(DragonBytes* b, DragonBytes* prefix) {
-    if (!b || !prefix) return 0;
-    if (prefix->len > b->len) return 0;
-    return memcmp(b->data, prefix->data, prefix->len) == 0 ? 1 : 0;
+    return bytes_tailmatch(b, prefix, 0, DRAGON_WINDOW_END_DEFAULT, false);
+}
+
+int64_t dragon_bytes_startswith_se(DragonBytes* b, DragonBytes* prefix,
+                                   int64_t start, int64_t end) {
+    return bytes_tailmatch(b, prefix, start, end, false);
 }
 
 int64_t dragon_bytes_endswith(DragonBytes* b, DragonBytes* suffix) {
-    if (!b || !suffix) return 0;
-    if (suffix->len > b->len) return 0;
-    return memcmp(b->data + b->len - suffix->len, suffix->data, suffix->len) == 0 ? 1 : 0;
+    return bytes_tailmatch(b, suffix, 0, DRAGON_WINDOW_END_DEFAULT, true);
+}
+
+int64_t dragon_bytes_endswith_se(DragonBytes* b, DragonBytes* suffix,
+                                 int64_t start, int64_t end) {
+    return bytes_tailmatch(b, suffix, start, end, true);
 }
 
 
-DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonBytes* new_b) {
-    if (!b || !old_b || old_b->len == 0) {
+DragonBytes* dragon_bytes_replace_n(DragonBytes* b, DragonBytes* old_b,
+                                    DragonBytes* new_b, int64_t max_count) {
+    if (!b || !old_b || old_b->len == 0 || max_count == 0) {
         if (b) return dragon_bytes_new(b->data, b->len);
         return dragon_bytes_empty();
     }
     int64_t count = 0;
     for (int64_t i = 0; i <= b->len - old_b->len; i++) {
-        if (memcmp(b->data + i, old_b->data, old_b->len) == 0) { count++; i += old_b->len - 1; }
+        if (memcmp(b->data + i, old_b->data, old_b->len) != 0) continue;
+        count++;
+        i += old_b->len - 1;
+        if (max_count > 0 && count == max_count) break;
     }
     if (count == 0) return dragon_bytes_new(b->data, b->len);
     int64_t delta = new_b ? new_b->len - old_b->len : -old_b->len;
@@ -1557,15 +1612,22 @@ DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonByte
     DragonBytes* result = dragon_bytes_alloc(newLen);
     if (newLen <= 0) return result;
     int64_t w = 0;
+    int64_t done = 0;
     for (int64_t i = 0; i < b->len; ) {
-        if (i <= b->len - old_b->len && memcmp(b->data + i, old_b->data, old_b->len) == 0) {
+        if (done < count && i <= b->len - old_b->len &&
+            memcmp(b->data + i, old_b->data, old_b->len) == 0) {
             if (new_b && new_b->len > 0) { memcpy(result->data + w, new_b->data, new_b->len); w += new_b->len; }
             i += old_b->len;
+            done++;
         } else {
             result->data[w++] = b->data[i++];
         }
     }
     return result;
+}
+
+DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonBytes* new_b) {
+    return dragon_bytes_replace_n(b, old_b, new_b, -1);
 }
 
 DragonBytes* dragon_bytes_upper(DragonBytes* b) {
@@ -1590,56 +1652,131 @@ static bool is_ascii_whitespace(uint8_t c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
-DragonBytes* dragon_bytes_strip(DragonBytes* b) {
+static bool bytes_set_has(DragonBytes* set, uint8_t c) {
+    for (int64_t i = 0; i < set->len; i++)
+        if (set->data[i] == c) return true;
+    return false;
+}
+
+static bool bytes_is_trimmed(DragonBytes* set, uint8_t c) {
+    return set ? bytes_set_has(set, c) : is_ascii_whitespace(c);
+}
+
+static DragonBytes* bytes_strip_set(DragonBytes* b, DragonBytes* set,
+                                    bool from_left, bool from_right) {
     if (!b || b->len == 0) return dragon_bytes_empty();
     int64_t start = 0, end = b->len;
-    while (start < end && is_ascii_whitespace(b->data[start])) start++;
-    while (end > start && is_ascii_whitespace(b->data[end - 1])) end--;
+    while (from_left && start < end && bytes_is_trimmed(set, b->data[start])) start++;
+    while (from_right && end > start && bytes_is_trimmed(set, b->data[end - 1])) end--;
     return dragon_bytes_new(b->data + start, end - start);
 }
 
+DragonBytes* dragon_bytes_strip(DragonBytes* b) {
+    return bytes_strip_set(b, nullptr, true, true);
+}
+
 DragonBytes* dragon_bytes_lstrip(DragonBytes* b) {
-    if (!b || b->len == 0) return dragon_bytes_empty();
-    int64_t start = 0;
-    while (start < b->len && is_ascii_whitespace(b->data[start])) start++;
-    return dragon_bytes_new(b->data + start, b->len - start);
+    return bytes_strip_set(b, nullptr, true, false);
 }
 
 DragonBytes* dragon_bytes_rstrip(DragonBytes* b) {
-    if (!b || b->len == 0) return dragon_bytes_empty();
-    int64_t end = b->len;
-    while (end > 0 && is_ascii_whitespace(b->data[end - 1])) end--;
-    return dragon_bytes_new(b->data, end);
+    return bytes_strip_set(b, nullptr, false, true);
+}
+
+DragonBytes* dragon_bytes_strip_chars(DragonBytes* b, DragonBytes* set) {
+    return bytes_strip_set(b, set, true, true);
+}
+
+DragonBytes* dragon_bytes_lstrip_chars(DragonBytes* b, DragonBytes* set) {
+    return bytes_strip_set(b, set, true, false);
+}
+
+DragonBytes* dragon_bytes_rstrip_chars(DragonBytes* b, DragonBytes* set) {
+    return bytes_strip_set(b, set, false, true);
 }
 
 
-DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
+static void bytes_list_push(DragonList* into, const uint8_t* at, int64_t len) {
+    dragon_list_append(into, (int64_t)(intptr_t)dragon_bytes_new(at, len));
+}
+
+static DragonList* bytes_split_left(DragonBytes* b, DragonBytes* sep, int64_t maxsplit) {
     DragonList* result = dragon_list_new_tagged(8, TAG_BYTES);
     if (!b || b->len == 0) return result;
+    int64_t splits = 0;
     if (!sep || sep->len == 0) {
         int64_t i = 0;
         while (i < b->len) {
             while (i < b->len && is_ascii_whitespace(b->data[i])) i++;
             if (i >= b->len) break;
             int64_t start = i;
-            while (i < b->len && !is_ascii_whitespace(b->data[i])) i++;
-            auto* part = dragon_bytes_new(b->data + start, i - start);
-            dragon_list_append(result, (int64_t)(intptr_t)part);
-        }
-    } else {
-        int64_t start = 0;
-        for (int64_t i = 0; i <= b->len - sep->len; i++) {
-            if (memcmp(b->data + i, sep->data, sep->len) == 0) {
-                auto* part = dragon_bytes_new(b->data + start, i - start);
-                dragon_list_append(result, (int64_t)(intptr_t)part);
-                i += sep->len - 1;
-                start = i + 1;
+            if (maxsplit >= 0 && splits == maxsplit) {
+                bytes_list_push(result, b->data + start, b->len - start);
+                return result;
             }
+            while (i < b->len && !is_ascii_whitespace(b->data[i])) i++;
+            bytes_list_push(result, b->data + start, i - start);
+            splits++;
         }
-        auto* tail = dragon_bytes_new(b->data + start, b->len - start);
-        dragon_list_append(result, (int64_t)(intptr_t)tail);
+        return result;
     }
+    int64_t start = 0;
+    for (int64_t i = 0; i <= b->len - sep->len; i++) {
+        if (maxsplit >= 0 && splits == maxsplit) break;
+        if (memcmp(b->data + i, sep->data, sep->len) != 0) continue;
+        bytes_list_push(result, b->data + start, i - start);
+        splits++;
+        i += sep->len - 1;
+        start = i + 1;
+    }
+    bytes_list_push(result, b->data + start, b->len - start);
     return result;
+}
+
+static DragonList* bytes_split_right(DragonBytes* b, DragonBytes* sep, int64_t maxsplit) {
+    DragonList* result = dragon_list_new_tagged(8, TAG_BYTES);
+    if (!b || b->len == 0) return result;
+    int64_t splits = 0;
+    int64_t end = b->len;
+    if (!sep || sep->len == 0) {
+        while (end > 0) {
+            while (end > 0 && is_ascii_whitespace(b->data[end - 1])) end--;
+            if (end <= 0) break;
+            if (maxsplit >= 0 && splits == maxsplit) break;
+            int64_t stop = end;
+            while (end > 0 && !is_ascii_whitespace(b->data[end - 1])) end--;
+            bytes_list_push(result, b->data + end, stop - end);
+            splits++;
+        }
+        if (end > 0) bytes_list_push(result, b->data, end);
+        dragon_list_reverse(result);
+        return result;
+    }
+    while (maxsplit < 0 || splits < maxsplit) {
+        int64_t at = -1;
+        for (int64_t i = end - sep->len; i >= 0; i--) {
+            if (memcmp(b->data + i, sep->data, sep->len) == 0) { at = i; break; }
+        }
+        if (at < 0) break;
+        bytes_list_push(result, b->data + at + sep->len, end - at - sep->len);
+        splits++;
+        end = at;
+    }
+    bytes_list_push(result, b->data, end);
+    dragon_list_reverse(result);
+    return result;
+}
+
+DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
+    return bytes_split_left(b, sep, -1);
+}
+
+DragonList* dragon_bytes_split_max(DragonBytes* b, DragonBytes* sep, int64_t maxsplit) {
+    return bytes_split_left(b, sep, maxsplit);
+}
+
+DragonList* dragon_bytes_rsplit(DragonBytes* b, DragonBytes* sep, int64_t maxsplit) {
+    return bytes_split_right(b, sep, maxsplit);
 }
 
 DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
@@ -1705,6 +1842,28 @@ const char* dragon_bytes_hex(DragonBytes* b) {
     DragonString* ds = dragon_string_alloc_raw(b->len * 2);
     dragon_hex_encode(ds->data, b->data, b->len);
     dragon_string_raw_finish(ds, b->len * 2);
+    return ds->data;
+}
+
+const char* dragon_bytes_hex_sep(DragonBytes* b, const char* sep) {
+    int64_t seplen = sep ? (int64_t)strlen(sep) : 0;
+    if (seplen == 0) return dragon_bytes_hex(b);
+    if (seplen != 1 || (unsigned char)sep[0] > 0x7f) {
+        dragon_raise_exc_cstr(90, "ValueError: sep must be length 1.");
+    }
+    if (!b || b->len == 0) return dragon_string_alloc("", 0);
+    if (b->len > INT64_MAX / 3) {
+        dragon_raise_exc_cstr(43, "MemoryError: hex output too large");
+    }
+    int64_t outLen = b->len * 3 - 1;
+    DragonString* ds = dragon_string_alloc_raw(outLen);
+    char* w = ds->data;
+    for (int64_t i = 0; i < b->len; i++) {
+        if (i > 0) *w++ = sep[0];
+        dragon_hex_encode(w, b->data + i, 1);
+        w += 2;
+    }
+    dragon_string_raw_finish(ds, outLen);
     return ds->data;
 }
 
